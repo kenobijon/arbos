@@ -652,30 +652,71 @@ struct MessageReaction: Equatable, Hashable {
     /// style). Any other emoji comes from the emoji keyboard.
     static let palette: [String] = ["❤️", "👍🏽", "💪🏽", "👎🏻", "👌🏾", "🤝", "🔥", "💯"]
 
-    /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
-    static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {
-        var byEmoji: [String: [String]] = [:]
-        for r in list where !r.emoji.isEmpty && !r.senders.isEmpty {
-            byEmoji[r.emoji] = r.senders
+    /// Fitzpatrick skin-tone modifiers (U+1F3FB … U+1F3FF). Matches
+    /// `arbos_core::doc::normalize_reaction_emoji` so `👍🏽` and `👍🏿` are one reaction.
+    private static let skinToneScalars: ClosedRange<UInt32> = 0x1F3FB...0x1F3FF
+
+    /// Drop skin-tone modifiers; other marks (ZWJ, VS16) stay.
+    static func normalizeEmoji(_ emoji: String) -> String {
+        guard !emoji.isEmpty else { return emoji }
+        let stripped = String(emoji.unicodeScalars.filter { !skinToneScalars.contains($0.value) })
+        return stripped.isEmpty ? emoji : stripped
+    }
+
+    /// True when both strings are the same reaction after skin-tone stripping.
+    static func sameBase(_ a: String, _ b: String) -> Bool {
+        normalizeEmoji(a) == normalizeEmoji(b)
+    }
+
+    /// Prefer a palette glyph when its base matches; else the untoned base.
+    static func displayEmoji(forBase base: String) -> String {
+        if let match = palette.first(where: { normalizeEmoji($0) == base }) {
+            return match
         }
-        var people = byEmoji[emoji] ?? []
+        return base
+    }
+
+    /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
+    /// Skin-tone variants of the same base share one bucket.
+    static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {
+        let base = normalizeEmoji(emoji)
+        guard !base.isEmpty else { return list }
+        var byBase: [String: [String]] = [:]
+        for r in list where !r.emoji.isEmpty && !r.senders.isEmpty {
+            let key = normalizeEmoji(r.emoji)
+            guard !key.isEmpty else { continue }
+            byBase[key, default: []].append(contentsOf: r.senders)
+        }
+        byBase = byBase.mapValues { Array(Set($0)) }
+        var people = byBase[base] ?? []
         if let i = people.firstIndex(of: sender) {
             people.remove(at: i)
         } else {
             people.append(sender)
         }
         if people.isEmpty {
-            byEmoji.removeValue(forKey: emoji)
+            byBase.removeValue(forKey: base)
         } else {
-            byEmoji[emoji] = people
+            byBase[base] = people
         }
-        return MessageReaction.palette.compactMap { e in
-            guard let s = byEmoji[e], !s.isEmpty else { return nil }
-            return MessageReaction(emoji: e, senders: s)
-        } + byEmoji.keys.filter { !MessageReaction.palette.contains($0) }.sorted().compactMap { e in
-            guard let s = byEmoji[e], !s.isEmpty else { return nil }
-            return MessageReaction(emoji: e, senders: s)
+        return orderedReactions(byBase)
+    }
+
+    /// Palette order first (matched by base), then the rest by display glyph.
+    static func orderedReactions(_ byBase: [String: [String]]) -> [MessageReaction] {
+        var used = Set<String>()
+        var out: [MessageReaction] = []
+        for e in palette {
+            let base = normalizeEmoji(e)
+            guard let s = byBase[base], !s.isEmpty, !used.contains(base) else { continue }
+            used.insert(base)
+            out.append(MessageReaction(emoji: e, senders: s))
         }
+        let rest = byBase.keys.filter { !used.contains($0) }.sorted().compactMap { base -> MessageReaction? in
+            guard let s = byBase[base], !s.isEmpty else { return nil }
+            return MessageReaction(emoji: displayEmoji(forBase: base), senders: s)
+        }
+        return out + rest
     }
 }
 
@@ -1296,17 +1337,19 @@ enum DocJSON {
 
     /// `reactions` is flat `"emoji|sender" → true` (arbos-core) and/or legacy
     /// emoji → map of sender id → true. Unknown shapes are ignored.
+    /// Skin-tone variants of the same base merge into one chip.
     static func reactions(_ raw: Any?) -> [MessageReaction] {
         guard let map = raw as? [String: Any] else { return [] }
-        var byEmoji: [String: [String]] = [:]
+        var byBase: [String: [String]] = [:]
         for (key, v) in map {
             guard !key.isEmpty else { continue }
             if let people = v as? [String: Any] {
-                // Legacy nested bucket. Merge into any flat-key senders already
-                // collected for this emoji (core project_reactions does the same).
+                // Nested bucket (projected or legacy). Merge by base emoji.
+                let base = MessageReaction.normalizeEmoji(key)
+                guard !base.isEmpty else { continue }
                 for (sid, flag) in people {
                     guard !sid.isEmpty, bool(flag) else { continue }
-                    byEmoji[key, default: []].append(sid)
+                    byBase[base, default: []].append(sid)
                 }
                 continue
             }
@@ -1315,18 +1358,12 @@ enum DocJSON {
             let emoji = String(key[..<sep])
             let sid = String(key[key.index(after: sep)...])
             guard !emoji.isEmpty, !sid.isEmpty else { continue }
-            byEmoji[emoji, default: []].append(sid)
+            let base = MessageReaction.normalizeEmoji(emoji)
+            guard !base.isEmpty else { continue }
+            byBase[base, default: []].append(sid)
         }
-        byEmoji = byEmoji.mapValues { Array(Set($0)).sorted() }
-        let ordered = MessageReaction.palette.compactMap { e -> MessageReaction? in
-            guard let s = byEmoji[e] else { return nil }
-            return MessageReaction(emoji: e, senders: s)
-        }
-        let rest = byEmoji.keys.filter { !MessageReaction.palette.contains($0) }.sorted().compactMap { e -> MessageReaction? in
-            guard let s = byEmoji[e] else { return nil }
-            return MessageReaction(emoji: e, senders: s)
-        }
-        return ordered + rest
+        byBase = byBase.mapValues { Array(Set($0)).sorted() }
+        return MessageReaction.orderedReactions(byBase)
     }
 
     static func part(_ pm: [String: Any]) -> Part {
