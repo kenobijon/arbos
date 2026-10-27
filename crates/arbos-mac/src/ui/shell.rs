@@ -3,13 +3,15 @@
 //! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
 //! float centred over everything.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
+    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div,
+    Entity, FocusHandle, Focusable, FontWeight, Pixels, Render, ScrollHandle, SharedString,
+    Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -254,6 +256,11 @@ pub struct Shell {
     chat_search_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
+    /// Where the palette's panel was painted last frame; a mouse-down outside
+    /// it closes the palette without swallowing the click (`click_outside`).
+    pub(crate) palette_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Likewise the Search-in-chat bar.
+    pub(crate) chat_search_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The palette's result list scroll (keeps the highlight in view).
     palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
@@ -1068,6 +1075,8 @@ impl Shell {
                 .ok()
                 .filter(|q| !q.trim().is_empty()),
             palette,
+            palette_bounds: Rc::new(Cell::new(None)),
+            chat_search_bounds: Rc::new(Cell::new(None)),
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
@@ -2577,7 +2586,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(window, cx);
+        // A toggle ([feedback search-toggle-click-outside-mac-2026-10-27],
+        // Jacob 2026-10-27): ⌘⇧F on an open palette closes it, field focused or not.
+        if self.palette.open {
+            self.close_palette(window, cx);
+        } else {
+            self.open_palette(window, cx);
+        }
     }
 
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2619,7 +2634,34 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_chat_search(window, cx);
+        // A toggle ([feedback search-toggle-click-outside-mac-2026-10-27],
+        // Jacob 2026-10-27): ⌘F on an open bar closes it like ✕ / Esc, field
+        // focused or not.
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+        } else {
+            self.open_chat_search(window, cx);
+        }
+    }
+
+    /// Capture-phase mouse-down anywhere in the window: a click outside the
+    /// open Search-in-chat bar closes it, a click outside the open palette's
+    /// panel dismisses the palette — and the click goes on to whatever is
+    /// under it (a message, a sidebar row, a button answers in the same
+    /// click). Nothing here stops propagation.
+    fn click_outside(
+        &mut self,
+        at: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inside = |b: Option<Bounds<Pixels>>| b.is_some_and(|b| b.contains(&at));
+        if self.palette.open && !inside(self.palette_bounds.get()) {
+            self.close_palette(window, cx);
+        }
+        if self.state.read(cx).chat_search_open() && !inside(self.chat_search_bounds.get()) {
+            self.close_chat_search(window, cx);
+        }
     }
 
     pub(crate) fn open_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4756,6 +4798,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        this.click_outside(event.position, window, cx);
+                    }
+                },
+            ))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
