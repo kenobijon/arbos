@@ -303,6 +303,7 @@ struct HomeView: View {
                                              previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                                             unreadCount: model.unreadCount(project: project.id),
                                              pinned: pinned)
                                 }
                                 .buttonStyle(.borderless)
@@ -484,7 +485,8 @@ struct HomeView: View {
                                 Button { model.open(server: server) } label: {
                                     ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
                                               time: timeLabel(ms: model.serverActivity(server)),
-                                              unread: model.serverUnread(server))
+                                              unread: model.serverUnread(server),
+                                              unreadCount: model.serverUnreadCount(server))
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
@@ -672,11 +674,8 @@ struct HomeView: View {
             Button { showSettings = true } label: {
                 ZStack(alignment: .bottomTrailing) {
                     PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
-                    Circle()
-                        .fill(machineDotColor(model.machine.state, theme: theme))
-                        .frame(width: 11, height: 11)
-                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                        .offset(x: 2, y: 2)
+                    // The machine mark, never a coloured dot (Jacob, 2026-10-27).
+                    AvatarCornerMark(mark: machineMark(model.machine.state), avatarSize: Theme.control)
                 }
                 .frame(width: Theme.control, height: Theme.control)
             }
@@ -1196,6 +1195,8 @@ struct AgentRow: View {
     let time: String
     let streaming: Bool
     let unread: Bool
+    /// Missed messages across the agent's chats (≥ 1 whenever `unread`).
+    var unreadCount: Int = 0
     var pinned: Bool = false
 
     var body: some View {
@@ -1242,7 +1243,8 @@ struct AgentRow: View {
                     case .working:
                         WorkingSpinner()
                     case .unread:
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        // The count pill, never a dot (Jacob, 2026-10-27).
+                        UnreadMark(count: unreadCount)
                     case .quiet:
                         EmptyView()
                     }
@@ -1372,7 +1374,8 @@ struct PeopleRow: View {
                     } else if streaming {
                         WorkingSpinner()
                     } else if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        // The count pill ("1"), never a dot (Jacob, 2026-10-27).
+                        UnreadMark(count: 1)
                     }
                 }
             }

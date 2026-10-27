@@ -57,7 +57,8 @@ struct AgentAvatar: View {
     let project: Project
     let theme: Theme
     var size: CGFloat = Theme.avatar
-    var dot: Color? = nil
+    /// The machine mark at the corner (`machineMark`): spinner / fault / nothing. Never a dot.
+    var mark: StatusMark? = nil
     var working: Bool = false
     var still: Bool = false
     var idle: Bool = false
@@ -102,15 +103,8 @@ struct AgentAvatar: View {
                 InitialsAvatar(name: project.name, handle: mentionSlug(project.name), id: project.id,
                                override: project.effectiveAvatarColorIndex, size: size)
             }
-            if let dot {
-                // Grok's status badge is 12 pt on a 48 pt row avatar; smaller avatars scale.
-                let d = min(size * 0.36, 12)
-                Circle()
-                    .fill(dot)
-                    .frame(width: d, height: d)
-                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                    .offset(x: size * 0.08, y: size * 0.08)
-            }
+            // Grok's status badge spot (12 pt on a 48 pt avatar); the mark, never a coloured dot.
+            AvatarCornerMark(mark: mark, avatarSize: size)
         }
         .frame(width: size, height: size)
     }
@@ -154,11 +148,3 @@ struct AgentPicture<Placeholder: View>: View {
 }
 
 /// Small coloured dot for machine / workspace state.
-func machineDotColor(_ state: BoxState, theme: Theme) -> Color {
-    switch state {
-    case .awake: return theme.online
-    case .waking: return theme.warn
-    case .hibernatedLight, .hibernatedDeep, .stoppedByUser: return theme.muted.opacity(0.6)
-    case .error: return theme.danger
-    }
-}
