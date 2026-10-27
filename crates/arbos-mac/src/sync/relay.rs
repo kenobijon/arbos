@@ -52,15 +52,14 @@ use super::dto::{
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
 use super::{
-    ClientCommand, DraftPicture, ForwardedChart, PictureSource, PictureTarget, PushRefusal,
-    SyncEvent, SyncSource,
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
 };
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
-    ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
-    ServerInfo, ThreadInfo,
+    ChartBody, Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person,
+    Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun,
+    Sender, ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -183,7 +182,7 @@ struct QueuedSend {
 struct Forwarded {
     from: String,
     from_slot: String,
-    charts: Vec<ForwardedChart>,
+    charts: Vec<ChartBody>,
 }
 
 struct Shared {

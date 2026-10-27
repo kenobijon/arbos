@@ -33,8 +33,8 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
-    Link, LinkState, LocalView, Machine, Message, NewSecret, Part, Project, ProjectDocView,
+    Attachment, BoxReport, BoxState, ChannelsView, ChartBody, Chat, ConnectorsView, DeviceView,
+    Effort, Id, Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
     ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
@@ -533,17 +533,6 @@ pub enum PictureSource {
     Key(String),
 }
 
-/// A chart bubble on its way to another chat (`ClientCommand::ForwardMessage`):
-/// the `chart` part as the source message carries it, plus its fallback picture
-/// when the message has one (copied like any attachment and linked to the new
-/// chart part again, so a client that draws the chart still hides the picture).
-#[derive(Clone, Debug, PartialEq)]
-pub struct ForwardedChart {
-    /// Always a `Part::Chart`.
-    pub chart: Part,
-    pub fallback: Option<Attachment>,
-}
-
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
@@ -1004,7 +993,7 @@ pub enum ClientCommand {
         from_slot: Id,
         text: String,
         attachments: Vec<Attachment>,
-        charts: Vec<ForwardedChart>,
+        charts: Vec<ChartBody>,
         forwarded_from: String,
     },
     /// Settings → Connectors opened or asked for a refresh.

@@ -461,6 +461,17 @@ pub fn quote_text(message: &Message) -> String {
     message_line(message, QUOTE_CHARS)
 }
 
+/// Who sent an attachment row that is not mine, for the avatar column and the name
+/// (the same identity the message's bubble resolves).
+#[derive(Clone, Debug)]
+pub enum AttachmentSender {
+    /// Another person in a people chat.
+    Person(Person),
+    /// An agent in a people chat (or another Project): its `sender` seed, resolved
+    /// at render time like a bubble's lane.
+    Agent { seed: String },
+}
+
 #[derive(Clone, Debug)]
 pub enum RowKind {
     User {
@@ -562,14 +573,23 @@ pub enum RowKind {
         name: String,
     },
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
+    /// A picture is a message like any other ([feedback forward-attachments-mac-2026-10-27],
+    /// Jacob's Scout case): someone else's carries their disc on the avatar column and,
+    /// when the chat names its senders and the sender changed, their name above the card.
     Attachment {
         attachment: Attachment,
         /// The `parts[]` id: the viewer opens on this picture of the album.
         part_id: Id,
         mine: bool,
-        /// Someone else's (person or agent) in a people chat: keep the
-        /// sender's avatar lane free, like the message's bubble.
-        lane: bool,
+        /// Who sent it when it is not mine in a people chat: the disc beside the card
+        /// (the message's bubble has the same one). `None` = my own, or an agent's in
+        /// its own 1:1 chat (no avatar column there).
+        sender: Option<AttachmentSender>,
+        /// The sender's name above the card (first card of the message only; the
+        /// message's text bubble, if any, then carries no name).
+        named: bool,
+        /// The message's clock label, hover-only like a bubble's.
+        time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
         forwarded_from: Option<String>,
     },
@@ -1963,6 +1983,92 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The disc and (when `named`) the name label for someone else's attachment row —
+    /// a person's or an agent's, with the same colours and profile targets as their
+    /// bubble ([feedback forward-attachments-mac-2026-10-27]).
+    fn attachment_sender(
+        &self,
+        row_id: &str,
+        sender: &AttachmentSender,
+        named: bool,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> (AnyElement, Option<AnyElement>) {
+        match sender {
+            AttachmentSender::Person(person) => {
+                let state = self.state.read(cx);
+                let image = state.avatar(&person.avatar_url);
+                let color = state.sender_accent(person, theme);
+                let space_id = self.chat_id.as_ref().and_then(|c| {
+                    state.chats.iter().find_map(|(pid, tabs)| {
+                        tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                    })
+                });
+                let page = crate::app::ProfilePage::User {
+                    handle: person.handle.clone(),
+                    space_id,
+                };
+                let disc = profile_target::attach(
+                    div()
+                        .id(SharedString::from(format!("{row_id}#disc")))
+                        .debug_selector(|| format!("disc#{row_id}"))
+                        .flex_shrink_0()
+                        .child(people::avatar(image, person, SENDER_DISC, theme)),
+                    &self.state,
+                    page.clone(),
+                    &person.display_name(),
+                    cx,
+                )
+                .into_any_element();
+                let name = named.then(|| {
+                    profile_target::attach(
+                        self.sender_name_label(row_id, person.display_name(), color, false),
+                        &self.state,
+                        page,
+                        &person.display_name(),
+                        cx,
+                    )
+                    .into_any_element()
+                });
+                (disc, name)
+            }
+            AttachmentSender::Agent { seed } => {
+                let a = self.agent_identity_full(seed, "Agent", cx);
+                let color =
+                    avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme);
+                let disc = div()
+                    .id(SharedString::from(format!("{row_id}#disc")))
+                    .debug_selector(|| format!("disc#{row_id}"))
+                    .flex_shrink_0()
+                    .child(self.agent_disc(seed, cx))
+                    .when_some(a.project_id.clone(), |el, pid| {
+                        profile_target::attach(
+                            el,
+                            &self.state,
+                            crate::app::ProfilePage::Agent { project_id: pid },
+                            &a.name,
+                            cx,
+                        )
+                    })
+                    .into_any_element();
+                let name = named.then(|| {
+                    self.sender_name_label(row_id, a.name.clone(), color, true)
+                        .when_some(a.project_id.clone(), |el, pid| {
+                            profile_target::attach(
+                                el,
+                                &self.state,
+                                crate::app::ProfilePage::Agent { project_id: pid },
+                                &a.name,
+                                cx,
+                            )
+                        })
+                        .into_any_element()
+                });
+                (disc, name)
+            }
+        }
+    }
+
     /// The 24 pt disc for an agent's message in a people chat.
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
@@ -2683,7 +2789,9 @@ impl Transcript {
                 attachment,
                 part_id,
                 mine,
-                lane,
+                sender,
+                named,
+                time,
                 forwarded_from,
             } => {
                 let preview = match attachment.blob_ref.as_ref() {
@@ -2741,11 +2849,53 @@ impl Transcript {
                             row_el
                                 .justify_end()
                                 .items_center()
+                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
                                 .child(card),
                         )
                         .into_any_element()
+                } else if let Some(sender) = sender {
+                    // Someone else's picture / file in a people chat: their disc on the
+                    // avatar column and, on the message's first card when the run changes
+                    // sender, their name above it — the same identity, colour and profile
+                    // target as their bubble ([feedback forward-attachments-mac-2026-10-27]).
+                    let (disc, name_el) =
+                        self.attachment_sender(&row.id, &sender, named, &theme, cx);
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            row_el
+                                .justify_start()
+                                .items_end()
+                                .pl(px(AVATAR_COLUMN_INSET))
+                                .gap(px(SENDER_DISC_GAP))
+                                .child(disc)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(4.0))
+                                        .children(name_el.map(|n| div().pl(px(6.0)).child(n)))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .child(card)
+                                                .child(actions.ml(px(6.0)))
+                                                .children(
+                                                    hover_time(time, reveal, &theme)
+                                                        .map(|t| t.ml(px(8.0))),
+                                                ),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
                 } else {
+                    // An agent's attachment in its own 1:1 chat: no avatar column there.
                     div()
                         .w_full()
                         .py(px(4.0))
@@ -2756,9 +2906,9 @@ impl Transcript {
                             row_el
                                 .justify_start()
                                 .items_center()
-                                .when(lane, |el| el.pl(px(SENDER_LANE)))
                                 .child(card)
-                                .child(actions.ml(px(6.0))),
+                                .child(actions.ml(px(6.0)))
+                                .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0)))),
                         )
                         .into_any_element()
                 }
@@ -3642,6 +3792,10 @@ pub fn build_rows_hiding(
                         .blob_ref
                         .as_deref()
                         .is_some_and(|k| thumb_keys.contains(k));
+                    // Someone else's picture carries their disc like their bubble, and
+                    // their name on the first card when the run changes sender.
+                    let sender = from.clone().map(AttachmentSender::Person);
+                    let card_named = named && ix == 0;
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -3652,6 +3806,8 @@ pub fn build_rows_hiding(
                                 is_mine,
                                 has_thumb,
                                 &forwarded,
+                                from.as_ref().map(|p| &p.handle),
+                                card_named,
                             ),
                             false,
                         ),
@@ -3661,7 +3817,9 @@ pub fn build_rows_hiding(
                             attachment: attachment.clone(),
                             part_id: part_id.clone(),
                             mine: is_mine,
-                            lane: !is_mine,
+                            sender,
+                            named: card_named,
+                            time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
                         },
                     });
@@ -3707,7 +3865,8 @@ pub fn build_rows_hiding(
                             text,
                             sender_label,
                             from,
-                            named,
+                            // The first card already names the sender.
+                            named: named && attachment_parts.is_empty(),
                             time: clock_label(message.created_at),
                             delivery,
                             quote,
@@ -3886,6 +4045,10 @@ pub fn build_rows_hiding(
                 let bubble_texts = BubbleText::for_blocks(&bubble_blocks, false);
                 let mut block_ix = 0usize;
                 let mut had_prose = false;
+                // The sender's name goes on the message's first row — a picture that
+                // comes before the prose takes it, and the first text block then does
+                // not repeat it ([feedback forward-attachments-mac-2026-10-27]).
+                let mut name_taken = false;
                 // Error parts wait until the prose is known: under a real answer they stay
                 // the chip with Retry; on an answer with no words they become the words.
                 let mut errors: Vec<(String, String, String)> = Vec::new();
@@ -3917,7 +4080,8 @@ pub fn build_rows_hiding(
                                     bubble_texts.get(block_ix).cloned().unwrap_or_else(|| {
                                         BubbleText::single(block_plain(&block, false))
                                     });
-                                let named = sender_named && first;
+                                let named = sender_named && first && !name_taken;
+                                name_taken |= named;
                                 rows.push(Row {
                                     version: hash_version(
                                         &(&block, first, last, fill, &reply_quote, named),
@@ -3955,7 +4119,8 @@ pub fn build_rows_hiding(
                                 table: table.clone(),
                             };
                             let bubble = BubbleText::single(block_plain(&block, false));
-                            let named = sender_named && first;
+                            let named = sender_named && first && !name_taken;
+                            name_taken |= named;
                             rows.push(Row {
                                 version: hash_version(
                                     &(&block, first, last, fill, &reply_quote, named),
@@ -3990,6 +4155,11 @@ pub fn build_rows_hiding(
                                 .blob_ref
                                 .as_deref()
                                 .is_some_and(|k| thumb_keys.contains(k));
+                            // The agent's picture sits in its lane with its disc, and
+                            // names it when it is the message's first row (Scout's
+                            // photo in Arbonites drew as a bare picture before).
+                            let card_named = sender_named && !name_taken;
+                            name_taken |= card_named;
                             rows.push(Row {
                                 version: hash_version(
                                     &(
@@ -3998,6 +4168,8 @@ pub fn build_rows_hiding(
                                         attachment.bytes,
                                         &attachment.blob_ref,
                                         has_thumb,
+                                        &lane,
+                                        card_named,
                                     ),
                                     false,
                                 ),
@@ -4007,7 +4179,11 @@ pub fn build_rows_hiding(
                                     attachment: attachment.clone(),
                                     part_id: id.clone(),
                                     mine: false,
-                                    lane: lane.is_some(),
+                                    sender: lane
+                                        .clone()
+                                        .map(|seed| AttachmentSender::Agent { seed }),
+                                    named: card_named,
+                                    time: clock_label(message.created_at),
                                     forwarded_from: None,
                                 },
                             })

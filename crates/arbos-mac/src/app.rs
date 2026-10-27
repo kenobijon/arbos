@@ -24,16 +24,16 @@ use crate::model::{
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
     Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
-    ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger,
-    SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
+    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
+    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
 use crate::search_index::{self, SearchIndex};
 use crate::sign_in;
 use crate::sync::user_error::{ErrorClass, UserError};
-use crate::sync::{ClientCommand, ForwardedChart, PushRefusal, SyncEvent, SyncSource};
+use crate::sync::{ClientCommand, PushRefusal, SyncEvent, SyncSource};
 use crate::ui::error_note;
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
@@ -407,140 +407,55 @@ pub struct ForwardMessage {
     pub by: String,
 }
 
-/// What a bubble-menu Forward carries over
-/// ([feedback forward-attachments-mac-2026-10-27]): the text, every attachment
-/// part that is not a chart's fallback picture, and every chart with its
-/// fallback. `None` when the message has nothing a forward can carry (no words,
-/// no attachment on the relay, no chart).
-#[derive(Clone, Debug, PartialEq)]
-pub struct ForwardPayload {
-    pub text: String,
-    pub attachments: Vec<Attachment>,
-    pub charts: Vec<ForwardedChart>,
-}
-
-impl ForwardPayload {
-    /// The parts of `message` a forward sends on, in the message's order. A
-    /// blob still uploading (`local:` key) is left out — the caller says so.
-    pub fn of(message: &Message) -> Option<Self> {
-        let text = message.plain_text().trim().to_owned();
-        let chart_fallbacks: HashSet<&str> = message
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                Part::Chart {
-                    fallback: Some(f), ..
-                } => Some(f.as_str()),
-                _ => None,
-            })
-            .collect();
-        let on_relay = |a: &Attachment| {
-            a.blob_ref
-                .as_deref()
-                .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
-        };
-        let attachments: Vec<Attachment> = message
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                Part::Attachment { id, attachment }
-                    if !chart_fallbacks.contains(id.as_str()) && on_relay(attachment) =>
-                {
-                    Some(attachment.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        let charts: Vec<ForwardedChart> = message
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                Part::Chart { fallback, .. } => {
-                    let fallback = fallback.as_deref().and_then(|f| {
-                        message.parts.iter().find_map(|q| match q {
-                            Part::Attachment { id, attachment }
-                                if id == f && on_relay(attachment) =>
-                            {
-                                Some(attachment.clone())
-                            }
-                            _ => None,
-                        })
-                    });
-                    Some(ForwardedChart {
-                        chart: p.clone(),
-                        fallback,
-                    })
-                }
-                _ => None,
-            })
-            .collect();
-        (!text.is_empty() || !attachments.is_empty() || !charts.is_empty()).then_some(Self {
-            text,
-            attachments,
-            charts,
+/// The parts the optimistic row in the destination draws before the relay
+/// echoes the real one: the same blob keys (their thumbnails are cached), the
+/// chart parts with their fallback pictures, then the text
+/// ([feedback forward-attachments-mac-2026-10-27]).
+pub fn forward_optimistic_parts(body: &MessageBody) -> Vec<Part> {
+    let mut parts: Vec<Part> = body
+        .attachments
+        .iter()
+        .map(|a| Part::Attachment {
+            id: new_id(),
+            attachment: a.clone(),
         })
+        .collect();
+    for c in &body.charts {
+        let Part::Chart {
+            spec_version,
+            chart,
+            table,
+            ..
+        } = &c.chart
+        else {
+            continue;
+        };
+        let chart_id = new_id();
+        let fallback_id = c.fallback.as_ref().map(|a| {
+            let id = new_id();
+            let mut attachment = a.clone();
+            attachment.chart_part = Some(chart_id.clone());
+            parts.push(Part::Attachment {
+                id: id.clone(),
+                attachment,
+            });
+            id
+        });
+        parts.push(Part::Chart {
+            id: chart_id,
+            spec_version: *spec_version,
+            chart: chart.clone(),
+            table: table.clone(),
+            fallback: fallback_id,
+        });
     }
-
-    /// The parts the optimistic row in the destination draws before the relay
-    /// echoes the real one: the same blob keys (their thumbnails are cached), the
-    /// chart parts with their fallback pictures, then the text.
-    pub fn optimistic_parts(&self) -> Vec<Part> {
-        let mut parts: Vec<Part> = self
-            .attachments
-            .iter()
-            .map(|a| Part::Attachment {
-                id: new_id(),
-                attachment: a.clone(),
-            })
-            .collect();
-        for c in &self.charts {
-            let Part::Chart {
-                spec_version,
-                chart,
-                table,
-                ..
-            } = &c.chart
-            else {
-                continue;
-            };
-            let chart_id = new_id();
-            let fallback_id = c.fallback.as_ref().map(|a| {
-                let id = new_id();
-                let mut attachment = a.clone();
-                attachment.chart_part = Some(chart_id.clone());
-                parts.push(Part::Attachment {
-                    id: id.clone(),
-                    attachment,
-                });
-                id
-            });
-            parts.push(Part::Chart {
-                id: chart_id,
-                spec_version: *spec_version,
-                chart: chart.clone(),
-                table: table.clone(),
-                fallback: fallback_id,
-            });
-        }
-        if !self.text.is_empty() {
-            parts.push(Part::Text {
-                id: new_id(),
-                text: self.text.clone(),
-            });
-        }
-        parts
+    if !body.text.is_empty() {
+        parts.push(Part::Text {
+            id: new_id(),
+            text: body.text.clone(),
+        });
     }
-}
-
-/// Does `message` hold an attachment whose upload has not finished (a `local:` key)?
-pub fn has_uploading_attachment(message: &Message) -> bool {
-    message.parts.iter().any(|p| match p {
-        Part::Attachment { attachment, .. } => attachment
-            .blob_ref
-            .as_deref()
-            .is_some_and(|k| k.starts_with("local:")),
-        _ => false,
-    })
+    parts
 }
 
 /// The text line a forwarded attachment travels with (every client renders
@@ -7546,8 +7461,8 @@ impl AppState {
         };
         // Words, pictures, files, charts — any of them is enough; a picture still
         // uploading is not on the relay yet, so there is nothing to copy.
-        if ForwardPayload::of(message).is_none() {
-            self.push_notice(if has_uploading_attachment(message) {
+        if message.body().is_none() {
+            self.push_notice(if message.has_uploading_attachment() {
                 "Still uploading — try again in a moment"
             } else {
                 "Nothing to forward"
@@ -7585,14 +7500,14 @@ impl AppState {
             .messages
             .get(&source.chat_id)
             .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
-            .and_then(ForwardPayload::of)
+            .and_then(Message::body)
         else {
             cx.notify();
             return;
         };
         let from_slot = self.space_of_chat(&source.chat_id);
         let message_id = new_id();
-        let parts = payload.optimistic_parts();
+        let parts = forward_optimistic_parts(&payload);
         self.messages
             .entry(target.chat_id.clone())
             .or_default()
