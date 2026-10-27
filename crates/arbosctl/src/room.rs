@@ -390,9 +390,14 @@ async fn run(
                     "[room {} head={} cursor={} box={}]",
                     s.room, st.head_seq, s.cursor, box_state
                 );
+                // Request own rows too (`excludeOwn:false`), like arbos-client and agentd. A
+                // replay that omits this device's own rows leaves every row that causally
+                // depends on them (e.g. the box's reply to a message this device sent) parked
+                // by Loro as pending, so the rebuilt doc is truncated at the last row before
+                // this device's first omitted message. Loro drops the duplicates. (#2069)
                 let req = Frame::new(
                     FrameType::RowsReq,
-                    json!({ "after": after, "excludeOwn": true }),
+                    json!({ "after": after, "excludeOwn": false }),
                     Bytes::new(),
                 );
                 sink.send(Message::Binary(req.encode())).await?;
