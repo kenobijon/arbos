@@ -2103,7 +2103,8 @@ impl ChartModel {
 // ------------------------------------------------------------------ table export
 
 impl Chart {
-    fn table_cells(&self) -> (Vec<String>, Vec<Vec<String>>) {
+    /// The table as cells: the header row, then one row per x / category (the Data view).
+    pub fn table_cells(&self) -> (Vec<String>, Vec<Vec<String>>) {
         let model = self.model();
         let x_head = if self.kind.is_xy() {
             self.x.label.clone().unwrap_or_else(|| {

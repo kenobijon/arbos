@@ -6,6 +6,7 @@ pub mod approval;
 pub mod auth;
 pub mod avatar;
 pub mod chart;
+pub mod chart_render;
 pub mod doc;
 pub mod highlight;
 pub mod ids;
