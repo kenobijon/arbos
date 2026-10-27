@@ -57,6 +57,7 @@ mod secrets;
 mod settings_audit;
 mod shell_grants;
 mod signin;
+mod site_icons;
 mod sites;
 mod skills;
 mod smoke;
@@ -835,6 +836,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
+        .route("/unfurl/icon", get(site_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
