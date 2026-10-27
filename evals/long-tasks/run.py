@@ -406,6 +406,13 @@ class Lane(threading.Thread):
                 if want and want not in repliers:
                     g["ok"] = False
                     g["reasons"].append(f"no reply from {want} (repliers: {repliers})")
+                also = (turn.get("also_reply_from") or "").lower()
+                if also and also not in repliers:
+                    g["ok"] = False
+                    g["reasons"].append(f"no reply from {also} (repliers: {repliers})")
+                if turn.get("max_repliers") is not None and len(repliers) > turn["max_repliers"]:
+                    g["ok"] = False
+                    g["reasons"].append(f"{len(repliers)} agents answered ({repliers}); at most {turn['max_repliers']} should")
                 for h in turn.get("silent_agents", []):
                     if h.lower() in repliers:
                         g["ok"] = False
