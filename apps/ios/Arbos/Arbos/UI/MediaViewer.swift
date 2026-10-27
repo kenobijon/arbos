@@ -1046,7 +1046,7 @@ extension AppModel {
                     do {
                         fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
                     } catch {
-                        notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                        fail("forward the chart's picture", error)
                     }
                 }
                 extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
