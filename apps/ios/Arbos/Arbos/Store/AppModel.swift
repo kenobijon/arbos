@@ -763,6 +763,9 @@ final class AppModel: ObservableObject {
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     @Published private(set) var pushRefused: Set<Id> = []
+    /// The relay's reason for each refused room, in plain words ([feedback blocked-state-ios-2026-10-26]);
+    /// the chat-level note under the header draws it. Cleared with the room's next ACK.
+    @Published private(set) var pushRefusalText: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2194,7 +2197,9 @@ final class AppModel: ObservableObject {
             // Project-doc writes are not user bubbles; clearing a global set here
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
-            self.pushRefused.remove(key)
+            if self.pushRefused.remove(key) != nil {
+                self.pushRefusalText.removeValue(forKey: key)
+            }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
             #if DEBUG
@@ -2213,10 +2218,19 @@ final class AppModel: ObservableObject {
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
         }
-        room.onPushRefused = { [weak self] in
+        room.onPushRefused = { [weak self, weak room] in
             guard let self, !isProjectDoc else { return }
-            // The chat-level note under the header draws it (`ChatView.deliveryNote`).
-            _ = self.pushRefused.insert(key)
+            // The relay's reason, in plain words ([feedback blocked-state-ios-2026-10-26]):
+            // "<name> has blocked you in this chat." / "Couldn't post: you've blocked <name>…" /
+            // the mute line / the generic delivery line. A refusal that names a reason is taken
+            // even while the room already stood refused, so the words follow the relay's. The
+            // chat-level note under the header draws it (`ChatView.chatNote`), not a toast.
+            let why = room?.lastRefusal
+            let fresh = self.pushRefused.insert(key).inserted
+            if fresh || why?.reason != nil {
+                let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                self.pushRefusalText[key] = text
+            }
         }
         rooms[key] = room
         roomCreatedAt[key] = Date()
@@ -2272,6 +2286,7 @@ final class AppModel: ObservableObject {
         roomLinkSince[key] = nil
         unacked[key] = nil
         pushRefused.remove(key)
+        pushRefusalText[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2468,6 +2483,8 @@ final class AppModel: ObservableObject {
             if last.pending { return }
             if last.role == .system { return }
             if let me = myUserId, last.sender == me { return }
+            // Hidden for me (someone I blocked): no dot, no banner.
+            if hidesMessage(last, chatId: chatId) { return }
             // Project-chat echoes from this device use sender "user".
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
@@ -3469,7 +3486,8 @@ final class AppModel: ObservableObject {
     }
 
     func addAgent(chatId: String, projectId: Id) {
-        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name))
+        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name),
+                             subjects: [MembershipNotice.Subject(kind: "agent", id: projectId)])
         Task {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
@@ -3486,11 +3504,19 @@ final class AppModel: ObservableObject {
     /// The adding phone's own "<me> added <names>" line, on screen the moment Add is tapped
     /// (ARB-393). The relay writes the row of record; `foldOptimisticNotices` swaps this copy
     /// out when that row lands.
-    func showMembershipNotice(chatId: Id, names: [String]) {
+    ///
+    /// `subjects`: who was added, by id, when every one of them is known — then the line is
+    /// worded from the live roster and matched to the relay's row by facts; nil (someone is
+    /// known by handle only) keeps the words-only line.
+    func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
         let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
         let who = name.isEmpty ? (user?.login ?? "") : name
         guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
-        let n = OptimisticNotice(text: text, now: nowMs())
+        var facts: MembershipNotice? = nil
+        if let me = user?.id, let subjects, !subjects.isEmpty {
+            facts = MembershipNotice(kind: "added", actor: me, subjects: subjects)
+        }
+        let n = OptimisticNotice(text: text, now: nowMs(), notice: facts)
         optimisticNotices[chatId, default: []].append(n)
         var next = messages
         next[chatId, default: []].append(n.message(chatId: chatId))
@@ -3522,6 +3548,18 @@ final class AppModel: ObservableObject {
         }
         let agents: [String] = agentIds.compactMap { (id: Id) -> String? in projects.first { $0.id == id }?.name }
         return people + agents
+    }
+
+    /// The added members by id, or nil when a handle is not known here (then the line cannot
+    /// carry facts and stays words-only).
+    private func membershipSubjects(handles: [String], agentIds: [Id]) -> [MembershipNotice.Subject]? {
+        var out: [MembershipNotice.Subject] = []
+        for h in handles {
+            guard let id = personId(handle: h) else { return nil }
+            out.append(MembershipNotice.Subject(kind: "user", id: id))
+        }
+        out += agentIds.map { MembershipNotice.Subject(kind: "agent", id: $0) }
+        return out
     }
 
     func addPerson(chatId: String, handle: String) {
@@ -3592,7 +3630,8 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
-        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds))
+        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds),
+                             subjects: membershipSubjects(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
@@ -4079,6 +4118,28 @@ final class AppModel: ObservableObject {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
+    }
+
+    /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
+    /// Jacob 2026-10-26: a group block hides the blocked person's messages from the blocker
+    /// alone): the relay's `blockedSenders` hint plus every member on my block list, as
+    /// `user:<id>`. Empty for a DM (its composer bar says Blocked instead).
+    func hiddenSenders(in chat: PeopleChat) -> Set<String> {
+        guard chat.isGroup else { return [] }
+        var out = Set(chat.blockedSenders)
+        for m in chat.humans where BlockedState.isBlocked(id: m.id, handle: m.handle, in: blocked) {
+            out.insert(m.id.hasPrefix("user:") ? m.id : "user:\(m.id)")
+        }
+        return out
+    }
+
+    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    func setBlockedForTests(_ list: [Person]) { blocked = list }
+
+    /// Is this message hidden for me — from someone I blocked, in a people group?
+    func hidesMessage(_ m: Message, chatId: Id) -> Bool {
+        guard m.role == .user, let chat = peopleChat(chatId) else { return false }
+        return hiddenSenders(in: chat).contains(m.sender)
     }
 
     /// The one action behind every profile target in a chat — a sender name, the
