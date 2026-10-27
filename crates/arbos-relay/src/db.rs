@@ -585,6 +585,7 @@ impl Db {
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;

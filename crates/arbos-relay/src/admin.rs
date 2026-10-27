@@ -379,6 +379,7 @@ pub async fn push_status(State(state): State<AppState>, principal: Principal) ->
     };
     Json(json!({
         "push": state.push.is_on(),
+        "pipeline": state.push.status(),
         "tokens": tokens.iter().map(|t| json!({
             "device_id": t.device_id, "user_id": t.user_id, "platform": t.platform,
             "environment": t.environment, "bundle_id": t.bundle_id, "app_version": t.app_version,
@@ -387,6 +388,16 @@ pub async fn push_status(State(state): State<AppState>, principal: Principal) ->
         })).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+/// `POST /admin/push/drain`: work the outbox now (what the worker does on its own); answers
+/// how many rows were handled and the pipeline status after.
+pub async fn push_drain(State(state): State<AppState>, principal: Principal) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let handled = state.push.drain().await;
+    Json(json!({ "handled": handled, "pipeline": state.push.status() })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -442,7 +453,7 @@ pub async fn push_test(
         .unwrap_or_else(|| format!("Test notification from the relay at {}", now_ms()));
     let mut results = Vec::with_capacity(tokens.len());
     for t in tokens {
-        let out = crate::apns::Outgoing {
+        let out = crate::push::Outgoing {
             device_token: t.token.clone(),
             environment: t.environment.clone(),
             push_type: "alert",
@@ -453,16 +464,16 @@ pub async fn push_test(
                 "test": true,
             }),
         };
-        let delivery = state.push.send(out).await;
-        if delivery == crate::apns::Delivery::TokenGone {
+        let outcome = state.push.send_now(out).await;
+        if matches!(outcome, crate::push::SendOutcome::TokenInvalid { .. }) {
             let _ = state.db.delete_push_token_value(&t.token);
         }
         results.push(json!({
             "device_id": t.device_id, "environment": t.environment,
-            "result": match delivery {
-                crate::apns::Delivery::Sent => "sent".to_owned(),
-                crate::apns::Delivery::TokenGone => "token gone (forgotten)".to_owned(),
-                crate::apns::Delivery::Failed(e) => format!("failed: {e}"),
+            "result": match &outcome {
+                crate::push::SendOutcome::Accepted => "sent".to_owned(),
+                crate::push::SendOutcome::TokenInvalid { reason } => format!("token gone (forgotten): {reason}"),
+                crate::push::SendOutcome::Permanent { .. } | crate::push::SendOutcome::Transient { .. } => format!("failed: {outcome}"),
             },
         }));
     }
