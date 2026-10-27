@@ -637,6 +637,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/people/{id}", get(people::box_people_chat))
         .route(
+            "/box/people/{id}/gate",
+            post(room_health::post_gate_decision),
+        )
+        .route(
+            "/admin/room-health/{id}",
+            get(room_health::admin_room_health),
+        )
+        .route(
             "/projects/{id}/members",
             get(people::project_members_list).post(people::project_member_add),
         )
