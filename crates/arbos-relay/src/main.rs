@@ -757,6 +757,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(admin::set_credits),
         )
         .route(
+            "/admin/projects/{id}/spend-cap",
+            axum::routing::put(admin::set_project_cap),
+        )
+        .route(
             "/admin/killswitch",
             get(admin::get_kill_switch).put(admin::set_kill_switch),
         )

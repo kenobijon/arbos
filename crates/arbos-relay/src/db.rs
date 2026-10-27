@@ -864,6 +864,17 @@ impl Db {
 
     // ---- projects and chats -------------------------------------------------------------------
 
+    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
+    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
+                params![id, cap],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
