@@ -166,6 +166,16 @@ enum ChartPalette {
 
 // MARK: - Geometry
 
+/// When a finger last went down on a chart plot. The message row's long press is a
+/// `simultaneousGesture` (so the chat still scrolls from a bubble), which means it also fires
+/// 0.35 s into a touch-and-hold on the chart; the row asks `holding` and stays quiet while the
+/// reader is holding a value (`messageRowGestures`). A timestamp, not a flag: a cancelled drag
+/// never reports `onEnded`, and a flag would stick.
+enum ChartTouch {
+    static var lastDown: Date = .distantPast
+    static var holding: Bool { Date().timeIntervalSince(lastDown) < 0.6 }
+}
+
 enum ChartCardMetrics {
     static let radius: CGFloat = 12
     static let pad: CGFloat = 12
@@ -529,6 +539,7 @@ struct ChartPlot: View {
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { g in
+                                ChartTouch.lastDown = Date()
                                 guard let frame = proxy.plotFrame else { return }
                                 let xPos = g.location.x - geo[frame].origin.x
                                 guard let x: Double = proxy.value(atX: xPos) else { return }
