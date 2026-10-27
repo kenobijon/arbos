@@ -126,7 +126,7 @@ enum ChartModelCache {
 // MARK: - Palette (the code-card token colours per theme; Mac `chart_card::palette`)
 
 enum ChartPalette {
-    static let dark: [Color] = [
+    static let darkColors: [Color] = [
         Color(red: 0x95 / 255, green: 0xD0 / 255, blue: 0xCD / 255),
         Color(red: 0xE6 / 255, green: 0xB3 / 255, blue: 0x87 / 255),
         Color(red: 0xD8 / 255, green: 0x98 / 255, blue: 0xD8 / 255),
@@ -134,7 +134,7 @@ enum ChartPalette {
         Color(red: 0x10 / 255, green: 0x84 / 255, blue: 0xFE / 255),
         Color(red: 0x34 / 255, green: 0xC7 / 255, blue: 0x59 / 255),
     ]
-    static let light: [Color] = [
+    static let lightColors: [Color] = [
         Color(red: 0x1F / 255, green: 0x7F / 255, blue: 0x7A / 255),
         Color(red: 0xB8 / 255, green: 0x64 / 255, blue: 0x1A / 255),
         Color(red: 0xA6 / 255, green: 0x3F / 255, blue: 0xA4 / 255),
@@ -152,14 +152,14 @@ enum ChartPalette {
     /// The colour of series `i` (its own, or the theme palette's).
     static func series(_ model: ChartModel, _ i: Int, dark: Bool) -> Color {
         if i < model.series.count, let own = hex(model.series[i].color) { return own }
-        let p = dark ? dark : light
+        let p = dark ? darkColors : lightColors
         return p[i % p.count]
     }
 
     /// The colour of pie slice `i`.
     static func slice(_ model: ChartModel, _ i: Int, dark: Bool) -> Color {
         if let own = hex(model.series.first?.color) { return own }
-        let p = dark ? dark : light
+        let p = dark ? darkColors : lightColors
         return p[i % p.count]
     }
 }

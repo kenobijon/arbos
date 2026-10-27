@@ -121,7 +121,7 @@ final class ChartCardTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: Self.spec, options: [.sortedKeys])
         let model = try XCTUnwrap(ChartModel.decode(try chartModelJson(specJson: String(decoding: data, as: UTF8.self))))
         XCTAssertNotEqual(ChartPalette.series(model, 0, dark: true), ChartPalette.series(model, 0, dark: false))
-        XCTAssertEqual(ChartPalette.series(model, 0, dark: true), ChartPalette.dark[0])
+        XCTAssertEqual(ChartPalette.series(model, 0, dark: true), ChartPalette.darkColors[0])
         XCTAssertEqual(ChartPalette.hex("#1084FE"), Color(red: 0x10 / 255, green: 0x84 / 255, blue: 0xFE / 255))
         XCTAssertNil(ChartPalette.hex("red"))
         var own = model
