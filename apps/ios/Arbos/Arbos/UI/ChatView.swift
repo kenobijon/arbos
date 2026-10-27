@@ -2163,10 +2163,13 @@ struct ChatSession: View {
             }
             return
         }
-        // "Forwarded from <name>" names me by my display name, not "You".
-        let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
-            ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
-            : MediaAlbum.senderName(m) { model.project($0)?.name }
+        // "Forwarded from <name>" names me by my display name, not "You"; forwarding a
+        // forwarded message keeps the original author (Telegram), not the last forwarder.
+        let original = m.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines).flatMap { $0.isEmpty ? nil : $0 }
+        let from = original
+            ?? (m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
+                ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
+                : MediaAlbum.senderName(m) { model.project($0)?.name })
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
         pendingForward = PendingForward(message: m, from: from, slot: slot)
     }
