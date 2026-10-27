@@ -621,10 +621,6 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
     let streaming = active
         .as_deref()
         .is_some_and(|id| state.chat_is_streaming(id));
-    if streaming {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 1200);
     let open = shell.tab_menu_open;
     Some(
         div()
@@ -655,13 +651,10 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
                     .child("·"),
             )
             .child(div().max_w(px(160.0)).truncate().child(current))
+            // The working spinner, not an amber dot (Jacob, 2026-10-27): the
+            // same shared ticker as the sidebar rows' status cell.
             .when(streaming, |el| {
-                el.child(
-                    div()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
-                )
+                el.child(crate::ui::working::glyph(&theme, cx))
             })
             .child(icon("chevron-down", 11.0, theme.text_muted))
             // Mouse-down, not click: the root closes every popover on
