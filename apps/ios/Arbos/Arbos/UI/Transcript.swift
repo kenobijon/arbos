@@ -1122,8 +1122,11 @@ struct RowView: View, Equatable {
     var onReply: (() -> Void)? = nil
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
+    /// When true (held-bubble overlay), list everyone under every reaction chip so
+    /// a message long-press shows who used each emoji without an extra tap.
+    var showReactionSenders: Bool = false
 
-    /// Which reaction chip is expanded to show who used that emoji under the bubble.
+    /// Chip long-press: which emoji's sender list is open under the chips.
     @State private var selectedReactionEmoji: String? = nil
     /// Reply swipe: how far the bubble has followed the finger to the right.
     @State private var replyDrag: CGFloat = 0
@@ -1147,6 +1150,7 @@ struct RowView: View, Equatable {
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
             && lhs.theme == rhs.theme
+            && lhs.showReactionSenders == rhs.showReactionSenders
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
         #endif
@@ -1184,8 +1188,12 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
-                if let emoji = selectedReactionEmoji,
-                   let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
+                if showReactionSenders {
+                    ForEach(row.reactions, id: \.emoji) { reaction in
+                        reactionSenders(reaction)
+                    }
+                } else if let emoji = selectedReactionEmoji,
+                          let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
                     reactionSenders(reaction)
                 }
             }
@@ -1549,43 +1557,59 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// Compact chips under the bubble (iMessage-style). Tap shows who used that
-    /// emoji below the message; add/remove stays on the long-press capsule.
+    /// Compact chips under the bubble (iMessage-style). Tap toggles my reaction
+    /// with that emoji; long-press lists everyone who used it below the chips.
     private var reactionChips: some View {
         let mine = model.myUserId
         return HStack(spacing: 4) {
             if row.role == .user { Spacer(minLength: 0) }
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
-                let selected = selectedReactionEmoji == reaction.emoji
-                Button {
-                    selectedReactionEmoji = selected ? nil : reaction.emoji
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(reaction.emoji).font(theme.font(14))
-                        if reaction.senders.count > 1 {
-                            Text("\(reaction.senders.count)")
-                                .font(theme.font(12, weight: .medium))
-                                .foregroundStyle(theme.muted)
-                        }
+                let selected = !showReactionSenders && selectedReactionEmoji == reaction.emoji
+                HStack(spacing: 3) {
+                    Text(reaction.emoji).font(theme.font(14))
+                    if reaction.senders.count > 1 {
+                        Text("\(reaction.senders.count)")
+                            .font(theme.font(12, weight: .medium))
+                            .foregroundStyle(theme.muted)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(
-                                (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
-                                lineWidth: 1
-                            )
-                    )
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
+                            lineWidth: 1
+                        )
+                )
+                .contentShape(Capsule(style: .continuous))
+                .onTapGesture {
+                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
+                }
+                // High-priority so the row's bubble long-press (capsule + menu)
+                // does not also fire when holding a chip.
+                .highPriorityGesture(
+                    LongPressGesture(minimumDuration: 0.35)
+                        .onEnded { _ in
+                            guard !showReactionSenders else { return }
+                            selectedReactionEmoji = selected ? nil : reaction.emoji
+                        }
+                )
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
-                .accessibilityHint("Shows who used this emoji")
+                .accessibilityHint(mineOn
+                    ? "Removes your reaction. Long-press to see who used it."
+                    : "Adds your reaction. Long-press to see who used it.")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction(named: "See who reacted") {
+                    guard !showReactionSenders else { return }
+                    selectedReactionEmoji = selected ? nil : reaction.emoji
+                }
             }
             if row.role != .user { Spacer(minLength: 0) }
         }
