@@ -903,6 +903,8 @@ struct UserProfileView: View {
             }
         } message: { Text("They cannot message you or add you to chats.") }
         .task {
+            // Rig: `ARBOS_PANEL_TAB=Groups` lands on that tab (screenshot rig, as the group page).
+            if let t = DebugHooks.panelTab, PaneKinds.person.contains(t) { tab = t }
             await model.refreshBlocks()
             await model.refreshPeople()
             let id = model.personId(handle: person.handle) ?? person.id
