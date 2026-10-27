@@ -3360,10 +3360,10 @@ private struct TranscriptRows: View, Equatable {
         }
     }
 
-    /// Prose / media bubbles get the search wash; date / system / card rows do not.
+    /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
     private static func isMessageBubble(_ row: Row) -> Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
