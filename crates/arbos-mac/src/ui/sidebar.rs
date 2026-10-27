@@ -1949,10 +1949,15 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    // No pulse-clock request for a working row any more: nothing in the row
-    // reads `avatar_state` (the tree animation is retired, D79), and the old
-    // request made every working row redraw the window at 30 fps for nothing.
-    // The status cell's spinner has its own shared 11 fps ticker (`ui::working`).
+    // The typing pulse rides the 30 fps pulse clock as before. A *working* row
+    // asks for nothing here any more: nothing in the row read `avatar_state`
+    // (the tree animation is retired, D79), and that request made every working
+    // row redraw the window at 30 fps for nothing — the spinner has its own
+    // shared 11 fps ticker (`ui::working`).
+    if typing {
+        PulseClock::request(cx);
+    }
+    let phase = PulseClock::phase(cx, 900);
 
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
@@ -2128,13 +2133,14 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // The status cell under the time (Jacob, 2026-10-27): the
-                        // braille spinner while the chat's agent works or a person
-                        // types — one shared ticker, never a green dot — else the
-                        // unread accent dot, else nothing.
+                        // The status cell under the time (Jacob, 2026-10-27): a
+                        // person typing keeps the green pulse; the braille spinner
+                        // while the chat's agent works (one shared ticker); else the
+                        // unread accent dot; else nothing.
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
                             &id,
+                            phase,
                             theme,
                             cx,
                         )),
@@ -2144,11 +2150,15 @@ fn render_row(
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
 /// [feedback working-braille-spinner-mac-2026-10-27]). One cell, one glyph:
-/// the spinner wins while someone is producing a reply; the unread dot shows
-/// otherwise; a quiet read chat shows nothing.
+/// a person typing keeps today's green pulse (the spinner is the *agent's*
+/// working sign, never a human's — coordinator veto 2026-10-27); the spinner
+/// while the chat's agent works; the unread dot otherwise; a quiet read chat
+/// shows nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
-    /// The chat's agent is working, or a person is typing: the braille spinner.
+    /// A person is typing: the 7 pt `online` pulse, as before.
+    Typing,
+    /// The chat's agent is working: the braille spinner.
     Working,
     /// Unread messages: the accent dot.
     Unread,
@@ -2158,7 +2168,9 @@ pub enum RowStatus {
 
 impl RowStatus {
     pub fn of(streaming: bool, typing: bool, unread: bool) -> Self {
-        if streaming || typing {
+        if typing {
+            RowStatus::Typing
+        } else if streaming {
             RowStatus::Working
         } else if unread {
             RowStatus::Unread
@@ -2171,9 +2183,25 @@ impl RowStatus {
 /// The unread dot's diameter — and the spinner cell's width, so both end
 /// flush under the time.
 pub const UNREAD_DOT: f32 = 8.0;
+/// The typing pulse's diameter (unchanged from before the spinner).
+pub const TYPING_DOT: f32 = 7.0;
 
-fn row_status_cell(status: RowStatus, id: &Id, theme: &Theme, cx: &mut App) -> Option<AnyElement> {
+fn row_status_cell(
+    status: RowStatus,
+    id: &Id,
+    phase: f32,
+    theme: &Theme,
+    cx: &mut App,
+) -> Option<AnyElement> {
     match status {
+        RowStatus::Typing => Some(
+            div()
+                .size(px(TYPING_DOT))
+                .rounded_full()
+                .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase))
+                .debug_selector(|| format!("row-status-typing-{id}"))
+                .into_any_element(),
+        ),
         RowStatus::Working => Some(
             crate::ui::working::glyph(theme, cx)
                 .debug_selector(|| format!("row-status-working-{id}"))
@@ -3400,12 +3428,14 @@ mod status_cell_tests {
         }
     }
 
-    /// The rule as code: working beats unread, unread beats quiet; a person
-    /// typing is "working" for the cell (one spinner, never a green dot).
+    /// The rule as code: a person typing keeps the green pulse (the spinner
+    /// is never a human's sign), the agent's spinner beats unread, unread
+    /// beats quiet.
     #[test]
     fn the_cell_shows_one_thing_in_this_order() {
+        assert_eq!(RowStatus::of(false, true, true), RowStatus::Typing);
+        assert_eq!(RowStatus::of(true, true, false), RowStatus::Typing);
         assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
-        assert_eq!(RowStatus::of(false, true, true), RowStatus::Working);
         assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
         assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
         assert_eq!(CELL_W, UNREAD_DOT, "the cell is the dot's width");
@@ -3537,7 +3567,7 @@ mod status_cell_tests {
     /// The spinner sits exactly where the dot sat: its right edge is the time
     /// label's right edge (the unread dot's too), it is centred on the preview
     /// line, and it is the fixed cell. The unread row keeps its accent dot,
-    /// the quiet row shows nothing, the typing DM shows the spinner.
+    /// the quiet row shows nothing, the typing DM keeps its green pulse.
     #[gpui::test]
     fn the_spinner_sits_under_the_time_where_the_dot_was(cx: &mut TestAppContext) {
         let (_rt, _state, _shell, vcx) = mount(cx);
@@ -3594,13 +3624,18 @@ mod status_cell_tests {
         assert!(vcx.debug_bounds("row-status-unread-quiet").is_none());
 
         assert!(
-            vcx.debug_bounds("row-status-working-dm").is_some(),
-            "a person typing shows the spinner, not a green dot"
+            vcx.debug_bounds("row-status-working-dm").is_none(),
+            "a person typing never shows the agent's spinner"
         );
+        let pulse = vcx
+            .debug_bounds("row-status-typing-dm")
+            .expect("a person typing keeps the green pulse");
+        assert_eq!(f32::from(pulse.size.width), super::TYPING_DOT);
     }
 
-    /// Two spinning rows, one ticker; the cell's box never moves while the
-    /// glyph turns; Reduce Motion keeps the cell (still glyph) and no ticker.
+    /// One spinning row (the typing DM pulses, it does not spin), one ticker;
+    /// the cell's box never moves while the glyph turns; Reduce Motion keeps
+    /// the cell (still glyph) and no ticker.
     #[gpui::test]
     fn rows_share_one_ticker_and_the_cell_never_moves(cx: &mut TestAppContext) {
         let (_rt, _state, _shell, vcx) = mount(cx);
@@ -3609,7 +3644,7 @@ mod status_cell_tests {
             .expect("spinner drawn");
         let t = vcx.update(|_, cx| WorkingClock::trace(cx));
         assert!(t.running, "spinners on screen → ticker running");
-        assert_eq!(t.starts, 1, "one ticker for both spinning rows");
+        assert_eq!(t.starts, 1, "one ticker");
         let ticks0 = t.ticks;
         for _ in 0..10 {
             vcx.executor()
@@ -3628,13 +3663,31 @@ mod status_cell_tests {
             "ten frames for ten periods, not twenty"
         );
         assert_eq!(
-            t.drawn_last_frame, 2,
-            "two cells on screen: the agent's and the DM's"
+            t.drawn_last_frame, 1,
+            "one spinner cell on screen: the working agent's (the DM pulses)"
         );
+        // The typing DM's pulse rides the 30 fps clock, so the window draws
+        // more than once per 90 ms period here; the ticker itself adds one.
+        assert!(t.draws_last_tick >= 1);
+
+        // Nobody typing: the ticker alone draws the Shell once per period.
+        _state.update(vcx, |s, cx| {
+            s.typing.clear();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.drawn_last_frame, 1);
         assert_eq!(
             t.draws_last_tick, 1,
             "the ticker alone draws the Shell once per period"
         );
+        assert_eq!(t.starts, 1, "still the one ticker");
 
         vcx.update(|_, cx| cx.set_reduce_motion(true));
         for _ in 0..3 {
