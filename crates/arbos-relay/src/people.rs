@@ -1346,7 +1346,12 @@ pub async fn chat_leave(
     // Only a group keeps a chat for the others to read; a DM just ends.
     if cm.chat.kind == "group" {
         let line = notices::left_line(&notices::person_name(&state, &me));
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "left",
+            actor: me.clone(),
+            subjects: vec![],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1593,7 +1598,12 @@ pub async fn agent_add(
         std::slice::from_ref(&project.name),
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "added",
+            actor: me.clone(),
+            subjects: vec![notices::subject_agent(&project.id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1792,7 +1802,12 @@ pub async fn agent_remove(
         &[notices::agent_name(&state, &project_id)],
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "removed",
+            actor: me.clone(),
+            subjects: vec![notices::subject_agent(&project_id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1916,6 +1931,7 @@ pub async fn member_add(
         );
     }
     let mut names: Vec<String> = Vec::new();
+    let mut subjects: Vec<serde_json::Value> = Vec::new();
     for other in &people {
         let other_id = other.id.clone();
         if state
@@ -1953,6 +1969,7 @@ pub async fn member_add(
         notify_members(&state, &cm, &me, &event);
         tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
         names.push(notices::person_name(&state, &other_id));
+        subjects.push(notices::subject_user(&other_id));
     }
     for project in &agents {
         if let Err(e) = state.db.add_member(
@@ -1965,6 +1982,7 @@ pub async fn member_add(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
         names.push(project.name.clone());
+        subjects.push(notices::subject_agent(&project.id));
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
@@ -1972,7 +1990,12 @@ pub async fn member_add(
     // Notice row first (ARB-393), then the slower follow-up work: box wakes, agent pushes
     // and the Matrix mirror.
     if let Some(line) = notices::added_line(&notices::person_name(&state, &me), &names) {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "added",
+            actor: me.clone(),
+            subjects,
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -2129,7 +2152,12 @@ pub async fn member_remove(
         &[notices::person_name(&state, &user_id)],
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "removed",
+            actor: me.clone(),
+            subjects: vec![notices::subject_user(&user_id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -3245,7 +3273,12 @@ pub async fn group_join(
     notify_members(&state, &cm, &me, &event);
     state.matrix.touch_chat(&state, &inv.chat_id, None);
     let line = format!("{} joined", notices::person_name(&state, &me));
-    if let Err(e) = notices::post_people_notice(&state, &inv.chat_id, &line).await {
+    let n = notices::Notice {
+        kind: "joined",
+        actor: me.clone(),
+        subjects: vec![],
+    };
+    if let Err(e) = notices::post_people_notice(&state, &inv.chat_id, &line, n).await {
         tracing::warn!(chat = %inv.chat_id, error = %e, "join notice not written");
     }
     match load_chat(&state, &inv.chat_id) {
