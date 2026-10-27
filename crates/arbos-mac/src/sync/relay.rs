@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -242,6 +242,11 @@ struct Shared {
     secrets_inflight: AtomicBool,
     secrets_poll_failures: AtomicU32,
     secrets_poll_skip: AtomicU32,
+    /// When the relay last answered any request over HTTP (ms; any status — an answer is an
+    /// answer). The registry poll reads it so an odd failure (bad JSON, one project's 404) does
+    /// not leave a stale Offline / RelayDown on the connection pill ([feedback
+    /// stale-offline-pill-mac-2026-10-27]).
+    relay_answered_ms: AtomicU64,
     /// Room keys whose doc or cursor changed since the last save.
     dirty: Mutex<HashSet<Id>>,
     /// Silent error reports: one per signature per week (see `diagnostics.rs`).
@@ -438,6 +443,18 @@ impl Shared {
         }
     }
 
+    /// The relay answered a request (any status): the link is up, whatever else went wrong.
+    fn relay_answered(&self) {
+        self.relay_answered_ms
+            .store(crate::model::now_ms(), Ordering::SeqCst);
+    }
+
+    /// Did the relay answer anything within the last `within`?
+    fn relay_answered_within(&self, within: Duration) -> bool {
+        let last = self.relay_answered_ms.load(Ordering::SeqCst);
+        last > 0 && crate::model::now_ms().saturating_sub(last) < within.as_millis() as u64
+    }
+
     async fn delete(self: &Arc<Self>, path: &str) -> Result<()> {
         let resp = self
             .http
@@ -446,6 +463,7 @@ impl Shared {
             .send()
             .await
             .with_context(|| format!("DELETE {path}"))?;
+        self.relay_answered();
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -463,6 +481,7 @@ impl Shared {
             .send()
             .await
             .with_context(|| format!("PUT {path}"))?;
+        self.relay_answered();
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -618,6 +637,7 @@ impl Shared {
                 .send()
                 .await
                 .with_context(|| format!("GET {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -658,6 +678,7 @@ impl Shared {
                 req = req.header(*name, value);
             }
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -702,6 +723,7 @@ impl Shared {
                 req = req.timeout(t);
             }
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -732,6 +754,7 @@ impl Shared {
                 .send()
                 .await
                 .with_context(|| format!("PATCH {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -801,6 +824,7 @@ impl SyncSource for RelaySource {
                 secrets_inflight: AtomicBool::new(false),
                 secrets_poll_failures: AtomicU32::new(0),
                 secrets_poll_skip: AtomicU32::new(0),
+                relay_answered_ms: AtomicU64::new(0),
                 dirty: Mutex::new(HashSet::new()),
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
@@ -1042,9 +1066,14 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                     // says nothing about the link.
                     eprintln!("relay registry: {text}");
                     let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
-                    let fault = link_fault(&err);
-                    if matches!(fault, LinkState::Offline | LinkState::RelayDown) {
-                        let _ = shared.events.send(SyncEvent::RelayLink(fault));
+                    // A fresh socket / resolver fault is a verdict. An odd error after the
+                    // relay answered this tick (one project's 404, bad JSON, an empty body)
+                    // is not — and it must not leave an earlier Offline / RelayDown standing
+                    // on the pill ([feedback stale-offline-pill-mac-2026-10-27]: Jacob's Mac
+                    // read "Offline" under the header pill while it was talking to the relay).
+                    let answered = shared.relay_answered_within(2 * REGISTRY_POLL);
+                    if let Some(verdict) = registry_link_verdict(link_fault(&err), answered) {
+                        let _ = shared.events.send(SyncEvent::RelayLink(verdict));
                     }
                 }
             }
@@ -8347,6 +8376,19 @@ fn link_fault(err: &anyhow::Error) -> LinkState {
     LinkState::Reconnecting
 }
 
+/// What the registry poll tells the connection pill after a failed refresh: a fresh socket /
+/// resolver fault (`Offline` / `RelayDown`) goes up as it is; anything else is a verdict of
+/// `Live` when the relay answered something within the last two polls (the link is fine, the
+/// refresh tripped on content), and no verdict at all when it did not (nothing new to say —
+/// the earlier state stands until a fault or an answer).
+fn registry_link_verdict(fault: LinkState, answered_recently: bool) -> Option<LinkState> {
+    match fault {
+        LinkState::Offline | LinkState::RelayDown => Some(fault),
+        _ if answered_recently => Some(LinkState::Live),
+        _ => None,
+    }
+}
+
 /// Socket-level verdict: no route / no DNS is this Mac being offline; a refusal
 /// or a reset is a relay that is not listening.
 fn io_fault(io: &std::io::Error) -> LinkState {
@@ -8606,5 +8648,31 @@ mod secrets_poll_tests {
         );
         // Longest gap between two asks: (20 + 1) × 15 s ≈ 5 min.
         assert!((secrets_poll_skip_after(99) + 1) * 15 <= 5 * 60 + 15);
+    }
+}
+
+/// [feedback stale-offline-pill-mac-2026-10-27]: the pill's Offline never outlives the relay's
+/// next answer.
+#[cfg(test)]
+mod registry_link_tests {
+    use super::{registry_link_verdict, LinkState};
+
+    #[test]
+    fn a_fresh_fault_goes_up_and_an_odd_error_after_an_answer_clears_a_stale_one() {
+        assert_eq!(
+            registry_link_verdict(LinkState::Offline, true),
+            Some(LinkState::Offline)
+        );
+        assert_eq!(
+            registry_link_verdict(LinkState::RelayDown, false),
+            Some(LinkState::RelayDown)
+        );
+        // One project's 404 / bad JSON after the relay answered: the link is Live.
+        assert_eq!(
+            registry_link_verdict(LinkState::Reconnecting, true),
+            Some(LinkState::Live)
+        );
+        // The same with no answer at all this tick says nothing new.
+        assert_eq!(registry_link_verdict(LinkState::Reconnecting, false), None);
     }
 }
