@@ -10,6 +10,10 @@
 //!  Provider::send(Outgoing) → SendOutcome        ← APNs today; FCM/web push = a new impl
 //! ```
 //!
+//! Eligibility (who hears what) is decided before the enqueue, in [`eligibility`]: sender →
+//! blocked sender → archived → per-chat level (all / mentions / none / inherit) → large-group
+//! mentions-only default. The outbox never second-guesses it.
+//!
 //! How to add a push kind (the clear-on-read worker's case): add a [`PushKind`] variant with
 //! its `push_type`, `collapse_id` and `dedupe_key`, a payload constructor in [`payload`], and
 //! enqueue a [`NewPush`] per recipient device. Nothing in the worker or the provider changes.
@@ -17,6 +21,7 @@
 //! Direct sends ([`Push::send_now`]) bypass the outbox: VoIP rings (must expire at once) and
 //! the admin test push. Everything else goes through the outbox.
 
+pub mod eligibility;
 pub mod outbox;
 pub mod payload;
 pub mod provider;
