@@ -1086,7 +1086,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::StartDm { .. }
         | ClientCommand::CreatePeopleGroup { .. }
         | ClientCommand::SetTyping { .. }
-        | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
         | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
@@ -7440,51 +7439,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::SetTyping { .. } => true,
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let agent = {
-                let projects = shared.projects.lock().unwrap();
-                projects
-                    .iter()
-                    .find(|p| p.id == *project_id && !p.is_people())
-                    .map(|p| AgentMember {
-                        project_id: p.id.clone(),
-                        name: p.name.clone(),
-                        icon: p.icon.clone(),
-                        color: p.color.clone(),
-                        handle: Project::mention_slug(&p.name),
-                        owner_id: ME_ID.into(),
-                        owner_handle: ME_HANDLE.into(),
-                        reply_policy: ReplyPolicy::Mention,
-                        avatar: p.avatar.clone(),
-                        avatar_color: p.avatar_color.clone(),
-                        avatar_color_index: p.avatar_color_index,
-                        avatar_leaf: p.avatar_leaf,
-                        avatar_leaf_color: p.avatar_leaf_color,
-                        image_url: None,
-                        avatar_version: 0,
-                        description: None,
-                        model: None,
-                        owner: None,
-                    })
-            };
-            if let Some(agent) = agent {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    if !space
-                        .agents
-                        .iter()
-                        .any(|a| a.project_id == agent.project_id)
-                    {
-                        space.agents.push(agent);
-                    }
-                }
-            }
-            emit_projects(shared);
-            true
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
