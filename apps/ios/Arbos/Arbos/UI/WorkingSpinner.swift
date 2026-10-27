@@ -56,7 +56,8 @@ final class WorkingSpinnerClock: ObservableObject {
     private let epoch = Date()
     private var lifecycle: [NSObjectProtocol] = []
 
-    /// Trace counters (`ARBOS_PERF_LOG=1` also bumps `spinner.tick` / `spinner.start`).
+    /// Trace counters (Debug builds with `ARBOS_PERF_LOG=1` also bump `spinner.tick` / `spinner.start`;
+    /// `PerfCounters` only exists under `#if DEBUG`).
     private(set) var ticks = 0
     private(set) var starts = 0
 
@@ -113,7 +114,9 @@ final class WorkingSpinnerClock: ObservableObject {
 
     private func start() {
         starts += 1
+        #if DEBUG
         PerfCounters.bump("spinner.start")
+        #endif
         frame = currentIndex
         let t = Timer(timeInterval: WorkingSpinnerFrames.interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -127,7 +130,9 @@ final class WorkingSpinnerClock: ObservableObject {
     /// For tests: one tick as the timer would deliver it.
     func tick() {
         ticks += 1
+        #if DEBUG
         PerfCounters.bump("spinner.tick")
+        #endif
         let i = currentIndex
         if i != frame { frame = i }
     }
