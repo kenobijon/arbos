@@ -193,16 +193,31 @@ struct ChartScrubHost: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onScrub: onScrub, onTap: onTap) }
 
     func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+        let view = TouchSurface()
         view.backgroundColor = .clear
         view.isAccessibilityElement = false
         context.coordinator.attach(to: view)
         return view
     }
 
+    /// The recognizers' view; under `ARBOS_TRACE_CHART` it also prints raw touch arrival.
+    final class TouchSurface: UIView {
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if DebugHooks.traceChart, let t = touches.first {
+                print("[arbos chart] touch down at=\(t.location(in: self)) in=\(bounds.size)")
+            }
+            super.touchesBegan(touches, with: event)
+        }
+    }
+
     func updateUIView(_ view: UIView, context: Context) {
         context.coordinator.onScrub = onScrub
         context.coordinator.onTap = onTap
+    }
+
+    /// Fill whatever the overlay proposes; a plain `UIView` has no size of its own.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
@@ -230,6 +245,9 @@ struct ChartScrubHost: UIViewRepresentable {
         }
 
         @objc private func scrubbed(_ gr: UIGestureRecognizer) {
+            if DebugHooks.traceChart {
+                print("[arbos chart] \(type(of: gr)) state=\(gr.state.rawValue) at=\(gr.location(in: gr.view)) in=\(gr.view?.bounds.size ?? .zero)")
+            }
             switch gr.state {
             case .began, .changed:
                 ChartTouch.lastDown = Date()
@@ -241,7 +259,10 @@ struct ChartScrubHost: UIViewRepresentable {
             }
         }
 
-        @objc private func tapped() { onTap() }
+        @objc private func tapped() {
+            if DebugHooks.traceChart { print("[arbos chart] tap") }
+            onTap()
+        }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             false
@@ -629,6 +650,7 @@ struct ChartPlot: View {
                     },
                     onTap: { selected = nil }
                 )
+                .frame(width: geo.size.width, height: geo.size.height)
                 if let sel = selected, sel < model.columns.count, let frame = proxy.plotFrame {
                     let plot = geo[frame]
                     let px = proxy.position(forX: model.columns[sel].x) ?? 0
@@ -681,12 +703,12 @@ struct ChartPlot: View {
         .chartLegend(.hidden)
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                ChartScrubHost(
+                    onScrub: { point in
                         guard let frame = proxy.plotFrame else { return }
                         let plot = geo[frame]
                         let c = CGPoint(x: plot.midX, y: plot.midY)
-                        let dx = g.location.x - c.x, dy = g.location.y - c.y
+                        let dx = point.x - c.x, dy = point.y - c.y
                         var a = atan2(dx, -dy)
                         if a < 0 { a += 2 * .pi }
                         var acc = 0.0
@@ -698,8 +720,10 @@ struct ChartPlot: View {
                         }
                         if hit != selected { Haptics.pick() }
                         selected = hit
-                    })
-                    .onTapGesture { selected = nil }
+                    },
+                    onTap: { selected = nil }
+                )
+                .frame(width: geo.size.width, height: geo.size.height)
                 if let sel = selected, sel < model.columns.count {
                     ChartReadout(model: model, column: sel, font: font)
                         .frame(maxWidth: 176)
