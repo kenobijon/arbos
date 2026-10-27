@@ -651,6 +651,16 @@ struct ChatSession: View {
             let id = m.member.hasPrefix("agent:") ? String(m.member.dropFirst(6)) : m.member
             if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
         }
+        // People by user id → current name (handle when unnamed); me from the live `/me`.
+        var memberNames: [String: String] = [:]
+        for m in people?.humans ?? [] {
+            let name = m.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            memberNames[m.id] = name.isEmpty ? "@\(m.handle)" : name
+        }
+        if let who = model.user {
+            let name = who.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            memberNames[who.id] = name.isEmpty ? "@\(who.login)" : name
+        }
         let list = messages
         #if DEBUG
         let refreshStarted = Date()
@@ -683,7 +693,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -710,7 +720,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -735,7 +745,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -1329,9 +1339,11 @@ struct ChatSession: View {
             if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
         }
         // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
-        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
+        // A member's rename re-words the membership lines that name them, so the key carries names.
+        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []) { _, _ in
             refreshRows()
         }
+        .onChange(of: model.user?.name) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
                 // Several messages separated by " ||| " go out a few seconds apart
@@ -1383,22 +1395,13 @@ struct ChatSession: View {
 
     // MARK: Header (floating glass)
 
-    /// Strip the messages scroll under (ref-02): frosted on Glass, solid fade on Matte.
+    /// Strip the messages scroll under (ref-02): the shared `ListTopFade` from the physical
+    /// top edge — frosted on Glass, solid on Matte — plus whatever the header stacks
+    /// (member chips, the Search-in-chat bar, call strips).
     private var headerBlur: some View {
-        ZStack {
-            if theme.isGlass {
-                Rectangle().fill(.ultraThinMaterial)
-            }
-            theme.bg.opacity(theme.isGlass ? 0.78 : 1)
-        }
-        .frame(height: (showsMemberChips ? 156 : 118) + (Controls.diameter - 42) + headerExtra)
-        .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
-        .ignoresSafeArea(edges: .top)
-        .allowsHitTesting(false)
+        ListTopFade(screen: .chat, extra: (showsMemberChips ? 38 : 0) + headerExtra)
     }
 
-    /// Which kind of chat this header fronts — the spec is the same for all four
-    /// ([feedback ios-header-glass-2026-10-25]).
     private var headerKind: ChatHeaderKind {
         if channel != nil { return .channel }
         if let people { return people.isGroup ? .group : .dm }
