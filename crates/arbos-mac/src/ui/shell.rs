@@ -4874,18 +4874,12 @@ impl Render for Shell {
         // at rest that is 72 + the disc with the sidebar hidden, nothing with
         // it docked; mid-slide the disc holds its spot (72 + 12) from the
         // moment the sidebar's own disc has left until the sidebar is back.
-        // With the rail the header's toggle is only for a plain window at rest
-        // (full screen puts it in the rail's top-left slot; the morph's
-        // overlay carries it in between) — and for the narrow band's hidden
-        // sidebar, as before.
+        // With the rail the toggle is the rail's own (the morph's overlay
+        // carries it in between), so the header draws one only for the
+        // narrow band's hidden sidebar, as before
+        // ([feedback sidebar-toggle-in-rail-2026-10-27]).
         let rail_progress = frame.rail_progress(sidebar_width);
-        let show_sidebar_toggle = rail::header_toggle_shown(
-            sidebar_hidden,
-            frame.sidebar_visible,
-            rail,
-            frame.sidebar_sliding,
-            self.fullscreen,
-        );
+        let show_sidebar_toggle = rail::header_toggle_shown(sidebar_hidden, frame.sidebar_visible);
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
             show_sidebar_toggle,

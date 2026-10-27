@@ -2,10 +2,11 @@
 //! [feedback mac-sidebar-rail-2026-10-26]).
 //!
 //! Pressing the sidebar toggle no longer closes the chat list; it collapses
-//! it to an 84 pt rail — one centred column: the toggle (in full screen; in a
-//! window it stays beside the traffic lights in the chat header, where today's
-//! lone toggle is), then **+** and **Search** stacked 8 apart on today's
-//! control line, then every chat's picture (agents, people, groups, servers)
+//! it to an 84 pt rail — one centred column: the toggle, **+** and **Search**
+//! stacked 8 apart under the traffic lights' slot (Jacob 2026-10-27,
+//! [feedback sidebar-toggle-in-rail-2026-10-27]: "the tab button should also
+//! be in the side bar" — before, a plain window kept it floating in the chat
+//! header), then every chat's picture (agents, people, groups, servers)
 //! at 36 pt on Grok's 58 pt pitch, and my own picture alone at the bottom on
 //! the footer's line. The rail follows the All · Agents · People · Servers
 //! segment, which persists with the collapsed state; a server's picture opens
@@ -44,7 +45,7 @@ use crate::ui::glass::{self, WindowDrag};
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{
     self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM,
-    FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, LIST_FADE_BAND, STRIP_GAP, STRIP_INSET,
+    FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, LIST_FADE_BAND, STRIP_GAP,
 };
 use crate::ui::theme::{Theme, CONTROL, TEXT_SMALL};
 
@@ -66,13 +67,24 @@ pub(crate) mod metrics {
     pub const PITCH: f32 = 58.0;
     /// The discs' x: centred in the rail.
     pub const DISC_X: f32 = CENTRE_X - CONTROL / 2.0;
-    /// The toggle keeps today's line (disc top 12, centre `CONTROL_LINE`);
-    /// + and Search stack under it, `STRIP_GAP` apart.
-    pub const TOGGLE_TOP: f32 = CONTROL_LINE - CONTROL / 2.0;
-    pub const PLUS_TOP: f32 = TOGGLE_TOP + CONTROL + super::STRIP_GAP;
-    pub const SEARCH_TOP: f32 = PLUS_TOP + CONTROL + super::STRIP_GAP;
+    /// The strip's disc line (top 12, centre `CONTROL_LINE`) is the traffic
+    /// lights' slot: macOS draws them at x 15–57 on it, and a 36 pt disc
+    /// centred at 42 would sit on top of them. The rail leaves that slot to
+    /// the lights, as the expanded strip leaves them their 72 pt band — and,
+    /// like the strip, moves nothing in native full screen (the lights hide,
+    /// the slot stays).
+    pub const LIGHTS_SLOT_TOP: f32 = CONTROL_LINE - CONTROL / 2.0;
+    /// One disc plus the strip's gap: the column's pitch between discs.
+    pub const DISC_PITCH: f32 = CONTROL + super::STRIP_GAP;
+    /// The toggle, + and Search stack under the lights' slot, `STRIP_GAP`
+    /// apart — the strip's order read top-down ([feedback
+    /// sidebar-toggle-in-rail-2026-10-27]: the toggle lives in the rail with
+    /// the other discs; before, a plain window kept it in the chat header).
+    pub const TOGGLE_TOP: f32 = LIGHTS_SLOT_TOP + DISC_PITCH;
+    pub const PLUS_TOP: f32 = TOGGLE_TOP + DISC_PITCH;
+    pub const SEARCH_TOP: f32 = PLUS_TOP + DISC_PITCH;
     /// Pictures start 16 under the last disc (Grok's first card sits 16
-    /// under its discs): first tile top 152 → first picture top 161.
+    /// under its discs): first tile top 196 → first picture top 205.
     pub const FIRST_TILE_TOP: f32 = SEARCH_TOP + CONTROL + 16.0;
     /// The scroll box starts where the first 58 pt slot does (the 54 tile is
     /// centred in its slot, 2 above and below).
@@ -87,42 +99,15 @@ pub(crate) mod metrics {
     pub const TYPING_DOT: f32 = 9.0;
 }
 
-/// Where the sidebar toggle lives while the sidebar is collapsed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ToggleSpot {
-    /// A plain window: beside the traffic lights in the chat header, where
-    /// today's lone toggle is (the header's 12 pt inset after the rail).
-    Header,
-    /// Native full screen (the lights are hidden): the rail's top-left slot.
-    RailTop,
-}
-
-pub(crate) fn toggle_spot(fullscreen: bool) -> ToggleSpot {
-    if fullscreen {
-        ToggleSpot::RailTop
-    } else {
-        ToggleSpot::Header
-    }
-}
-
-/// Whether the chat header draws the sidebar toggle this frame.
-///
-/// * The narrow band hides the sidebar outright: the header shows the toggle
-///   once the sidebar has left the lights' band (as before).
-/// * Collapsed to the rail: only at rest, and only in a plain window
-///   ([`ToggleSpot::Header`]) — full screen keeps it in the rail, and the
-///   morph's overlay carries it in between, so it is never drawn twice.
-pub(crate) fn header_toggle_shown(
-    sidebar_hidden: bool,
-    sidebar_visible: f32,
-    rail: bool,
-    sliding: bool,
-    fullscreen: bool,
-) -> bool {
-    if sidebar_hidden {
-        return sidebar_visible <= crate::ui::shell::TRAFFIC_LIGHTS_INSET;
-    }
-    rail && !sliding && toggle_spot(fullscreen) == ToggleSpot::Header
+/// Whether the chat header draws the sidebar toggle this frame: only for the
+/// narrow band, which hides the sidebar outright — the header shows the
+/// toggle once the sidebar has left the lights' band (as before). Collapsed
+/// to the rail the toggle is the rail's own ([`metrics::TOGGLE_TOP`]), and
+/// the morph's overlay carries it in between, so the header never draws it
+/// ([feedback sidebar-toggle-in-rail-2026-10-27]; before, a plain window kept
+/// it in the header at rest).
+pub(crate) fn header_toggle_shown(sidebar_hidden: bool, sidebar_visible: f32) -> bool {
+    sidebar_hidden && sidebar_visible <= crate::ui::shell::TRAFFIC_LIGHTS_INSET
 }
 
 /// The one badge spot at a rail picture's bottom-right corner.
@@ -216,16 +201,8 @@ pub(crate) fn text_alpha(t: f32) -> f32 {
 }
 
 /// A rail disc's resting frame in window coordinates.
-fn disc_rest(control: StripControl, spot: ToggleSpot) -> Bounds<Pixels> {
-    match (control, spot) {
-        (StripControl::Collapse, ToggleSpot::Header) => bounds(
-            metrics::WIDTH + STRIP_INSET,
-            metrics::TOGGLE_TOP,
-            CONTROL,
-            CONTROL,
-        ),
-        _ => bounds(metrics::DISC_X, disc_top(control), CONTROL, CONTROL),
-    }
+fn disc_rest(control: StripControl) -> Bounds<Pixels> {
+    bounds(metrics::DISC_X, disc_top(control), CONTROL, CONTROL)
 }
 
 fn badge_element(badge: RailBadge, ring: gpui::Hsla, theme: &Theme, phase: f32) -> Div {
@@ -295,7 +272,6 @@ fn rail_disc(control: StripControl, theme: &Theme, cx: &mut Context<Shell>) -> D
 pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
     let theme = Theme::of(cx).clone();
     let entries = sidebar::list_entries(shell, cx);
-    let spot = toggle_spot(shell.fullscreen);
     let machine = shell.state.read(cx).machine.shown_state();
     let phase = crate::ui::motion::PulseClock::phase(cx, 900);
     if entries.iter().any(ListEntry::typing) {
@@ -312,7 +288,8 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         .border_r_1()
         .border_color(theme.border)
         .debug_selector(|| "sidebar-rail".into());
-    // The top band stays macOS's drag region, as the strip is.
+    // The top band stays macOS's drag region, as the strip is; the lights'
+    // slot above the discs is all drag.
     column = column.child(
         div()
             .absolute()
@@ -322,10 +299,8 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
             .h(px(metrics::LIST_TOP))
             .window_drag(),
     );
-    if spot == ToggleSpot::RailTop {
-        column = column.child(rail_disc(StripControl::Collapse, &theme, cx));
-    }
     column = column
+        .child(rail_disc(StripControl::Collapse, &theme, cx))
         .child(rail_disc(StripControl::New, &theme, cx))
         .child(rail_disc(StripControl::Search, &theme, cx));
 
@@ -562,10 +537,10 @@ pub(crate) fn render_morph(shell: &Shell, t: f32, width: f32, cx: &mut Context<S
 }
 
 /// The moving pieces of the collapse / open slide, over the whole window:
-/// the three discs between the strip and the rail column (the toggle heads
-/// for the chat header in a plain window), every row's picture between its
-/// row and its rail slot (the selected row's card shrinking into its tile),
-/// and my footer picture sliding to the rail's centre.
+/// the three discs between the strip and the rail column, every row's
+/// picture between its row and its rail slot (the selected row's card
+/// shrinking into its tile), and my footer picture sliding to the rail's
+/// centre.
 pub(crate) fn render_overlay(
     shell: &Shell,
     t: f32,
@@ -573,7 +548,6 @@ pub(crate) fn render_overlay(
     cx: &mut Context<Shell>,
 ) -> Div {
     let theme = Theme::of(cx).clone();
-    let spot = toggle_spot(shell.fullscreen);
     let snap = shell.morph.borrow();
     let entries = sidebar::list_entries(shell, cx);
     let machine = shell.state.read(cx).machine.shown_state();
@@ -645,7 +619,7 @@ pub(crate) fn render_overlay(
         let Some(from) = snap.discs.get(&control).copied() else {
             continue;
         };
-        let b = lerp_bounds(from, disc_rest(control, spot), t);
+        let b = lerp_bounds(from, disc_rest(control), t);
         let (glyph, size) = control.glyph();
         let id: &'static str = match control {
             StripControl::Collapse => "morph-collapse",
@@ -699,9 +673,9 @@ mod tests {
     }
 
     /// The measurement table: rail 84 (Grok 83.5 + the hairline), pictures
-    /// 36 on a 58 pitch in 54 tiles, the toggle on today's line, + and Search
-    /// 8 under each other, pictures 16 under Search, my picture on the
-    /// footer's line.
+    /// 36 on a 58 pitch in 54 tiles, the lights' slot on today's disc line
+    /// left to macOS, the toggle, + and Search stacked 8 apart under it,
+    /// pictures 16 under Search, my picture on the footer's line.
     #[test]
     fn rail_metrics_match_the_measurement_table() {
         assert!((WIDTH - grok::RAIL).abs() <= 0.5, "rail width {WIDTH}");
@@ -713,16 +687,24 @@ mod tests {
         assert_eq!(PITCH, grok::PITCH);
         assert_eq!(CENTRE_X, 42.0);
         assert_eq!(DISC_X, 24.0);
-        assert_eq!(TOGGLE_TOP, 12.0, "today's disc top");
-        assert_eq!(TOGGLE_TOP + CONTROL / 2.0, CONTROL_LINE);
-        assert_eq!(PLUS_TOP, 56.0);
-        assert_eq!(SEARCH_TOP, 100.0);
+        assert_eq!(LIGHTS_SLOT_TOP, 12.0, "today's disc top: the lights' slot");
+        assert_eq!(LIGHTS_SLOT_TOP + CONTROL / 2.0, CONTROL_LINE);
+        assert_eq!(DISC_PITCH, 44.0);
+        assert_eq!(TOGGLE_TOP, 56.0, "the toggle: first disc under the lights");
+        assert_eq!(PLUS_TOP, 100.0);
+        assert_eq!(SEARCH_TOP, 144.0);
+        assert_eq!(
+            TOGGLE_TOP - (LIGHTS_SLOT_TOP + CONTROL),
+            8.0,
+            "discs 8 apart"
+        );
         assert_eq!(PLUS_TOP - (TOGGLE_TOP + CONTROL), 8.0, "discs 8 apart");
-        assert_eq!(FIRST_TILE_TOP, 152.0);
+        assert_eq!(SEARCH_TOP - (PLUS_TOP + CONTROL), 8.0, "discs 8 apart");
+        assert_eq!(FIRST_TILE_TOP, 196.0);
         assert_eq!(FIRST_TILE_TOP - (SEARCH_TOP + CONTROL), 16.0);
-        assert_eq!(LIST_TOP, 150.0);
+        assert_eq!(LIST_TOP, 194.0);
         let first_picture_centre = FIRST_TILE_TOP + TILE / 2.0;
-        assert_eq!(first_picture_centre, 179.0);
+        assert_eq!(first_picture_centre, 223.0);
         assert_eq!(tile_top(1) - tile_top(0), PITCH);
         // My picture: 36 tall, 12 above the bottom → centre 30 (Grok 31).
         let centre_from_bottom = FOOTER_BOTTOM + CONTROL / 2.0;
@@ -734,63 +716,57 @@ mod tests {
     }
 
     /// Jacob's 1720 × 1079 window (Grok's rail-2 shot) holds 14 pictures
-    /// before the rail scrolls; a 760 pt window holds 9.
+    /// before the rail scrolls; a 760 pt window holds 8.
     #[test]
     fn the_rail_scrolls_past_its_capacity() {
         assert_eq!(capacity(1079.0), 14);
-        assert_eq!(capacity(760.0), 9);
+        assert_eq!(capacity(760.0), 8);
         assert_eq!(capacity(100.0), 0);
     }
 
-    /// Jacob 2026-10-26: in a window the toggle stays beside the traffic
-    /// lights (today's spot: 12 after the rail, top 12); in full screen it is
-    /// the rail's top-left slot.
+    /// Jacob 2026-10-27: the toggle lives in the rail with the other discs —
+    /// same column (x 24), same size, the first slot under the traffic
+    /// lights — in a window and in full screen alike; + and Search follow
+    /// under it. Before (v0.6.278), a plain window kept the toggle in the
+    /// chat header at x 96.
     #[test]
-    fn the_toggle_keeps_todays_spot_in_a_window_and_tops_the_rail_in_full_screen() {
-        assert_eq!(toggle_spot(false), ToggleSpot::Header);
-        assert_eq!(toggle_spot(true), ToggleSpot::RailTop);
-        let header = disc_rest(StripControl::Collapse, ToggleSpot::Header);
-        assert_eq!(
-            f32::from(header.origin.x),
-            WIDTH + STRIP_INSET,
-            "x 96: 12 after the rail"
+    fn the_toggle_rests_in_the_rail_under_the_lights() {
+        let toggle = disc_rest(StripControl::Collapse);
+        assert_eq!(f32::from(toggle.origin.x), DISC_X);
+        assert_eq!(f32::from(toggle.origin.y), TOGGLE_TOP);
+        assert_eq!(f32::from(toggle.size.width), CONTROL);
+        assert!(
+            f32::from(toggle.origin.x) < WIDTH,
+            "inside the rail, not the header"
         );
-        assert_eq!(f32::from(header.origin.y), 12.0);
-        let rail = disc_rest(StripControl::Collapse, ToggleSpot::RailTop);
-        assert_eq!(f32::from(rail.origin.x), DISC_X);
-        assert_eq!(f32::from(rail.origin.y), TOGGLE_TOP);
-        // + and Search never move between the two.
-        for c in [StripControl::New, StripControl::Search] {
-            assert_eq!(
-                disc_rest(c, ToggleSpot::Header),
-                disc_rest(c, ToggleSpot::RailTop)
-            );
+        // Under the lights' slot, never on it.
+        assert!(f32::from(toggle.origin.y) >= LIGHTS_SLOT_TOP + CONTROL);
+        let plus = disc_rest(StripControl::New);
+        let search = disc_rest(StripControl::Search);
+        for d in [plus, search] {
+            assert_eq!(d.origin.x, toggle.origin.x, "one column");
+            assert_eq!(d.size, toggle.size, "one size");
         }
+        assert_eq!(f32::from(plus.origin.y - toggle.origin.y), DISC_PITCH);
+        assert_eq!(f32::from(search.origin.y - plus.origin.y), DISC_PITCH);
     }
 
-    /// The header's toggle: a plain window shows it at rest on the rail; full
-    /// screen never (the rail has it); mid-slide never (the overlay has it);
-    /// the narrow band's hidden sidebar as before.
+    /// The header's toggle is only the narrow band's (hidden sidebar): never
+    /// for the rail at rest or mid-slide, never for the expanded sidebar.
     #[test]
-    fn the_header_draws_the_toggle_only_for_a_windowed_rail_at_rest() {
-        assert!(header_toggle_shown(false, WIDTH, true, false, false));
+    fn the_header_draws_the_toggle_only_for_the_hidden_sidebar() {
         assert!(
-            !header_toggle_shown(false, WIDTH, true, false, true),
-            "full screen: in the rail"
+            !header_toggle_shown(false, WIDTH),
+            "rail at rest: the rail has it"
         );
         assert!(
-            !header_toggle_shown(false, 190.0, true, true, false),
-            "mid-slide: the overlay"
+            !header_toggle_shown(false, 190.0),
+            "mid-slide: the overlay has it"
         );
-        assert!(
-            !header_toggle_shown(false, 296.0, false, false, false),
-            "expanded: in the strip"
-        );
-        assert!(
-            header_toggle_shown(true, 0.0, false, false, false),
-            "narrow band, hidden"
-        );
-        assert!(!header_toggle_shown(true, 200.0, false, true, false));
+        assert!(!header_toggle_shown(false, 296.0), "expanded: in the strip");
+        assert!(header_toggle_shown(true, 0.0), "narrow band, hidden");
+        assert!(header_toggle_shown(true, 72.0));
+        assert!(!header_toggle_shown(true, 200.0), "still leaving the band");
     }
 
     /// One badge spot: typing (green) beats unread (blue); the selected chat
@@ -822,9 +798,10 @@ mod tests {
         assert_eq!(f32::from(mid.size.width), 36.0);
     }
 
-    /// The rail as `render` lays it out, in a 1079 pt window: toggle 12,
-    /// plus 56, Search 100, the first picture's top at 161 (tile 152), my
-    /// picture 12 above the bottom — the mock's pixels.
+    /// The rail as `render` lays it out, in a 1079 pt window: toggle 56,
+    /// plus 100, Search 144, the first picture's top at 205 (tile 196), my
+    /// picture 12 above the bottom — the mock's pixels, one disc pitch down
+    /// since the toggle joined the column under the lights.
     struct RailFrame;
 
     impl gpui::Render for RailFrame {
@@ -907,17 +884,17 @@ mod tests {
                 f32::from(b.size.height),
             )
         };
-        assert_eq!(at("toggle"), (24.0, 12.0, 36.0, 36.0));
-        assert_eq!(at("plus"), (24.0, 56.0, 36.0, 36.0));
-        assert_eq!(at("search"), (24.0, 100.0, 36.0, 36.0));
+        assert_eq!(at("toggle"), (24.0, 56.0, 36.0, 36.0));
+        assert_eq!(at("plus"), (24.0, 100.0, 36.0, 36.0));
+        assert_eq!(at("search"), (24.0, 144.0, 36.0, 36.0));
         let (tx, ty, tw, th) = at("tile-0");
-        assert_eq!((ty, tw, th), (152.0, 54.0, 54.0));
+        assert_eq!((ty, tw, th), (196.0, 54.0, 54.0));
         assert!(
             (tx + tw / 2.0 - CENTRE_X).abs() <= 0.5,
             "tile centred at 42 ({tx})"
         );
         let (p0x, p0y, pw, _) = at("picture-0");
-        assert_eq!((p0y, pw), (161.0, 36.0));
+        assert_eq!((p0y, pw), (205.0, 36.0));
         assert!((p0x + pw / 2.0 - CENTRE_X).abs() <= 0.5);
         let (_, p1y, _, _) = at("picture-1");
         assert_eq!(p1y - p0y, PITCH);
