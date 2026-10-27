@@ -48,7 +48,7 @@ window's top edge.
 | Gap / right inset | **8** (`STRIP_GAP` = `CONTROL_GAP`) / 12 (`STRIP_INSET`: the discs end 4 past the rows' card edge, as Grok's) |
 | Search | a round disc only; click, **⌘⇧F** or **⌘K** open the command palette (below). No inline field or capsule any more. **⌘F** is in-chat search — the Search-in-chat bar under the header pill (below), never the sidebar field |
 | Inside a server | no search (spacer); "+" only for owner/admin; collapse always |
-| Folded sidebar | collapses to the **icon rail** (section below), never away; in a plain window the chat header shows the same round disc beside the lights (`header::sidebar_toggle`), in full screen the rail's top-left slot holds it |
+| Folded sidebar | collapses to the **icon rail** (section below), never away; the toggle is the rail's first disc under the traffic lights (window and full screen alike, [feedback sidebar-toggle-in-rail-2026-10-27]); the chat header shows the round disc beside the lights (`header::sidebar_toggle`) only in the narrow band, where the sidebar hides outright |
 
 ### One button family (Jacob 2026-10-24)
 
@@ -91,29 +91,60 @@ the chat area (not the window). Points from the window's edges.
 | Item | Rule (`ui/rail.rs` `metrics`) |
 |---|---|
 | Rail | **84** wide incl. the 1 pt `border` hairline (`WIDTH`), `theme.chrome()`; one column centred at **42** |
-| Toggle | **a plain window:** stays where today's lone toggle is — the chat header's left slot, 12 after the rail (x 96), top 12 on `CONTROL_LINE`. **Native full screen** (the lights are hidden): the rail's top-left slot, x 24, top 12. `rail::toggle_spot(fullscreen)`; never both (`header_toggle_shown`) |
-| + and Search | stacked under the toggle's slot, `STRIP_GAP` 8 apart: + top **56**, Search top **100** (36 pt `control_disc`s, the strip's own handlers). In a window the toggle's slot stays empty under the lights; + and Search never move between the two modes |
-| Pictures | every chat the current filter admits — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **152** (16 under Search; picture top 161, centre 179); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, the highlight token's selected step; hover = its hover step + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
+| Lights' slot | the top **44** pt of the rail (`LIGHTS_SLOT` = `theme::TRAFFIC_LIGHT_SLOT` = button 14 + 2 × `TRAFFIC_LIGHT_POSITION` 15): the title-bar container GPUI sizes around AppKit's three buttons (x 15–75, y 15–29, centred at 22 = Grok's line, hover tracking areas inside it; re-laid out by GPUI on resize, full-screen exit, activation, screen change — `gpui_macos::window::move_traffic_light`). Reserved: none of our controls inside it; all window drag. As the expanded strip, the rail moves nothing in native full screen: macOS hides the buttons, the slot stays. Pinned by `rail::tests::no_control_shares_the_traffic_lights_frame_in_any_state` (window, full screen, morph path, key / non-key) |
+| Toggle | **inside the rail**, the first disc under the lights' slot: x **24**, top **52** (`TOGGLE_TOP` = `LIGHTS_SLOT` 44 + `STRIP_GAP` 8), the same 36 pt `control_disc` and column as + and Search, in a window and in full screen alike (Jacob 2026-10-27, [feedback sidebar-toggle-in-rail-2026-10-27]: "The tab button should also be in the side bar here" — supersedes the 2026-10-26 rule that a plain window kept the toggle in the chat header at x 96 and that full screen put it on the lights' line at top 12, where a window state read as full screen left it half hidden under the buttons; `rail::toggle_spot` is gone). The chat header draws a toggle only for the narrow band's hidden sidebar (`header_toggle_shown`) |
+| + and Search | stacked under the toggle, `STRIP_GAP` 8 apart: + top **96**, Search top **140** (36 pt `control_disc`s, the strip's own handlers) — the strip's search · + · collapse read top-down from the toggle |
+| Pictures | every chat the current filter admits — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **192** (16 under Search; picture top 201, centre 219; was 152/161/179 before the toggle joined the column); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, the highlight token's selected step; hover = its hover step + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
 | Badges | one spot at the picture's bottom-right corner: **typing** = the 9 pt `online` dot in a 13 ring (pulsing), else **unread** = the 8 pt `accent` dot in a 12 ring; the selected chat shows no unread dot — the rows' own `!typing && unread` rule |
 | My picture | alone at the bottom: 36 at x 24, **12** above the bottom (centre 30 = `CONTROL_LINE` mirrored; Grok 31), with the machine dot; opens Settings like the footer row |
-| Scrolling | the pictures scroll (`LIST_FADE_BAND` edge fade) when more fit than the window holds (`capacity`: 14 in a 1079 pt window) |
+| Scrolling | the pictures scroll (`LIST_FADE_BAND` edge fade) when more fit than the window holds (`capacity`: 14 in a 1079 pt window, 8 in a 760 one) |
 | Filter | the rail follows All · Agents · People · Servers; the segment persists in `<config>/sidebar_filter` and the collapsed state in `<config>/sidebar_collapsed` (`SidebarCollapsed`), so the app reopens as it was left |
 | Servers | a server's picture opens its **newest channel** (`#general` when none has spoken) and marks the server open, so expanding shows its channel list |
 | Expanded sidebar | **unchanged** — strip, filter, rows, footer exactly as above |
 | Composer / column | the pill's cap is Grok's **960** (`COMPOSER_WIDTH` 904 + 2 × 28; was 876), the transcript column shares it (`COLUMN_MAX_WIDTH`); both centred in the chat area right of the rail / sidebar, as before |
-| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle to the header's slot in a window), the rows' pictures shrink into their rail slots as the text and filter fade out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). Reduce Motion snaps |
+| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle with them, into its slot under the lights), the rows' pictures shrink into their rail slots as the text and filter fade out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). Reduce Motion snaps |
 | Narrow band | below `NARROW_WINDOW` the sidebar still hides and the header toggle floats it as an overlay (Q7 b); the rail is for the docked widths |
 | iPhone | no equivalent (no sidebar; the home list + the single bottom search bar) |
 
 Rig: `ARBOS_SIDEBAR_COLLAPSED=1|0` (start collapsed), `ARBOS_SIDEBAR_FILTER=…`,
-`ARBOS_RIG_FULLSCREEN=1` (lay out as full screen where the platform cannot say),
-`ARBOS_RIG_RAIL_T=0.4` (freeze the morph at a progress for still frames).
+`ARBOS_RIG_FULLSCREEN=1` (lay out as full screen where the platform cannot say;
+since [feedback sidebar-toggle-in-rail-2026-10-27] full screen changes no
+layout), `ARBOS_RIG_RAIL_T=0.4` (freeze the morph at a progress for still
+frames).
 
 Pinned by `rail::tests` (metrics vs the measurement table, the rail's layout
-on the mock's pixels, toggle spot windowed vs full screen, header-toggle rule,
-badge priority, capacity, morph maths), `slide::tests::collapsing_slides_the_sidebar_down_to_the_rail_and_back`
+on the mock's pixels, the toggle's rail slot under the lights, the lights'
+frame clear of every control in every state, header-toggle rule, badge
+priority, capacity, morph maths), `slide::tests::collapsing_slides_the_sidebar_down_to_the_rail_and_back`
 (+ reduce-motion / width-drag), `theme::sidebar_state_tests` (collapsed state
 restore) and `sidebar::strip_tests::the_filter_is_restored_from_the_config_dir`.
+
+## Narrow sidebar: the slider's snap point (Jacob 2026-10-27, [feedback sidebar-narrow-wrap-2026-10-27])
+
+**Dragging the chat list narrower never draws a broken middle state.** Jacob
+(v0.6.296): "fix wrap for when closing the side bar with the slider" — at 200 pt
+the filter capsules overflowed (one clipped on the left, "Servers" off the
+right), rows read "Arbo… 10:35 AM" with the dot crowding the name, and the
+strip's discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
+
+| Width (pt) | Rule |
+|---|---|
+| ≥ 288 (`HANDLE_MIN`) | the full row: name, `@handle` (DMs), time at `TEXT_TINY` 11.5 |
+| 238–287 (`TIME_FULL_MIN`) | the `@handle` goes first; time still 11.5 |
+| 226–237 (`TIME_SMALL_MIN`) | the time shrinks to **10** pt (`TIME_SMALL_SIZE`) |
+| 220–225 | the time is hidden; the name has the line |
+| **220** (`SNAP_WIDTH` = `SIDEBAR_WIDTH_MIN`) | the narrowest layout: the strip's search · + · collapse exactly fill the band right of the lights (72 + 12 + 3 × 36 + 2 × 8 + 12 = 220, `strip_fits`); a row keeps a `NAME_MIN` 96 pt name (`text_column` = width − 86 chrome). The handle holds here while the pointer is within 16 pt below |
+| < 204 (`SNAP_WIDTH − SNAP_HYSTERESIS`) | **snaps to the icon rail** (the rail morph, as the toggle) and keeps the width the gesture started from as the column's saved width (`EdgeTarget::Rail { keep }`) |
+| rail → out past 220 | **restores that width** (`NSSplitView` collapse behaviour): the column re-expands at it, the handle holds until the pointer passes it, then follows (`EdgeTarget::Hold` → `Expanded`). The rail's right edge is the same handle (`rail-resize`) |
+| Filter capsules | never clipped: the row scrolls horizontally under a 12 pt side fade (`FILTER_FADE_BAND`, `Shell::filter_scroll`) when the four do not fit — Grok Bot's iPhone home filter row — and is centred when they do (first / last capsule carry `auto` side margins); the selected capsule is scrolled into view. No icons, no overflow menu |
+| Strip | unchanged at every width ≥ 220 |
+
+Breakpoints derive from `ROW_CHROME` 86 (8 + 8 list, 12 + 12 row, 36 picture,
+10 gap) + `NAME_MIN` 96 + the time's footprint (56 full / 44 small) + the
+handle's 50. Pinned by `sidebar_fit::tests::{the_width_breakpoints_keep_every_part_readable,
+the_rows_time_shrinks_then_hides_before_the_name_gives,
+dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width}`.
+Rig: `<config>/sidebar_width` (the saved width) + `ARBOS_SIDEBAR_COLLAPSED=0`.
 
 ## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
 
