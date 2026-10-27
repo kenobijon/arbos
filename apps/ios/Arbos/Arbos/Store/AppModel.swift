@@ -261,6 +261,8 @@ final class AppModel: ObservableObject {
     @Published var messages: [Id: [Message]] = [:] {
         didSet { bumpVersions(from: oldValue, to: messages) }
     }
+    /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
+    private(set) var optimisticNotices: [Id: [OptimisticNotice]] = [:]
     /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
     /// watch this instead of comparing the whole message array on every body.
     @Published private(set) var messagesVersion: [Id: Int] = [:]
@@ -689,6 +691,8 @@ final class AppModel: ObservableObject {
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
     @Published var shellGrants: [Id: [ShellGrant]] = [:]
+    /// Secret hand-off request cards: approval id → saving / saved(env) / failed(sentence).
+    @Published var handoff: [String: HandoffState] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -859,6 +863,13 @@ final class AppModel: ObservableObject {
                 let event = info["event"] as? String
                 if category == PushManager.callCategory || event == "started" || event == "ended" || event == "missed" {
                     CallManager.shared.handleCallAlert(info)
+                }
+                // Silent clear-on-read push (`type: clear`, the APNs form of
+                // `notifications_cleared`): same effect as the /me/pushes row, but it also
+                // reaches a backgrounded phone.
+                if (info["type"] as? String) == "clear", let cid = info["chat_id"] as? String, !cid.isEmpty {
+                    let badge = (info["badge"] as? NSNumber)?.int64Value ?? -1
+                    self?.applyRemoteClear(chatId: cid, relayTotal: badge)
                 }
                 await self?.refreshPeople(); await self?.refreshUnread()
             }
@@ -1112,21 +1123,39 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = unreadCounts.reduce(0) { $0 + (isHiddenChat($1.key) ? 0 : $1.value) }
-            // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isHiddenChat(id) && (unreadCounts[id] ?? 0) == 0 {
-                total += 1
-            }
-            for list in chats.values {
-                for c in list where c.unread && !isHiddenChat(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
-                    total += 1
-                }
-            }
-            return total
+            let flagged = peopleUnread.union(chats.values.flatMap { $0 }.filter { $0.unread }.map(\.id))
+            return Self.badgeTotal(remote: unreadCounts, flagged: flagged, hidden: { self.isHiddenChat($0) })
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
         return people + projects
+    }
+
+    /// The app badge from the relay's per-chat counts (`GET /me/unread`) plus one for every
+    /// chat a live row flagged before `/me/unread` caught up; hidden chats never count.
+    nonisolated static func badgeTotal(remote: [String: Int], flagged: Set<String>, hidden: (String) -> Bool) -> Int {
+        var total = remote.reduce(0) { $0 + (hidden($1.key) ? 0 : $1.value) }
+        for id in flagged where !hidden(id) && (remote[id] ?? 0) == 0 {
+            total += 1
+        }
+        return total
+    }
+
+    /// A clear from another device (`notifications_cleared`) applied to the local unread
+    /// picture: the chat's remote count and local flag go, every other chat keeps its count.
+    nonisolated static func clearingChat(_ chatId: String, remote: inout [String: Int], flagged: inout Set<String>) {
+        if remote[chatId] != nil { remote[chatId] = 0 }
+        flagged.remove(chatId)
+    }
+
+    /// The badge right after a clear: the smaller of the relay's total (every chat, the read
+    /// one at 0 — what its `/me/unread` would say) and the local sum. Each side can only be
+    /// too high: the local sum when a live row lit a flag `/me/unread` has not confirmed, the
+    /// relay's when this device read a chat moments ago and its throttled `PUT /read` is
+    /// still pending, or for hidden plain chats (D78) the relay counts and the badge never
+    /// shows. A total the relay did not send (negative) falls back to the local sum.
+    nonisolated static func badgeAfterClear(relayTotal: Int64, localTotal: Int) -> Int {
+        relayTotal >= 0 ? Int(min(relayTotal, Int64(max(0, localTotal)))) : max(0, localTotal)
     }
 
     /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
@@ -1621,6 +1650,12 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // One copy of each agent's avatar everywhere, before the first frame: the record and
+        // the roster copies came back from two caches written at different times; the
+        // newest wins and every picture URL is rebuilt on the public versioned route (a
+        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
+        reconcileAgentAvatars()
+        AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
         LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
     }
@@ -2194,6 +2229,7 @@ final class AppModel: ObservableObject {
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
         }
+        foldOptimisticNotices(chatId: chatId, into: &list)
         // Reassign the whole dictionary so `@Published` always fires. Subscript
         // writes alone have left ChatView's `@State` rows stale for live inbound
         // agent replies in an open people chat (desktop had the line; iPhone did not).
@@ -2623,11 +2659,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Search handles (prefix) for the new-chat sheet.
+    /// The relay's people search (a handle-prefix lookup) for the new-chat sheet;
+    /// the sheet itself lists the directory through the shared matcher
+    /// (`PeoplePicker.people`) and adds these on top. The fixture answers from
+    /// the directory through the same matcher.
     func searchPeople(_ q: String) async -> [Person] {
         if isFixture {
-            let needle = q.lowercased()
-            return directory.filter { $0.handle.lowercased().contains(needle) || ($0.name ?? "").lowercased().contains(needle) }
+            return PeoplePicker.people(directory: directory, remote: [], me: nil, query: q)
         }
         return (try? await api.searchUsers(q)) ?? []
     }
@@ -2701,8 +2739,8 @@ final class AppModel: ObservableObject {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
             if let picture, let jpeg = await draftJpeg(picture) {
-                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
-                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: "image/jpeg", data: jpeg)) != nil,
+                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
                    let patched = try? await api.patchPeopleChat(chat.id, imageKey: key) {
                     chat = patched
                 }
@@ -3260,15 +3298,83 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// `notifications_cleared`: I read this chat on another device. The thread's delivered
+    /// notifications leave Notification Center, the chat stops being unread here (no `PUT
+    /// /read` — the relay already has the cursor), and the badge drops to the relay's total
+    /// (`/me/unread` re-syncs the per-chat counts on the next poll).
+    func applyRemoteClear(chatId: Id, relayTotal: Int64) {
+        PushManager.shared.clearDelivered(chatId: chatId)
+        var remote = unreadCounts
+        var flagged = peopleUnread
+        Self.clearingChat(chatId, remote: &remote, flagged: &flagged)
+        unreadCounts = remote
+        peopleUnread = flagged
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].unread = false
+            peopleChats[i].readSeq = max(peopleChats[i].readSeq, peopleChats[i].headSeq)
+        }
+        for (pid, list) in chats {
+            if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
+                var updated = list
+                updated[i].unread = false
+                chats[pid] = updated
+            }
+        }
+        PushManager.shared.setBadge(Self.badgeAfterClear(relayTotal: relayTotal, localTotal: unreadTotal))
+    }
+
     func addAgent(chatId: String, projectId: Id) {
+        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name))
         Task {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
+                withdrawOptimisticNotices(chatId: chatId)
                 notice = Notice(text: (error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents." : "Add agent failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// The adding phone's own "<me> added <names>" line, on screen the moment Add is tapped
+    /// (ARB-393). The relay writes the row of record; `foldOptimisticNotices` swaps this copy
+    /// out when that row lands.
+    func showMembershipNotice(chatId: Id, names: [String]) {
+        let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
+        let who = name.isEmpty ? (user?.login ?? "") : name
+        guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
+        let n = OptimisticNotice(text: text, now: nowMs())
+        optimisticNotices[chatId, default: []].append(n)
+        var next = messages
+        next[chatId, default: []].append(n.message(chatId: chatId))
+        messages = next
+    }
+
+    /// A fresh relay snapshot replaces the chat's list: keep the local notices it has not
+    /// confirmed yet, drop the ones it has (or that are past their TTL).
+    private func foldOptimisticNotices(chatId: Id, into list: inout [Message]) {
+        guard var notices = optimisticNotices[chatId] else { return }
+        OptimisticNotice.reconcile(&list, notices: &notices, chatId: chatId, now: nowMs())
+        if notices.isEmpty { optimisticNotices[chatId] = nil } else { optimisticNotices[chatId] = notices }
+    }
+
+    /// The add failed: nothing was added, so no local notice may claim it was.
+    private func withdrawOptimisticNotices(chatId: Id) {
+        guard optimisticNotices.removeValue(forKey: chatId) != nil else { return }
+        var next = messages
+        next[chatId]?.removeAll { $0.id.hasPrefix(OptimisticNotice.idPrefix) }
+        messages = next
+    }
+
+    /// Names the relay will use in its notice: a person by name, else @handle; an agent by its
+    /// project name.
+    private func membershipNames(handles: [String], agentIds: [Id]) -> [String] {
+        let people: [String] = handles.map { (h: String) -> String in
+            let n = personName(handle: h)?.trimmingCharacters(in: .whitespaces) ?? ""
+            return n.isEmpty ? "@\(h)" : n
+        }
+        let agents: [String] = agentIds.compactMap { (id: Id) -> String? in projects.first { $0.id == id }?.name }
+        return people + agents
     }
 
     func addPerson(chatId: String, handle: String) {
@@ -3337,6 +3443,7 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
@@ -3347,6 +3454,7 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError where [400, 404, 415, 422].contains(e.status) {
             // fall through to the per-item adds
         } catch {
+            withdrawOptimisticNotices(chatId: chatId)
             notice = Notice(text: "Could not add members: \(error.localizedDescription)")
             return false
         }
@@ -3371,7 +3479,11 @@ final class AppModel: ObservableObject {
                                       : "Could not add the agent: \(error.localizedDescription)")
             }
         }
-        if let failure { notice = Notice(text: failure); return false }
+        if let failure {
+            withdrawOptimisticNotices(chatId: chatId)
+            notice = Notice(text: failure)
+            return false
+        }
         return true
     }
 
@@ -3528,12 +3640,12 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
     func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
-        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
             return await setProjectImageKey(projectId: projectId, key: key)
         }
         do {
-            _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: projectId, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await setProjectImageKey(projectId: projectId, key: key)
         } catch {
             notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
@@ -3565,19 +3677,13 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
     func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
     }
 
     /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
     func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateGroupAvatar(chatId, prompt: prompt)
     }
 
@@ -3610,9 +3716,9 @@ final class AppModel: ObservableObject {
 
     /// Upload a group picture to `people:{chatId}` and patch `image_key`.
     func setGroupImage(chatId: String, jpeg: Data) async -> Bool {
-        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         do {
-            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await patchPeopleChat(chatId, imageKey: key)
         } catch {
             notice = Notice(text: "Could not upload group image: \(error.localizedDescription)")
@@ -3620,7 +3726,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Settings profile picture: `PUT /me/avatar` JPEG, then update the local user.
+    /// Settings profile picture: `PUT /me/avatar` with the master (PNG or JPEG), then update the local user.
     func setUserAvatar(jpeg: Data) async -> Bool {
         do {
             let url = try await api.putMeAvatar(jpeg: jpeg)
@@ -3636,13 +3742,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The fixture's "generation": a key named after the prompt after 1.2 s. Rig (error-state
+    /// shots): a prompt with "timeout" fails with the relay's 504 sentence after 2 s, one with
+    /// "slow" paints 25 s first (the progress state).
+    static func fixtureGenerate(_ prompt: String) async throws -> String {
+        let lower = prompt.lowercased()
+        if lower.contains("slow") { try? await Task.sleep(nanoseconds: 25_000_000_000) }
+        if lower.contains("timeout") {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            throw RelayError(status: 504, message: "Couldn't generate the image. The server took too long.", type: "avatar_timeout",
+                             detail: "gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s")
+        }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        return "fixture-gen-\(lower.replacingOccurrences(of: " ", with: "-"))"
+    }
+
     /// The avatar picker's Generate tab for my own picture: the relay paints one picture into
     /// my `users:{id}` slot and answers with its key (not yet set).
     func generateMyAvatar(prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateMyAvatar(prompt: prompt)
     }
 
@@ -3802,14 +3920,41 @@ final class AppModel: ObservableObject {
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
-    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
-        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
-            showProfile(.user(ProfilePerson(m)))
-        } else if let p = directory.first(where: { $0.handle == handle }) {
-            showProfile(.user(ProfilePerson(p)))
-        } else {
-            showProfile(.user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl)))
+    /// The one action behind every profile target in a chat — a sender name, the
+    /// avatar beside a bubble, an @mention chip, the header pill, a status-row
+    /// picture ([feedback profile-pane-toggle-ios-2026-10-26], `ProfileToggle`):
+    /// open the sheet on `target`; dismiss it when that same person or agent is
+    /// already up, whichever target opened it; swap it in place for someone else.
+    func toggleProfile(_ target: ProfileTarget) {
+        guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+            profilePath = []
+            profile = nil
+            return
         }
+        profilePath = []
+        profile = next
+    }
+
+    /// True while the sheet's top page is `target`'s subject (the label then
+    /// says "Close profile").
+    func profileShows(_ target: ProfileTarget) -> Bool {
+        (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
+    }
+
+    /// The page a sender's handle opens: the chat's member, else the directory
+    /// entry, else a bare person from the row's own fields.
+    func personTarget(handle: String, avatarUrl: String?, chatId: String) -> ProfileTarget {
+        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
+            return .user(ProfilePerson(m))
+        } else if let p = directory.first(where: { $0.handle == handle }) {
+            return .user(ProfilePerson(p))
+        } else {
+            return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
+        }
+    }
+
+    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
+        toggleProfile(personTarget(handle: handle, avatarUrl: avatarUrl, chatId: chatId))
     }
 
     /// An agent that is not in my project list: the project carried by a
@@ -4066,6 +4211,12 @@ final class AppModel: ObservableObject {
                 await refreshSecrets()
             case .secretsPaused:
                 await refreshSecrets()
+            case .messageRedacted(let payload):
+                // Secret hand-off: the row itself arrives through room sync (and the store's
+                // next snapshot is shallow); here the delivered notifications that may still
+                // show the pasted key go, and the search index follows the message list.
+                PushManager.shared.clearDelivered(chatId: payload.chat_id)
+                syncSearchIndex()
             case .secretExpiring(let payload):
                 PushManager.post(
                     id: p.id, title: "Secrets",
@@ -4102,6 +4253,8 @@ final class AppModel: ObservableObject {
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .notificationsCleared(let payload):
+                applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
         }
         if needChats { await refreshPeople() }
@@ -4660,6 +4813,43 @@ final class AppModel: ObservableObject {
     /// An approval card (S18) answered on the phone: for a secret request the relay row is the
     /// authority (`POST /secrets/requests/{id}/decide`), then the doc command `approve` /
     /// `reject` flips the card for agentd, exactly as the Mac does with `vaultRequestId`.
+    /// Secret hand-off request cards: where this device's save stands, by approval id.
+    enum HandoffState: Equatable {
+        case saving
+        /// Saved; the vault name.
+        case saved(String)
+        /// One plain sentence for the card.
+        case failed(String)
+    }
+
+    /// Secret hand-off request card → Save: the value leaves this device once, to
+    /// `POST /secrets` (source `chat`, the agent granted); the card is then answered with
+    /// the saved secret's id and names — never the value — so the agent learns only the name.
+    func saveSecretFromCard(chatId: Id, approvalId: String, projectId: Id, name: String, value: String, purpose: String) {
+        handoff[approvalId] = .saving
+        Task { @MainActor in
+            do {
+                let body: [String: Any] = [
+                    "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [["project_id": projectId, "note": purpose]],
+                    "source": ["kind": "chat", "project_id": projectId, "chat_id": chatId],
+                ]
+                let saved = try await api.createSecret(body)
+                markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["saved"])
+                if let doc = docs[chatId] {
+                    let payload: [String: Any] = ["approvalId": approvalId,
+                                                  "secret": ["id": saved.id, "name": saved.name, "env": saved.env]]
+                    try? doc.pushCommand("approve", payload: payload, device: deviceId)
+                    doc.commit()
+                }
+                handoff[approvalId] = .saved(saved.env)
+                await refreshSecrets()
+            } catch {
+                handoff[approvalId] = .failed("Couldn't save the secret. \(error.localizedDescription)")
+            }
+        }
+    }
+
     func decideApproval(chatId: Id, approvalId: String, choice: String) {
         let questionId = "approval:\(approvalId)"
         var secretRequestId: String?
@@ -5558,8 +5748,8 @@ final class AppModel: ObservableObject {
                 // The Create sheet's picture goes into the new agent's own slot first, so the
                 // list refresh already shows it.
                 if let picture, let id, let jpeg = await draftJpeg(picture) {
-                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
-                    if (try? await api.putBlob(projectId: id, key: key, mime: "image/jpeg", data: jpeg)) != nil {
+                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
                         _ = try? await api.setProjectImageKey(id, key: key)
                     }
                 }
@@ -5574,10 +5764,7 @@ final class AppModel: ObservableObject {
 
     /// Generate before the entity exists: into my own slot (`POST /me/avatar/generate`, #1789).
     func generateDraftAvatar(prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         do {
             return try await api.generateMyAvatar(prompt: prompt)
         } catch let e as RelayError where e.status == 404 {

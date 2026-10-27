@@ -123,9 +123,7 @@ struct AgentEditSheet: View {
                     .focused($nameFocused)
                     .submitLabel(.done)
                     .onSubmit(commitName)
-                    .padding(.horizontal, 16).frame(height: 46)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .controlField()
                     .padding(.horizontal, 48)
             } else {
                 Button {
@@ -404,8 +402,8 @@ struct AgentProfileView: View {
             .onChange(of: labelDraft) { _, v in if v.count > 500 { labelDraft = String(v.prefix(500)) } }
             .padding(.horizontal, 12)
             .frame(height: 32)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field)) // control-size: exception inlineChips
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
             .padding(.horizontal, 56)
     }
 
@@ -574,7 +572,13 @@ struct AgentProfileView: View {
                 var rows: [AnyView] = []
                 if let disk = AgentPane.freeOf(available: r.diskAvailableMb, total: r.diskTotalMb) { rows.append(AnyView(PaneRow(title: "Disk", value: disk))) }
                 if let mem = AgentPane.freeOf(available: r.memAvailableMb, total: r.memTotalMb) { rows.append(AnyView(PaneRow(title: "Memory", value: mem))) }
-                if let load = r.load1m { rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load)))) }
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is the host's
+                // inside Daytona (`loadIsHost`), drawn only when it is really the box's and no CPU exists.
+                if let cpu = r.cpuPct {
+                    rows.append(AnyView(PaneRow(title: "CPU", value: "\(Int(cpu.rounded())) %")))
+                } else if let load = r.load1m, !r.loadIsHost {
+                    rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load))))
+                }
                 if let up = r.uptimeS { rows.append(AnyView(PaneRow(title: "Up for", value: AgentPane.durationS(up)))) }
                 out.append(.card(rows))
             case .running:
