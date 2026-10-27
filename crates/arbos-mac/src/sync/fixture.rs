@@ -1238,6 +1238,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     bytes: None,
                     kind: None,
                     title: None,
+                    chart_part: None,
                 })
                 .collect();
             send_user(
@@ -1351,6 +1352,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: None,
                 kind: Some(AttachmentKind::Audio),
                 title: None,
+                chart_part: None,
             }];
             send_user(
                 shared,
@@ -5479,6 +5481,7 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             bytes: Some(bytes),
             kind: Some(kind),
             title: Some(title.into()),
+            chart_part: None,
         },
     }
 }
@@ -5988,6 +5991,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 bytes: None,
                 kind: Some(AttachmentKind::Audio),
                 title: None,
+                chart_part: None,
             }],
         );
         s.assistant(
