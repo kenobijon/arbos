@@ -55,6 +55,7 @@ pub mod select;
 pub mod servers;
 pub mod shell;
 pub mod sidebar;
+pub mod sidebar_fit;
 pub mod skills;
 pub mod slide;
 pub mod tasks;

@@ -119,6 +119,33 @@ priority, capacity, morph maths), `slide::tests::collapsing_slides_the_sidebar_d
 (+ reduce-motion / width-drag), `theme::sidebar_state_tests` (collapsed state
 restore) and `sidebar::strip_tests::the_filter_is_restored_from_the_config_dir`.
 
+## Narrow sidebar: the slider's snap point (Jacob 2026-10-27, [feedback sidebar-narrow-wrap-2026-10-27])
+
+**Dragging the chat list narrower never draws a broken middle state.** Jacob
+(v0.6.296): "fix wrap for when closing the side bar with the slider" — at 200 pt
+the filter capsules overflowed (one clipped on the left, "Servers" off the
+right), rows read "Arbo… 10:35 AM" with the dot crowding the name, and the
+strip's discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
+
+| Width (pt) | Rule |
+|---|---|
+| ≥ 288 (`HANDLE_MIN`) | the full row: name, `@handle` (DMs), time at `TEXT_TINY` 11.5 |
+| 238–287 (`TIME_FULL_MIN`) | the `@handle` goes first; time still 11.5 |
+| 226–237 (`TIME_SMALL_MIN`) | the time shrinks to **10** pt (`TIME_SMALL_SIZE`) |
+| 220–225 | the time is hidden; the name has the line |
+| **220** (`SNAP_WIDTH` = `SIDEBAR_WIDTH_MIN`) | the narrowest layout: the strip's search · + · collapse exactly fill the band right of the lights (72 + 12 + 3 × 36 + 2 × 8 + 12 = 220, `strip_fits`); a row keeps a `NAME_MIN` 96 pt name (`text_column` = width − 86 chrome). The handle holds here while the pointer is within 16 pt below |
+| < 204 (`SNAP_WIDTH − SNAP_HYSTERESIS`) | **snaps to the icon rail** (the rail morph, as the toggle) and keeps the width the gesture started from as the column's saved width (`EdgeTarget::Rail { keep }`) |
+| rail → out past 220 | **restores that width** (`NSSplitView` collapse behaviour): the column re-expands at it, the handle holds until the pointer passes it, then follows (`EdgeTarget::Hold` → `Expanded`). The rail's right edge is the same handle (`rail-resize`) |
+| Filter capsules | never clipped: the row scrolls horizontally under a 12 pt side fade (`FILTER_FADE_BAND`, `Shell::filter_scroll`) when the four do not fit — Grok Bot's iPhone home filter row — and is centred when they do (first / last capsule carry `auto` side margins); the selected capsule is scrolled into view. No icons, no overflow menu |
+| Strip | unchanged at every width ≥ 220 |
+
+Breakpoints derive from `ROW_CHROME` 86 (8 + 8 list, 12 + 12 row, 36 picture,
+10 gap) + `NAME_MIN` 96 + the time's footprint (56 full / 44 small) + the
+handle's 50. Pinned by `sidebar_fit::tests::{the_width_breakpoints_keep_every_part_readable,
+the_rows_time_shrinks_then_hides_before_the_name_gives,
+dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width}`.
+Rig: `<config>/sidebar_width` (the saved width) + `ARBOS_SIDEBAR_COLLAPSED=0`.
+
 ## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
 
 **The footer is the top strip mirrored at the window's bottom edge: a 60 pt
