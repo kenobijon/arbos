@@ -41,7 +41,7 @@ final class SearchSettingsTests: XCTestCase {
     /// "dev": Devin (a name hit) stays first; Devices follows in its own section,
     /// after Servers & channels and before Messages.
     func testPrefixHitListsAfterPeopleChatsAndServers() {
-        let q = HomeSearch.normalize("dev")
+        let q = HomeSearch.normalizeQuery("dev")
         var rows = [
             entry(.person, "Devin", when: 10, rank: .of(name: "Devin", handle: "devin", q: q), target: .people("dm-1")),
             entry(.server, "Dev Crew", when: 5, rank: .of(name: "Dev Crew", handle: "", q: q), target: .server("s1")),
@@ -61,7 +61,7 @@ final class SearchSettingsTests: XCTestCase {
     /// "opacity": no page is called that; Appearance's keyword is an exact hit, so
     /// Settings jumps first and the keyword leads the subtitle.
     func testExactKeywordPutsSettingsFirstAndNamesTheKeyword() {
-        let q = HomeSearch.normalize("Opacity")
+        let q = HomeSearch.normalizeQuery("Opacity")
         var rows = [entry(.message, "Affine", when: 99, rank: .indirect, target: .message(chatId: "c", projectId: "p", messageId: "m"))]
         rows += GlobalSearch.settingsEntries(query: q, agents: agents)
         let groups = GlobalSearch.arrange(rows, queryIsEmpty: false)
