@@ -18,7 +18,7 @@ use arbos_core::approval::ApprovalOutcome;
 use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
-use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
+use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event, StreamingBehavior};
 use arbos_core::widget::Widget;
 use arbos_core::{TOOL_OUTPUT_SUMMARY_MAX, TURN_DEADLINE_SECS};
 
@@ -5008,14 +5008,30 @@ impl Agent {
         let pi = self.pi().await?;
         let mut events = pi.subscribe();
         let images = std::mem::take(&mut *self.turn_images.lock().expect("turn images"));
-        let r = pi
+        // Plain Prompt is refused while pi is still finishing the previous turn ("Agent is
+        // already processing"). Queue as followUp so the message runs when free (#2072).
+        let mut r = pi
             .call(RpcCommand::Prompt {
                 id: pi.next_id("p"),
                 message: prompt_text.to_owned(),
                 streaming_behavior: None,
-                images,
+                images: images.clone(),
             })
             .await?;
+        if !r.success {
+            let err = r.error.as_deref().unwrap_or("");
+            if err.contains("already processing") {
+                tracing::info!(chat_id, "pi busy; queueing prompt as followUp");
+                r = pi
+                    .call(RpcCommand::Prompt {
+                        id: pi.next_id("p"),
+                        message: prompt_text.to_owned(),
+                        streaming_behavior: Some(StreamingBehavior::FollowUp),
+                        images,
+                    })
+                    .await?;
+            }
+        }
         if !r.success {
             return Err(anyhow!("prompt rejected: {}", r.error.unwrap_or_default()));
         }
