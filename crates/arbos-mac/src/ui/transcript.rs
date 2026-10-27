@@ -23,6 +23,7 @@ use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::cards;
+use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
@@ -2145,6 +2146,12 @@ impl Transcript {
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
             .with_mentions(self.mentions.clone(), theme.accent)
             .with_link_icons(self.link_icons.clone(), link_icon_placeholder(&theme))
+            // ⌘F Search-in-chat: this message's hit words get their marks.
+            .with_marks(chat_search::marks_for(
+                self.state.read(cx),
+                &row.message_id,
+                &theme,
+            ))
             .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {

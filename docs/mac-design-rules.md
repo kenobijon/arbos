@@ -46,7 +46,7 @@ window's top edge.
 | Disc | **36** (`STRIP_BUTTON` = `theme::CONTROL`), fill `surface_2`, glyph in `text` |
 | Glyphs | `CONTROL_GLYPH` 19 for search and + (visible marks 14.3 / 12.7 at a 1.6 stroke); `CONTROL_GLYPH_WIDE` 17 for the collapse rect (visible box 14.2) |
 | Gap / right inset | **8** (`STRIP_GAP` = `CONTROL_GAP`) / 12 (`STRIP_INSET`: the discs end 4 past the rows' card edge, as Grok's) |
-| Search | a round disc only; click, **⌘⇧F** or **⌘K** open the command palette (below). No inline field or capsule any more. **⌘F** is unbound — reserved for in-chat search (not built yet) |
+| Search | a round disc only; click, **⌘⇧F** or **⌘K** open the command palette (below). No inline field or capsule any more. **⌘F** is in-chat search — the Search-in-chat bar under the header pill (below), never the sidebar field |
 | Inside a server | no search (spacer); "+" only for owner/admin; collapse always |
 | Folded sidebar | collapses to the **icon rail** (section below), never away; in a plain window the chat header shows the same round disc beside the lights (`header::sidebar_toggle`), in full screen the rail's top-left slot holds it |
 
@@ -204,6 +204,34 @@ with the query, then one that contains it, then indirect hits; newest first;
 files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
 `ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
 the highlighted row once the rows are there).
+
+## Search in chat — ⌘F (Jacob 2026-10-26, [feedback search-in-chat-mac-2026-10-26]; approved mock 14:18 CR)
+
+"Bring back command F to find things in a chat by key word, user name etc."
+The Mac never had it (⌘F opened the sidebar field in v0.6.197 and was unbound
+in v0.6.212 for this); the iPhone's bar is #1829. **⌘F opens the
+Search-in-chat bar for the open chat** — the palette (⌘⇧F / ⌘K) stays
+app-wide, the bar is this chat only. Code: `crate::chat_search` (rules),
+`ui::chat_search` (bar), `AppState::chat_search` (state).
+
+| Item | Rule |
+|---|---|
+| Place | the first thing under the header: top **56** = `PILL_TOP` 12 + `PILL_HEIGHT` 36 + **8** (the iPhone's spacing); the pill does not move; the first row starts **12** under the bar — the transcript moves down **44** (`metrics::PUSH`) |
+| Size | **36** tall (`CONTROL`, the button family), radius **12** (the iPhone bar's / `BUBBLE_RADIUS`), **820** wide (`COMPOSER_WIDTH`), centred — bar, rows and composer share their edges; narrower panes shrink it with the composer |
+| Material | the header's (`glass::header_surface` + `header_frost`): frosted on Glass and Matte alike, 1 pt rim, top highlight, the rows blurred through — the pill's own spec, so the bar follows whatever the pill does |
+| Inside, left → right | inset 12; magnifier 15 muted; pinned sender chip (24 tall, picture 18, "From Name" 12.5 medium, accent 18 %, ✕ unpins); the field at `TEXT_BODY` 15, placeholder "Search in chat"; an offered chip while a name matches (⇥ pins); right: "searching older…" while a page is in flight, the count 13 pt muted, ‹ › 24 pt hit targets (faint with nothing to step to), ✕ 16 |
+| Matching | keyword = folded substring over the chat's loaded rows (`arbos_core::search::fold`, the palette index's text); sender = the shared matcher of #1918 (`match_entity` on display name / @handle of everyone who posted: exact > prefix > word-start, name before handle); **chip AND keyword**; a pinned chip with no text = all of that sender's rows. A hit is a **message**, not a word occurrence |
+| Count | "n of m" over the loaded rows, 1 = the oldest loaded (Find's order); the cursor starts on the newest hit; "No matches"; nothing while nothing is typed |
+| Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism |
+| Keys | ⌘F open / refocus (never closes); Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close — marks go, the composer types again. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention |
+| Beyond the loaded rows | ‹ on the oldest loaded hit of a **server channel** asks the relay for a page (`ChannelLoadOlder`), shows "searching older…", moves on to the page's older hit when it lands, keeps paging while rows come without a hit, and wraps once the room says there is nothing above (`SyncEvent::ChannelHistoryEnd`). A chat doc (agent, DM, group) is whole on this Mac, so ‹ wraps at once |
+| Not | no second field in the header, no dropdown of senders, no match counter in the pill, no sidebar field |
+
+Pinned by `chat_search::tests` (hits, AND, offer, wrap, paging step, count,
+byte ranges), `ui::chat_search::tests` (⌘F opens the bar at 56 / 36 / the
+composer's width and focuses the field, Esc closes; typing counts, steps,
+wraps, pins; a channel pages older rows then wraps) and `keymap_tests`
+(⌘F / ⌘G / ⇧⌘G; Enter / ⇧Enter / ⇥ inside the bar).
 
 ### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
 
