@@ -180,7 +180,7 @@ composer) is unchanged; this rule is for the small status glyph on rows.
 | Colour | `theme.text_muted` — the time label's colour above it. Not `online` green, not `warn` amber, not the accent |
 | Where | **sidebar chat rows**: the status cell at the right end of the preview line, under the time (`sidebar::RowStatus`: Working ▸ Unread ▸ Quiet — the spinner while the chat's agent streams **or a person types**, else the 8 pt accent unread dot, else nothing; the old green typing pulse is gone). **Header tab segment**: the spinner after the tab name while that tab streams (was a 6 pt amber dot). **Settings › Machine › Per-agent usage**: the spinner before "Working · …" on a running workspace. The collapsed rail's picture badges and the avatar presence dot are *not* this rule (avatar badge code, another owner) |
 | Clock | one `WorkingClock` global: frame = elapsed ÷ 90 ms mod 10, read by every spinner at render → all spinners turn in step; no row owns a timer |
-| Ticker | one task for the whole app. Drawing a spinner marks the clock `wanted`; the ticker sleeps 90 ms, and if nothing was drawn since the last tick it parks (no frames requested at all) — it starts again on the next spinner drawn. It also parks while the window is in the background (`Shell`'s activation observer → `WorkingClock::set_window_active`) and resumes with the window. A tick landing on a frame the window draws anyway (a scroll) is coalesced by GPUI — the ticker never adds frames to a scroll |
+| Ticker | one task for the whole app. Drawing a spinner marks the clock `wanted`; the ticker sleeps 90 ms, and if nothing was drawn since the last tick it parks (no frames requested at all) — it starts again on the next spinner drawn. It also parks while the window is in the background (`Shell`'s activation observer → `WorkingClock::set_window_active`) and resumes with the window. A tick landing on a frame the window draws anyway (a scroll) is coalesced by GPUI — the ticker never adds frames to a scroll. The sidebar row's old `PulseClock::request` for a working row (30 fps whole-window redraws that nothing read since the tree animation retired) is gone: a working row costs the 11 fps ticker and nothing else |
 | Reduce Motion | `cx.reduce_motion()` → the still glyph **⠿** in the same cell, and no frame requested (the ticker parks) |
 | Trace | `ARBOS_WORKING_TRACE=1` prints once a second: `working spinner: ticks=N starts=M spinners=K draws/tick=D frame=F` — `starts` is the number of ticker tasks ever spawned (1 per idle→busy transition, never one per row), `spinners` how many distinct cells were on screen in the last tick, `draws/tick` how many window frames drew them (1 = only the ticker's) |
 
@@ -320,6 +320,39 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
+
+### Connection capsule under the pill — shown for every chat kind, whole (Jacob 2026-10-22 [feedback connection-pill]; 2026-10-27 [feedback offline-chip-group-header-2026-10-27])
+
+The small dark capsule under the pill — a 6 pt dot and two words, "Offline" ·
+"Relay down" · "Reconnecting…" · "Syncing…" · "Reconnecting shortly…" — is the
+**connection capsule** (#1339): it reports *this Mac's link to the relay for
+the open chat* (`AppState::link_pill` = the chat's own room socket and the
+relay's registry poll, highest verdict wins, shown once a state has held
+1.2 s). It is not a member's presence, not typing, not the agent status row.
+
+| Chat kind | Capsule | Why |
+| --- | --- | --- |
+| Agent chat / job tab | shown | the agent's room is a relay room; sends queue while the link is down |
+| DM | shown | same |
+| People group | shown | same — "Offline" under Arbonites was a true reading of the group's room link |
+| Server channel | shown | same (the channel's room id is the chat id) |
+
+Rule in code: `header::ChatKind::shows_link_pill` (an exhaustive match, so a
+new kind must decide). Geometry (`header::metrics`): top `LINK_PILL_TOP` =
+pill top 12 + pill 36 + gap 3 = **51**, height **22**, centred on the pill;
+its box reaches `LINK_PILL_OVERHANG` **13** pt below the 60 pt bar, so the bar
+does not clip its children and the shell's floating header overlay is
+`OVERLAY_HEIGHT` **73** tall (the capsule has no hitbox, and the drag
+catchment under the bar — `DRAG_OVERHANG` 24 — already covers that band). It
+steps aside while the ⌘F bar is open (that bar owns the slot under the pill,
+`chat_search::metrics::TOP` 56). What Jacob saw on 2026-10-27 (Arbonites, Dark
+Glass, v0.6.296): a4e0031ed (2026-10-24) had put `overflow_hidden` on the bar
+and on the overlay at `HEIGHT`, so the capsule (51–73) showed only its top
+9 pt — the upper half of "Offline". Pinned by
+`header::link_pill_tests` (the real `Shell`, one chat of each kind: capsule
+whole under the pill, inside the overlay's clip box, pill and bar unmoved;
+gone with the link live; gone while ⌘F is open) and
+`every_kind_shows_the_capsule_and_the_header_leaves_room_for_it`.
 
 ### Material: frosted glass on both surfaces (Jacob 2026-10-25 + 2026-10-26, [feedback mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26])
 

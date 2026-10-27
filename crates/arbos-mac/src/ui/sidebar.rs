@@ -574,7 +574,6 @@ pub(crate) struct RowView {
     pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
-    pub(crate) avatar_state: avatars::AvatarState,
 }
 
 /// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
@@ -721,7 +720,6 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
                     (person, img)
                 })
                 .collect(),
-            avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
         rows.push((
@@ -1940,7 +1938,6 @@ fn render_row(
         time,
         person_image: _,
         guests: _,
-        avatar_state,
     } = row;
     let id: Id = space.id.clone();
     let menu_id: Id = space.id.clone();
@@ -1952,11 +1949,10 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    // The picture's own motion (generating / uploading) rides the pulse clock;
-    // the status cell's spinner has its own shared ticker (`ui::working`).
-    if avatar_state != avatars::AvatarState::Idle {
-        PulseClock::request(cx);
-    }
+    // No pulse-clock request for a working row any more: nothing in the row
+    // reads `avatar_state` (the tree animation is retired, D79), and the old
+    // request made every working row redraw the window at 30 fps for nothing.
+    // The status cell's spinner has its own shared 11 fps ticker (`ui::working`).
 
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
@@ -3635,7 +3631,10 @@ mod status_cell_tests {
             t.drawn_last_frame, 2,
             "two cells on screen: the agent's and the DM's"
         );
-        assert!(t.draws_last_tick >= 1);
+        assert_eq!(
+            t.draws_last_tick, 1,
+            "the ticker alone draws the Shell once per period"
+        );
 
         vcx.update(|_, cx| cx.set_reduce_motion(true));
         for _ in 0..3 {
