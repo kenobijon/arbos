@@ -2174,12 +2174,13 @@ pub enum RowStatus {
 
 impl RowStatus {
     pub fn of(streaming: bool, typing: bool, unread: bool) -> Self {
-        if typing {
-            RowStatus::Typing
-        } else if streaming {
+        // Typing draws nothing, so it never hides the spinner or the pill.
+        if streaming {
             RowStatus::Working
         } else if unread {
             RowStatus::Unread
+        } else if typing {
+            RowStatus::Typing
         } else {
             RowStatus::Quiet
         }
@@ -3418,13 +3419,18 @@ mod status_cell_tests {
         }
     }
 
-    /// The rule as code: a person typing keeps the green pulse (the spinner
-    /// is never a human's sign), the agent's spinner beats unread, unread
-    /// beats quiet.
+    /// The rule as code: the agent's spinner beats unread, unread beats a
+    /// person typing (which draws nothing — the spinner is never a human's
+    /// sign), typing beats quiet.
     #[test]
     fn the_cell_shows_one_thing_in_this_order() {
-        assert_eq!(RowStatus::of(false, true, true), RowStatus::Typing);
-        assert_eq!(RowStatus::of(true, true, false), RowStatus::Typing);
+        assert_eq!(RowStatus::of(false, true, false), RowStatus::Typing);
+        assert_eq!(
+            RowStatus::of(false, true, true),
+            RowStatus::Unread,
+            "typing draws nothing, so it hides nothing"
+        );
+        assert_eq!(RowStatus::of(true, true, false), RowStatus::Working);
         assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
         assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
         assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
