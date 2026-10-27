@@ -1007,7 +1007,7 @@ extension AppModel {
     /// "Forwarded from <by>" on it ([feedback forward-attachments-ios-2026-10-27];
     /// app-01M5MXRZ7609S70P9S9P2RZDDF sent the words alone).
     func forwardMessage(_ message: Message, from by: String, slot: String, to target: ForwardTarget) {
-        guard let payload = ForwardPayload.of(message) else { return }
+        guard let payload = message.body else { return }
         let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
         let forwardedFrom = name.isEmpty ? nil : name
         let chatId: Id
@@ -1051,7 +1051,7 @@ extension AppModel {
                         notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
                     }
                 }
-                extraParts.append(contentsOf: ForwardPayload.chartParts(c, fallbackRef: fallbackRef))
+                extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
             }
             guard !payload.text.isEmpty || !pending.isEmpty || !extraParts.isEmpty else {
                 notice = Notice(text: "Couldn't forward the message")
@@ -1080,76 +1080,18 @@ extension AppModel {
     }
 }
 
-/// What a bubble-menu Forward carries over ([feedback forward-attachments-ios-2026-10-27]):
-/// the message's text, every attachment part that is not a chart's fallback picture, and
-/// every chart with its fallback. `of` is nil when the message has nothing a forward can
-/// carry (no words, no attachment on the relay, no chart) — the Mac `ForwardPayload`.
-struct ForwardPayload: Equatable {
-    struct Chart: Equatable {
-        var id: Id
-        var specVersion: Int
-        var spec: String
-        var table: String
-        var fallback: Attachment?
-    }
-
-    var text: String
-    var attachments: [Attachment]
-    var charts: [Chart]
-
-    var hasMedia: Bool { !attachments.isEmpty || !charts.isEmpty }
-
-    static func of(_ message: Message) -> ForwardPayload? {
-        let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-        var fallbackIds = Set<String>()
-        for part in message.parts {
-            if case .chart(_, _, _, _, let fallback) = part, let fallback { fallbackIds.insert(fallback) }
-        }
-        var attachments: [Attachment] = []
-        var charts: [Chart] = []
-        for part in message.parts {
-            switch part {
-            case .attachment(let id, let a) where !fallbackIds.contains(id) && onRelay(a):
-                attachments.append(a)
-            case .chart(let id, let specVersion, let spec, let table, let fallback):
-                let picture = fallback.flatMap { f in
-                    message.parts.lazy.compactMap { p -> Attachment? in
-                        if case .attachment(let aid, let a) = p, aid == f, onRelay(a) { return a }
-                        return nil
-                    }.first
-                }
-                charts.append(Chart(id: id, specVersion: specVersion, spec: spec, table: table, fallback: picture))
-            default:
-                break
-            }
-        }
-        guard !text.isEmpty || !attachments.isEmpty || !charts.isEmpty else { return nil }
-        return ForwardPayload(text: text, attachments: attachments, charts: charts)
-    }
-
-    /// Does `message` hold an attachment whose upload has not finished (a `local:` key)?
-    static func hasUploadingAttachment(_ message: Message) -> Bool {
-        message.parts.contains {
-            if case .attachment(_, let a) = $0, let ref = a.blobRef { return ref.hasPrefix("local:") }
-            return false
-        }
-    }
-
-    private static func onRelay(_ a: Attachment) -> Bool {
-        guard let ref = a.blobRef else { return false }
-        return !ref.isEmpty && !ref.hasPrefix("local:")
-    }
-
+/// Forward writes a chart again as its own parts ([feedback forward-attachments-ios-2026-10-27]).
+extension ChartBody {
     /// The doc parts a forwarded chart becomes on the new row: its copied fallback picture
     /// (when it has one, uploaded under `fallbackRef`) naming the chart as `chartPart`, then
     /// the `chart` part itself with fresh ids and `fallback` pointing at that picture — the
     /// shape `post_chart` writes, so a client that draws charts hides the picture and an
     /// older one shows it. The spec travels as the JSON object it is.
-    static func chartParts(_ c: Chart, fallbackRef: String?) -> [[String: Any]] {
+    func forwardParts(fallbackRef: String?) -> [[String: Any]] {
         let chartId = newId()
         var out: [[String: Any]] = []
         var fallbackId: String?
-        if let a = c.fallback {
+        if let a = fallback {
             let id = newId()
             var attachment: [String: Any] = ["name": a.name, "mime": a.mime, "chartPart": chartId]
             if let kind = a.kind { attachment["kind"] = kind }
@@ -1157,9 +1099,9 @@ struct ForwardPayload: Equatable {
             out.append(["id": id, "kind": "attachment", "attachment": attachment])
             fallbackId = id
         }
-        let spec = (c.spec.data(using: .utf8)).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? c.spec
-        var chart: [String: Any] = ["id": chartId, "kind": "chart", "specVersion": c.specVersion,
-                                    "chart": spec, "table": c.table]
+        let specValue: Any = spec.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? spec
+        var chart: [String: Any] = ["id": chartId, "kind": "chart", "specVersion": specVersion,
+                                    "chart": specValue, "table": table]
         if let fallbackId { chart["fallback"] = fallbackId }
         out.append(chart)
         return out
