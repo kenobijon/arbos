@@ -17,8 +17,13 @@ use crate::sync::credentials::config_dir;
 /// user can drag the right edge between [`SIDEBAR_WIDTH_MIN`] and
 /// [`SIDEBAR_WIDTH_MAX`] ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
 pub const SIDEBAR_WIDTH: f32 = 296.0;
-/// Narrowest the chat-list column may be dragged (avatar + short name).
-pub const SIDEBAR_WIDTH_MIN: f32 = 200.0;
+/// Narrowest the chat-list column is drawn at: the strip's three discs
+/// exactly fill the band right of the traffic lights (72 + 12 + 3 × 36 +
+/// 2 × 8 + 12) and a row keeps a readable name with no time. Dragging on
+/// past it snaps the column to the icon rail (`ui::sidebar_fit`; was 200,
+/// where the discs overflowed onto the lights and the filter capsules
+/// clipped — [feedback sidebar-narrow-wrap-2026-10-27]).
+pub const SIDEBAR_WIDTH_MIN: f32 = 220.0;
 /// Widest the chat-list column may be dragged.
 pub const SIDEBAR_WIDTH_MAX: f32 = 480.0;
 /// Hit target on the sidebar's right edge for the resize drag.

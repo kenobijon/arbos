@@ -33,7 +33,7 @@ use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
-use crate::ui::frost::edge_faded;
+use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
@@ -41,6 +41,7 @@ use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
+use crate::ui::sidebar_fit;
 use crate::ui::theme::{
     Theme, AVATAR_ROW, CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, HEADER_HEIGHT,
     PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
@@ -48,7 +49,7 @@ use crate::ui::theme::{
 
 /// Drag payload for the chat-list column's right-edge resize handle.
 #[derive(Clone)]
-struct SidebarResizeDrag;
+pub(crate) struct SidebarResizeDrag;
 
 struct SidebarResizeDragGhost;
 
@@ -56,6 +57,47 @@ impl Render for SidebarResizeDragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// The column's right-edge resize handle — the expanded sidebar's and the
+/// rail's are the same element (`id`s differ), so one drag runs across the
+/// snap between them: a slim hit target (col-resize cursor), the drag's
+/// start resets the gesture, every move goes to
+/// `AppState::drag_sidebar_edge` with the pointer's x
+/// ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65], [feedback sidebar-narrow-wrap-2026-10-27]).
+pub(crate) fn resize_handle(
+    id: &'static str,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .right_0()
+        .h_full()
+        .w(px(SIDEBAR_RESIZE_HANDLE))
+        .cursor(CursorStyle::ResizeColumn)
+        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(SidebarResizeDrag, {
+            let shell = cx.entity().downgrade();
+            move |_, _, _, cx| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.update(cx, |this, cx| {
+                        this.state.update(cx, |s, _| s.begin_sidebar_edge_drag());
+                    });
+                }
+                cx.new(|_| SidebarResizeDragGhost)
+            }
+        })
+        .on_drag_move(
+            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
+                // The column docks at the window's left, so mouse x is the width.
+                let x = f32::from(ev.event.position.x);
+                this.state.update(cx, |s, cx| s.drag_sidebar_edge(x, cx));
+            }),
+        )
 }
 
 /// The drag strip beside the traffic lights: Grok Bot's top band, the same
@@ -101,6 +143,8 @@ pub(crate) const FILTER_PAD_X: f32 = 10.0;
 /// there: 60 + 4 ([feedback topbar-grok-parity-2026-10-24]; was 44 + 6 = 50).
 pub(crate) const FILTER_TOP: f32 = 4.0;
 pub(crate) const FILTER_BOTTOM: f32 = 8.0;
+/// The side fade on the capsule row when it scrolls (a narrow column).
+pub(crate) const FILTER_FADE_BAND: f32 = 12.0;
 /// Server rows draw their picture as a rounded square (corner = this fraction
 /// of the size) so they read apart from the agent and people discs.
 pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
@@ -996,17 +1040,28 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let strip = strip.window_drag();
     // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
     // Bare labels, the selected one on a capsule, centred; no track, no border.
+    // Narrow column ([feedback sidebar-narrow-wrap-2026-10-27]): the capsules
+    // scroll horizontally under an edge fade when they do not fit, like Grok
+    // Bot's iPhone filter row — the first and last capsule carry `auto` side
+    // margins, which centre the set while there is room and resolve to 0 (a
+    // left-aligned, scrollable row) once there is not; the selected capsule
+    // is scrolled into view (`Shell::filter_scroll`).
+    let filter_count = ListFilter::ALL.len();
+    if let Some(ix) = ListFilter::ALL.iter().position(|f| *f == filter) {
+        shell.filter_scroll.scroll_to_item(ix);
+    }
     let filter_bar = div()
         .id("sidebar-filter")
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center()
         .gap(px(FILTER_GAP))
         .pt(px(FILTER_TOP))
         .pb(px(FILTER_BOTTOM))
         .px(px(8.0))
-        .children(ListFilter::ALL.into_iter().map(|f| {
+        .overflow_x_scroll()
+        .track_scroll(&shell.filter_scroll)
+        .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
             let on = f == filter;
             div()
                 .id(ElementId::Name(SharedString::from(format!(
@@ -1016,8 +1071,18 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .h(px(FILTER_HEIGHT))
                 .px(px(FILTER_PAD_X))
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
+                .map(|mut el| {
+                    if ix == 0 {
+                        el.style().margin.left = Some(gpui::Length::Auto);
+                    }
+                    if ix + 1 == filter_count {
+                        el.style().margin.right = Some(gpui::Length::Auto);
+                    }
+                    el
+                })
                 .rounded_full()
                 .cursor_pointer()
                 .bg(if on {
@@ -1297,30 +1362,9 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
             }),
         );
 
-    // Drag handle on the right edge: a slim hit target (col-resize cursor) that
-    // lets the user make the chat list slimmer or wider
-    // ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
-    let resize = div()
-        .id("sidebar-resize")
-        .absolute()
-        .top_0()
-        .right_0()
-        .h_full()
-        .w(px(SIDEBAR_RESIZE_HANDLE))
-        .cursor(CursorStyle::ResizeColumn)
-        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_drag(SidebarResizeDrag, |_, _, _, cx| {
-            cx.new(|_| SidebarResizeDragGhost)
-        })
-        .on_drag_move(
-            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
-                // The column docks at the window's left, so mouse x is the width.
-                let width = f32::from(ev.event.position.x);
-                this.state
-                    .update(cx, |s, cx| s.set_sidebar_width(width, cx));
-            }),
-        );
+    // Drag handle on the right edge: slimmer or wider, and past the snap
+    // point the column collapses to the rail (`ui::sidebar_fit`).
+    let resize = resize_handle("sidebar-resize", &theme, cx);
 
     let column = div()
         .relative()
@@ -1335,7 +1379,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .child(strip)
         // The filter belongs to the chat list, not to a server's channel list.
         .when(filter_shown(open_server.is_some()), |el| {
-            el.child(filter_bar)
+            el.child(edge_faded_sides(FILTER_FADE_BAND, filter_bar))
         })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
@@ -1522,13 +1566,9 @@ fn render_server_row(
                                 .child(server.name.clone()),
                         )
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(time),
-                        ),
+                        .when_some(row_time_size(shell, cx), |el, size| {
+                            el.child(time_el(time, size, theme))
+                        }),
                 )
                 .child(
                     div()
@@ -1720,13 +1760,9 @@ fn server_channels(
                                 )
                                 .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)))
                                 .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(px(TEXT_TINY))
-                                        .text_color(theme.text_muted)
-                                        .child(time),
-                                ),
+                                .when_some(row_time_size(shell, cx), |el, size| {
+                                    el.child(time_el(time, size, theme))
+                                }),
                         )
                         .child(
                             div()
@@ -1902,6 +1938,26 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// A row's picture wrapped for the rail morph: its resting bounds are recorded
 /// under the row's id every frame it is painted; while the morph runs the
 /// overlay paints it instead (`invisible` keeps the slot).
+/// The rows' time size at the column's width — `None` hides it: the name
+/// wins as the column narrows (`ui::sidebar_fit::row_time`,
+/// [feedback sidebar-narrow-wrap-2026-10-27]).
+fn row_time_size(shell: &Shell, cx: &Context<Shell>) -> Option<f32> {
+    match sidebar_fit::row_time(shell.state.read(cx).sidebar_width) {
+        sidebar_fit::RowTime::Full => Some(TEXT_TINY),
+        sidebar_fit::RowTime::Small => Some(sidebar_fit::TIME_SMALL_SIZE),
+        sidebar_fit::RowTime::Hidden => None,
+    }
+}
+
+fn time_el(time: String, size: f32, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .text_size(px(size))
+        .text_color(theme.text_muted)
+        .debug_selector(|| "row-time".into())
+        .child(time)
+}
+
 fn recorded_picture(shell: &Shell, id: &Id, hide_morphing: bool, picture: Div) -> Div {
     let snap = shell.morph.clone();
     let id = id.clone();
@@ -1960,10 +2016,15 @@ fn render_row(
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
     let name = row_name(&space);
+    // The name wins over the time as the column narrows: the time shrinks,
+    // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
+    // [feedback sidebar-narrow-wrap-2026-10-27]).
+    let handle_shown = sidebar_fit::handle_shown(shell.state.read(cx).sidebar_width);
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
         .filter(|_| space.is_people() && !space.is_people_group())
+        .filter(|_| handle_shown)
         .map(|p| format!("@{}", p.handle));
     let preview = if typing {
         "typing…".to_string()
@@ -2107,13 +2168,9 @@ fn render_row(
                             )
                         })
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(time),
-                        ),
+                        .when_some(row_time_size(shell, cx), |el, size| {
+                            el.child(time_el(time, size, theme))
+                        }),
                 )
                 .child(
                     div()

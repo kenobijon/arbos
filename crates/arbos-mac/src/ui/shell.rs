@@ -337,8 +337,11 @@ pub struct Shell {
     pub(crate) rail_hover: Option<crate::model::Id>,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
+    /// The sidebar filter capsules' horizontal scroll (a narrow column,
+    /// [feedback sidebar-narrow-wrap-2026-10-27]).
+    pub(crate) filter_scroll: ScrollHandle,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
-    /// screen (the rail's toggle at its top-left slot) where the platform
+    /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
     rig_fullscreen: bool,
     /// Rig: `ARBOS_RIG_RAIL_T=0.4` freezes the collapse morph at that
@@ -1147,6 +1150,7 @@ impl Shell {
             morph: Default::default(),
             rail_hover: None,
             rail_scroll: ScrollHandle::new(),
+            filter_scroll: ScrollHandle::new(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
