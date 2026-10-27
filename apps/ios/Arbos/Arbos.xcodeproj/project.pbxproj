@@ -20,6 +20,7 @@
 		A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F0A4FDC36335E86EDA8A5F /* AppModel.swift */; };
 		A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C5B0E1F2A3B4C5D6E704 /* LaunchClock.swift */; };
 		A1BF00000000000000000002 /* PerfLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BF00000000000000000001 /* PerfLog.swift */; };
+		A1BF00000000000000000022 /* PerfDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BF00000000000000000021 /* PerfDiagnostics.swift */; };
 		A1BF00000000000000000012 /* SendTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BF00000000000000000011 /* SendTrace.swift */; };
 		A1D0C5B0E1F2A3B4C5D6E701 /* DeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C5B0E1F2A3B4C5D6E702 /* DeviceStore.swift */; };
 		A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E06B8AB50C3A04CA1B1326 /* CallManager.swift */; };
@@ -222,6 +223,7 @@
 		A1F0A4FDC36335E86EDA8A5F /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A1D0C5B0E1F2A3B4C5D6E704 /* LaunchClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchClock.swift; sourceTree = "<group>"; };
 		A1BF00000000000000000001 /* PerfLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfLog.swift; sourceTree = "<group>"; };
+		A1BF00000000000000000021 /* PerfDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfDiagnostics.swift; sourceTree = "<group>"; };
 		A1BF00000000000000000011 /* SendTrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTrace.swift; sourceTree = "<group>"; };
 		A1D0C5B0E1F2A3B4C5D6E702 /* DeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStore.swift; sourceTree = "<group>"; };
 		A1E06B8AB50C3A04CA1B1326 /* CallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallManager.swift; sourceTree = "<group>"; };
@@ -487,6 +489,7 @@
 				A1D0C5B0E1F2A3B4C5D6E702,
 				A1D0C5B0E1F2A3B4C5D6E704,
 				A1BF00000000000000000001,
+				A1BF00000000000000000021,
 				A1BF00000000000000000011,
 				A1E06B8AB50C3A04CA1B1326,
 				A1EA51EFDDA9FCC9D359DDAD,
@@ -856,6 +859,7 @@
 				A1D8800000000000000000F2 /* MediaViewer.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */,
 				A1BF00000000000000000002 /* PerfLog.swift in Sources */,
+				A1BF00000000000000000022 /* PerfDiagnostics.swift in Sources */,
 				A1BF00000000000000000012 /* SendTrace.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E701 /* DeviceStore.swift in Sources */,
 				A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */,

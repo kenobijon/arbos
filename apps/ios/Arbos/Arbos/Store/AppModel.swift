@@ -1050,6 +1050,12 @@ final class AppModel: ObservableObject {
                                           appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
     }
 
+    /// Opt-in MetricKit payload → the relay (`PerfDiagnostics`). The fixture never posts.
+    func sendPerfReport(_ envelope: [String: Any]) async throws {
+        if isFixture { return }
+        try await api.sendPerfReport(envelope)
+    }
+
     // MARK: Calls v1
 
     private func hookCalls() {

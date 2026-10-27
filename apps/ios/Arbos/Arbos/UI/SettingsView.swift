@@ -1414,6 +1414,7 @@ struct TextSizePage: View {
 struct AboutPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @State private var perfDiagnostics = PerfDiagnostics.enabled
 
     private var protocolValue: String {
         let st = model.sharedRoomStats
@@ -1443,8 +1444,16 @@ struct AboutPage: View {
                     SettingsValueRow("Updates", value: "Up to date")
                 }
             }
+            // Opt-in MetricKit forwarding (`PerfDiagnostics`): off by default; anonymous.
+            SettingsGroup(footer: "Sends the scroll smoothness, hang, launch and memory numbers iOS collects for Arbos on this phone to the Arbos team. No account, device or message data goes with them.") {
+                SettingsValueRow("Share performance diagnostics") {
+                    Toggle("", isOn: $perfDiagnostics).labelsHidden().tint(theme.online)
+                        .accessibilityIdentifier("about-perf-diagnostics")
+                }
+            }
         }
         .task { await model.checkForUpdate() }
+        .onChange(of: perfDiagnostics) { _, on in PerfDiagnostics.enabled = on }
     }
 }
 

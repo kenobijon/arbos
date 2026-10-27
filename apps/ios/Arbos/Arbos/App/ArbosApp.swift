@@ -50,6 +50,9 @@ struct RootView: View {
             #if DEBUG
             PerfLog.shared.startIfRequested()
             PerfLog.shared.observe(model)
+            #endif
+            PerfDiagnostics.shared.start(model: model)
+            #if DEBUG
             if DebugHooks.perfChanges { setlinebuf(stdout) }
             #endif
             if DebugHooks.show == "onboarding" {
