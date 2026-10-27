@@ -368,7 +368,8 @@ extension View {
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in onLongPress() }
+                    .onEnded { _ in onLongPress() },
+                enabled: ChatGestures.longPress
             )
             // Double-tap toggles a heart under the bubble (Telegram / iMessage;
             // [feedback app-01M5VCGAPAXY6NN8TNSWAWJ52Z]).
