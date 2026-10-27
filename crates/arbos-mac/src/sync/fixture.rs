@@ -1299,18 +1299,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
             text,
+            attachments,
+            charts,
             forwarded_from,
+            ..
         } => {
+            // No blob store to copy between: the row lands with the same keys,
+            // so its pictures are already cached. A chart travels as its
+            // fallback picture here (the fixture doc writer has no chart parts).
+            let mut attachments = attachments;
+            attachments.extend(charts.into_iter().filter_map(|c| c.fallback));
             send_user(
                 shared,
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                attachments,
                 None,
                 Some(forwarded_from),
                 None,

@@ -34,7 +34,7 @@ use crate::model::{
 };
 use crate::model::{
     Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
-    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    Link, LinkState, LocalView, Machine, Message, NewSecret, Part, Project, ProjectDocView,
     ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
@@ -533,6 +533,17 @@ pub enum PictureSource {
     Key(String),
 }
 
+/// A chart bubble on its way to another chat (`ClientCommand::ForwardMessage`):
+/// the `chart` part as the source message carries it, plus its fallback picture
+/// when the message has one (copied like any attachment and linked to the new
+/// chart part again, so a client that draws the chart still hides the picture).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForwardedChart {
+    /// Always a `Part::Chart`.
+    pub chart: Part,
+    pub fallback: Option<Attachment>,
+}
+
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
@@ -980,13 +991,20 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
-    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
-    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
-    /// `message_id` is the optimistic row's id.
-    ForwardText {
+    /// Bubble menu → Forward: write the picked message again as a new user row
+    /// in `chat_id` — its text, every attachment (each blob copied from
+    /// `from_slot` into the destination's slot, so the target chat's members can
+    /// read it) and every chart part with its fallback picture — carrying
+    /// `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id
+    /// ([feedback forward-attachments-mac-2026-10-27]).
+    ForwardMessage {
         chat_id: Id,
         message_id: Id,
+        from_slot: Id,
         text: String,
+        attachments: Vec<Attachment>,
+        charts: Vec<ForwardedChart>,
         forwarded_from: String,
     },
     /// Settings → Connectors opened or asked for a refresh.

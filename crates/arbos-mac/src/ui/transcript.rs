@@ -433,7 +433,7 @@ pub fn message_line(message: &Message, max_chars: usize) -> String {
 
 /// The forwarded bubble's header (Telegram / iMessage): forward glyph, then
 /// "Forwarded from <name>", one line, in the quote header's muted colour.
-fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<Div> {
+pub(crate) fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<Div> {
     let muted = Theme::with_alpha(text_color, 0.72);
     div()
         .id(SharedString::from(format!("forwarded-from-{by}")))
@@ -3613,12 +3613,31 @@ pub fn build_rows_hiding(
                     && prev_sender.as_deref() != Some(message.sender.as_str());
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
-                // A forwarded attachment's "Forwarded from …" line is the card's
-                // hint, not a bubble of its own.
-                let forwarded = (!attachment_parts.is_empty())
+                // A media-viewer forward's whole text is the "Forwarded from …" line:
+                // the card's hint, not a bubble of its own.
+                let legacy_hint = (!attachment_parts.is_empty())
                     .then(|| attachments::forwarded_from(&text).map(str::to_owned))
                     .flatten();
-                for (part_id, attachment) in &attachment_parts {
+                // A bubble-menu forward carries `forwardedFrom`; with attachments the
+                // label sits once, on the first card, and the caption bubble under it
+                // stays plain ([feedback forward-attachments-mac-2026-10-27]).
+                let forwarded_by = message
+                    .forwarded_from
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_owned);
+                let forwarded = legacy_hint.clone().or_else(|| {
+                    (!attachment_parts.is_empty())
+                        .then(|| {
+                            forwarded_by
+                                .as_deref()
+                                .map(|by| format!("{}{by}", crate::app::FORWARDED_FROM_PREFIX))
+                        })
+                        .flatten()
+                });
+                for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
+                    let forwarded = forwarded.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
                         .blob_ref
                         .as_deref()
@@ -3650,7 +3669,7 @@ pub fn build_rows_hiding(
                 // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
                 let show_text = !text.is_empty()
                     && !(has_image && is_generic_media_label(&text))
-                    && forwarded.is_none();
+                    && legacy_hint.is_none();
                 if show_text || attachment_parts.is_empty() {
                     // A cross-chat reply (Reply in DM) quotes its own snapshot;
                     // an in-chat reply quotes the row it points at.
@@ -3667,12 +3686,8 @@ pub fn build_rows_hiding(
                                 .map(|id| Quote::for_reply(id, messages))
                         });
                     let delivery = delivery_state(message, is_mine);
-                    let forwarded_from = message
-                        .forwarded_from
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|n| !n.is_empty())
-                        .map(str::to_owned);
+                    // The label is on the first card when the message has any.
+                    let forwarded_from = forwarded_by.filter(|_| attachment_parts.is_empty());
                     rows.push(Row {
                         version: hash_version(
                             &(
