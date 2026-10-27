@@ -225,10 +225,10 @@ def chat_open(project, title):
 
 
 def chat_dump(project, chat_id, reset=False):
-    # Keep the local replica between dumps. After `chat reset` the client asks the relay for rows
-    # with `excludeOwn`, so its own user rows are gone and the box's rows that causally depend on
-    # them stay pending until the relay checkpoints — the doc then looks empty for minutes. A
-    # reset is only a repair step when a replica looks stuck (#1103 catch-up race).
+    # Keep the local replica between dumps. Since #2069 arbosctl replays with `excludeOwn:false`
+    # (like the apps and agentd), so a `chat reset` rebuilds the whole doc from the relay — its
+    # own rows and the box replies that depend on them included. A reset stays a repair step for
+    # a replica that looks stuck (#1103 catch-up race); it no longer loses the device's own turns.
     if reset:
         ctl("chat", "reset", project, chat_id, timeout=60)
     code, out, err = ctl("chat", "dump", project, chat_id, timeout=120)
