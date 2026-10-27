@@ -73,6 +73,38 @@ enum BackSwipe {
     }
 }
 
+/// Which optional chat-screen gestures are installed. All of them in Release; the Debug
+/// scroll rig leaves single ones out (`ARBOS_PERF_GESTURES_OFF`) to measure what each one
+/// costs the scroll view's pan (iphone-scroll-perf, 2026-10-27).
+enum ChatGestures {
+    static let replySwipe = on("reply")
+    static let timeReveal = on("time")
+    static let backSwipe = on("back")
+    static let longPress = on("longpress")
+
+    private static func on(_ name: String) -> Bool {
+        #if DEBUG
+        return !DebugHooks.gesturesOff.contains(name)
+        #else
+        return true
+        #endif
+    }
+}
+
+extension View {
+    /// `simultaneousGesture` that is not installed at all when `enabled` is false (a masked
+    /// gesture still sits in the recognizer graph; the rig needs it gone). `enabled` is a
+    /// launch-time constant, so the view tree never changes shape under SwiftUI.
+    @ViewBuilder
+    func simultaneousGesture<G: Gesture>(_ gesture: G, including mask: GestureMask = .all, enabled: Bool) -> some View {
+        if enabled {
+            simultaneousGesture(gesture, including: mask)
+        } else {
+            self
+        }
+    }
+}
+
 /// Swipe right on a message bubble → reply (Telegram / iMessage). Rules as data, tested
 /// in `BackSwipeTests`; `RowView` runs them.
 enum BubbleSwipe {
@@ -144,25 +176,27 @@ private struct BackSwipeModifier: ViewModifier {
             .onPreferenceChange(ComposerTopKey.self) { composerTop = $0 }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: BackSwipe.edgeKeyboardDistance, coordinateSpace: .named(BackSwipe.space))
-                    .onChanged { value in
-                        // The keyboard leaves with the edge pop, not after it.
-                        guard !edgeKeyboardDropped, BackSwipe.startsAtEdge(value.startLocation),
-                              value.translation.width >= BackSwipe.edgeKeyboardDistance else { return }
-                        edgeKeyboardDropped = true
-                        BackSwipe.dismissKeyboard()
-                    }
-                    .onEnded { value in
-                        edgeKeyboardDropped = false
-                        if BackSwipe.isBackSwipe(translation: value.translation, velocity: value.velocity,
-                                                 start: value.startLocation, composerTop: composerTop,
-                                                 bubbleSwipeActive: BackSwipe.bubbleSwipeActive) {
-                            BackSwipe.dismissKeyboard()
-                            dismiss()
-                        }
-                    }
-            )
+            .simultaneousGesture(backDrag, enabled: ChatGestures.backSwipe)
+    }
+
+    private var backDrag: some Gesture {
+        DragGesture(minimumDistance: BackSwipe.edgeKeyboardDistance, coordinateSpace: .named(BackSwipe.space))
+            .onChanged { value in
+                // The keyboard leaves with the edge pop, not after it.
+                guard !edgeKeyboardDropped, BackSwipe.startsAtEdge(value.startLocation),
+                      value.translation.width >= BackSwipe.edgeKeyboardDistance else { return }
+                edgeKeyboardDropped = true
+                BackSwipe.dismissKeyboard()
+            }
+            .onEnded { value in
+                edgeKeyboardDropped = false
+                if BackSwipe.isBackSwipe(translation: value.translation, velocity: value.velocity,
+                                         start: value.startLocation, composerTop: composerTop,
+                                         bubbleSwipeActive: BackSwipe.bubbleSwipeActive) {
+                    BackSwipe.dismissKeyboard()
+                    dismiss()
+                }
+            }
     }
 }
 

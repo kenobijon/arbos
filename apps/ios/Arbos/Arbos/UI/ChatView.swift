@@ -1715,6 +1715,11 @@ struct ChatSession: View {
                             }
                         )
                     Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
+                    #if DEBUG
+                    if DebugHooks.perfTouch {
+                        ScrollPerfProbe().frame(height: 0)
+                    }
+                    #endif
                     if let banner = machineBannerText {
                         // Grok (Mac refs 69/70): a quiet line while the machine wakes. The error
                         // state is the pinned note under the header (`chatNote`).
@@ -1793,7 +1798,7 @@ struct ChatSession: View {
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             // Drag left → reveal message times (iMessage). simultaneous so vertical scroll still works.
-            .simultaneousGesture(timeRevealGesture)
+            .simultaneousGesture(timeRevealGesture, enabled: ChatGestures.timeReveal)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript.
             .onTapGesture {
                 composerFocused = false

@@ -1305,7 +1305,7 @@ struct RowView: View, Equatable {
                     .accessibilityHidden(true)
             }
         }
-        .simultaneousGesture(replySwipeGesture, including: onReply == nil ? .subviews : .all)
+        .simultaneousGesture(replySwipeGesture, including: onReply == nil ? .subviews : .all, enabled: ChatGestures.replySwipe)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(onReply == nil ? "row:\(row.id)" : "bubble:\(row.messageId)")
     }
