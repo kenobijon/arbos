@@ -32,7 +32,8 @@ pub const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦",
 /// One frame every 90 ms (≈ 11 fps; the spec's 80–100 ms band).
 pub const FRAME_MS: u64 = 90;
 
-/// Reduce Motion: every dot set, nothing moves.
+/// Reduce Motion: all six dots of the frames' cell (U+283F), nothing moves —
+/// the same height as the moving glyphs (⣿ U+28FF would stand taller).
 pub const STILL: &str = "⠿";
 
 /// The glyph cell: the unread dot's footprint (8 pt) wide, so the spinner's
@@ -292,7 +293,15 @@ mod tests {
             assert!(chars.next().is_none(), "{f:?} is one scalar");
             assert!(('\u{2800}'..='\u{28FF}').contains(&c), "{f:?} is braille");
         }
-        assert_eq!(STILL, "⠿", "Reduce Motion: every dot set");
+        assert_eq!(STILL, "⠿", "Reduce Motion: the full six-dot cell");
+        assert_eq!(STILL.chars().next().map(u32::from), Some(0x283F));
+        for f in FRAMES {
+            let c = f.chars().next().expect("a glyph");
+            assert!(
+                u32::from(c) <= 0x283F,
+                "{f:?} stays inside the six-dot cell"
+            );
+        }
     }
 
     /// Reduce Motion: the still glyph, and no frame asked for.
