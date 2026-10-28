@@ -899,13 +899,13 @@ struct ChatSession: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // The band the chat bar sits on and the fade over the transcript's end
-        // ([feedback iphone-composer-bottom-fade-2026-10-28]): rows scrolling under the bar
-        // dissolve over the last `Theme.composerFade` pt above it and nothing reads through
-        // behind or between the controls. The canvas ends at the bar's top edge (the bar is a
-        // safe-area inset), so the layer sits right on it, moves with the keyboard, is over
-        // the transcript and under the pill and the chevron below — not in the bar's layer.
-        .overlay(alignment: .bottom) { ComposerBottomBandView() }
+        // The fade the chat bar floats on ([feedback iphone-composer-see-through-2026-10-28]):
+        // rows scrolling under the bar dim from `Theme.composerFade` above it toward the
+        // bottom edge and stay readable through and between the glass pills — no band. The
+        // canvas ends at the bar's top edge (the bar is a safe-area inset), so the layer sits
+        // right on it, moves with the keyboard, is over the transcript and under the pill and
+        // the chevron below — not in the bar's layer.
+        .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.chat) }
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
                 newMessagesPill
@@ -974,8 +974,7 @@ struct ChatSession: View {
             .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
             .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
-            // No background of its own: the bar sits on `ComposerBottomBandView` in the canvas
-            // (band from this edge down, fade above it) — see `ComposerBottomBand`.
+            // No background of its own: the bar floats on `BottomBarFadeView` in the canvas.
             // A drag that starts here selects text or slides the mic — never "back".
             .backSwipeComposerBar()
         }
@@ -1909,8 +1908,8 @@ struct ChatSession: View {
                 .contentShape(Rectangle())
             }
             .defaultScrollAnchor(.bottom)
-            // iOS 26's automatic edge effect under a bottom inset would blur the rows into a
-            // second, glassy band under the composer; the canvas band is the one treatment.
+            // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
+            // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript.
@@ -3632,8 +3631,8 @@ private struct ChatScrollTopKey: PreferenceKey {
 /// re-stick instead of flipping `away` and leaving the transcript stranded.
 /// While unpinned, growth must not re-pin either — a bottom scroll anchor can
 /// briefly shrink distance and would yank the reader out of history.
-/// iOS 26+: no system scroll edge effect under the chat bar — `ComposerBottomBandView` is the
-/// one fade ([feedback iphone-composer-bottom-fade-2026-10-28]). Older systems draw none.
+/// iOS 26+: no system scroll edge effect under the chat bar — `BottomBarFadeView` is the one
+/// fade ([feedback iphone-composer-see-through-2026-10-28]). Older systems draw none.
 private struct NoBottomScrollEdgeEffect: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26, *) {

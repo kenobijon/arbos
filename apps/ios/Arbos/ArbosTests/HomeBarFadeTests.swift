@@ -55,45 +55,33 @@ final class HomeBarFadeTests: XCTestCase {
         XCTAssertEqual(spec.height, status + HomeChrome.barOnlyListTop)
     }
 
-    func testBottomCapsuleFloats_rowsReadUnderItAndAreGoneAtTheHomeIndicator() {
-        XCTAssertEqual(HomeChrome.bottomBar, Controls.height + HomeChrome.bottomPad)
-        for below in belowBar {
-            let spec = HomeBottomFade.spec(bottomInset: HomeChrome.bottomBar + below)
-            XCTAssertEqual(spec.fade, HomeChrome.bottomFade)
-            XCTAssertEqual(spec.height, HomeChrome.bottomFade + HomeChrome.bottomBar + below, "+\(below)")
-            // Clear at the top of the fade, under half at the capsule's top edge, nearly full at its
-            // bottom edge, full from the bar's padding through the home indicator (or keyboard).
-            XCTAssertEqual(alpha(spec.knots, at: 0), 0)
-            XCTAssertEqual(alpha(spec.knots, at: spec.fade), HomeChrome.capsuleTopWash, accuracy: 0.001)
-            XCTAssertGreaterThan(HomeChrome.capsuleTopWash, 0.5)
-            XCTAssertEqual(alpha(spec.knots, at: spec.fade + Controls.height), HomeChrome.capsuleBottomWash, accuracy: 0.001)
-            XCTAssertGreaterThanOrEqual(HomeChrome.capsuleBottomWash, 0.9)
-            XCTAssertEqual(alpha(spec.knots, at: spec.fade + HomeChrome.bottomBar), 1)
-            XCTAssertEqual(alpha(spec.knots, at: spec.height), 1)
-            for (a, b) in zip(spec.knots, spec.knots.dropFirst()) {
-                XCTAssertGreaterThanOrEqual(b.alpha, a.alpha); XCTAssertGreaterThanOrEqual(b.y, a.y)
-            }
-            XCTAssertEqual(spec.stops.count, spec.knots.count)
-            XCTAssertEqual(spec.stops.last?.location, 1)
-        }
+    func testBottomCapsuleIsTheSharedSeeThroughFade() {
+        // The capsule floats on `BottomBarFade.home` — the chat bar's ramp, pinned in
+        // `BottomBarFadeTests` (readable over the capsule, dimmed toward the edge, never a band).
+        let spec = BottomBarFade.home(bottomInset: HomeChrome.bottomBar + 34)
+        XCTAssertEqual(spec.controls, Controls.height)
+        XCTAssertLessThanOrEqual(spec.alpha(at: spec.fade + Controls.height), BottomBarFade.readableMax)
+        XCTAssertLessThan(spec.knots.last?.alpha ?? 1, 1)
     }
 
     func testFadeHeightsAreShortOnThePixelAndTheListsClearThem() {
-        // Jacob's chat band set the family's range (24–40); Home's bottom fade is in it.
-        XCTAssertGreaterThanOrEqual(HomeChrome.bottomFade, 24)
-        XCTAssertLessThanOrEqual(HomeChrome.bottomFade, 40)
-        XCTAssertEqual(HomeChrome.bottomFade * 3, (HomeChrome.bottomFade * 3).rounded(), accuracy: 0.001)
+        // Jacob's chat fade set the family's range (24–40); Home's bottom fade is the same one.
+        XCTAssertGreaterThanOrEqual(BottomBarFade.fade, 24)
+        XCTAssertLessThanOrEqual(BottomBarFade.fade, 40)
+        XCTAssertEqual(HomeChrome.listBottom, BottomBarFade.fade)
         XCTAssertEqual(HomeChrome.topSolid * 3, (HomeChrome.topSolid * 3).rounded(), accuracy: 0.001)
         // The lists' trailing clear row is the fade: the last row at rest sits above it. The
         // leading clear row is the whole top layer: the first row at rest sits below it.
-        XCTAssertGreaterThanOrEqual(HomeChrome.listBottom, HomeChrome.bottomFade)
+        XCTAssertGreaterThanOrEqual(HomeChrome.listBottom, BottomBarFade.fade)
         XCTAssertEqual(HomeChrome.listTop, ListTopFade.spec(.home, statusBar: 0).height)
         XCTAssertEqual(HomeChrome.barOnlyListTop, ListTopFade.spec(.homeSearch, statusBar: 0).height)
     }
 
     func testMatteAndGlassShareTheGeometryAndDifferOnlyInMaterial() {
-        // One geometry; the material's own alpha is the surface's (page colour / wash over material).
-        XCTAssertEqual(ComposerBottomBand.wash(glass: false), 1)
-        XCTAssertEqual(ComposerBottomBand.wash(glass: true), ListTopFade.glassWash)
+        // One geometry; the top layer's wash is the surface's (page colour / 0.94 over material),
+        // the bottom fade is the page colour on both and the pills carry the glass.
+        XCTAssertEqual(ListTopFade.glassWash, 0.94)
+        XCTAssertEqual(ChatHeaderGlass.material(surface: .matte, liquidGlassAvailable: true), .solid)
+        XCTAssertNotEqual(ChatHeaderGlass.material(surface: .glass, liquidGlassAvailable: true), .solid)
     }
 }

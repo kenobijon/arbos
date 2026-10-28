@@ -221,13 +221,13 @@ struct Theme: Equatable {
     static let presenceAvatarOffset: CGFloat = 6
     static let presenceGap: CGFloat = 14
     static let presenceBottomGap: CGFloat = 68 / 3
-    /// The fade over the transcript's end, above the chat bar ([feedback
-    /// iphone-composer-bottom-fade-2026-10-28]): rows scrolling under the bar dissolve
-    /// into the band over this many points, Grok's short fade (`ComposerBottomBand`).
+    /// Where the fade over the transcript's end begins, above the chat bar's top edge
+    /// ([feedback iphone-composer-see-through-2026-10-28]; `BottomBarFade`): rows scrolling
+    /// under the bar dim from here and stay readable through and between the pills.
     static let composerFade: CGFloat = 28
     /// The transcript's tail: the clear space under the last row, before the chat bar's
-    /// own top padding — the fade's height, so the last bubble at rest sits fully above
-    /// the fade (`ComposerBottomBandTests`).
+    /// own top padding — the fade's start, so the last bubble at rest sits fully above
+    /// the fade (`BottomBarFadeTests`).
     static let transcriptTail: CGFloat = composerFade
     /// The chat bar's padding over its first view (the status row or the composer).
     static let chatBarTopPad: CGFloat = 8
@@ -787,9 +787,17 @@ struct ControlSurface<S: InsettableShape>: View {
 
     var body: some View {
         ZStack {
-            shape.fill(theme.field)
+            if theme.isGlass {
+                // Glass: the real material (Liquid Glass on iOS 26, frost before), a light
+                // `field` tint so a placeholder stays readable over a line of content — the
+                // Search-in-chat bar's recipe; the content scrolls under the pills and reads
+                // through them ([feedback iphone-composer-see-through-2026-10-28]).
+                HeaderGlassBackground(shape: shape, material: ChatHeaderGlass.material(surface: .glass), tinted: true)
+            } else {
+                shape.fill(theme.field)
+                ComposerRim(shape: shape)
+            }
             if pressed { shape.fill(theme.text.opacity(0.12)) }
-            ComposerRim(shape: shape)
         }
     }
 }
@@ -1009,136 +1017,88 @@ extension HomeChrome {
     static let bottomPad: CGFloat = 8
     /// The bar on the bottom edge: the capsule + its padding (the safe-area inset it takes).
     static let bottomBar: CGFloat = Controls.height + bottomPad
-    /// The fade over the list's end, above the capsule.
-    static let bottomFade: CGFloat = 28
-    /// The wash's alpha at the capsule's top edge and at its bottom edge: the rows pass under the
-    /// capsule at under half strength and are gone at the home indicator.
-    static let capsuleTopWash: Double = 0.55
-    static let capsuleBottomWash: Double = 0.9
     /// The list's trailing clear row: the last row at rest sits above the fade.
-    static let listBottom: CGFloat = bottomFade
+    static let listBottom: CGFloat = BottomBarFade.fade
 }
 
-/// The fade and the band under Home's search capsule, one layer for the bottom of the home canvas
-/// (the same construction as the chat's `ComposerBottomBand`, with Grok's floating-bar curve: clear
-/// above, under half at the capsule's top, nearly full at its bottom, full through the home
-/// indicator). The reader keeps the safe area, so its bottom inset is the bar (+ home indicator /
-/// keyboard); the layer inside ignores that edge and reaches the screen's edge.
-enum HomeBottomFade {
+// MARK: - Bottom bar fade (the chat composer, Home's search capsule)
+
+/// What the bottom bars sit on — nothing opaque ([feedback iphone-composer-see-through-2026-10-28],
+/// Jacob 2026-10-28 on TestFlight 202610281715985037: "we should actually see the text behind the
+/// search bar"; supersedes the opaque band of [feedback iphone-composer-bottom-fade-2026-10-28]
+/// and the first bottom curve of [feedback iphone-home-bar-fades-2026-10-28]). Grok Bot: rows
+/// scroll under the glass pills and stay readable through and between them; a soft fade dims the
+/// content toward the bottom edge. One layer at the canvas's bottom — over the content, under the
+/// controls — the page colour masked by a ramp: clear `fade` pt above the bar's top edge,
+/// `edgeWash` at that edge, `controlsWash` at the controls' bottom edge, `bottomWash` at the
+/// screen's (or the keyboard's) edge. Never 1: no band, no hard edge. The same ramp on Matte and
+/// Glass, light and dark (the surface shows in the pills: `ControlSurface` is glass on Glass).
+/// The reader keeps the safe area, so its bottom inset is the bar (+ home indicator / keyboard);
+/// the layer inside ignores that edge and reaches the screen's edge, moving with the keyboard.
+/// `BottomBarFadeTests` pins the ramp (readable over every control) and the lists' clearances.
+enum BottomBarFade {
+    /// Clear this far above the bar's top edge; the lists' trailing clearance, so the last row at
+    /// rest sits above the fade (`Theme.transcriptTail`, `HomeChrome.listBottom`).
+    static let fade: CGFloat = Theme.composerFade
+    /// The wash at the bar's top edge, at the controls' bottom edge, and at the screen's edge.
+    static let edgeWash: Double = 0.3
+    static let controlsWash: Double = 0.5
+    static let bottomWash: Double = 0.8
+    /// Readable: the wash over any control never passes this.
+    static let readableMax: Double = 0.6
+
     struct Spec: Equatable {
         let fade: CGFloat
-        /// The bottom inset under the canvas: the bar + the home indicator, or the bar + the keyboard.
+        /// The bar's top edge → the controls' bottom edge (chat: the 8 pt pad + the composer;
+        /// Home: the capsule).
+        let controls: CGFloat
+        /// The canvas's bottom inset: the bar + the home indicator, or the bar + the keyboard.
         let inset: CGFloat
+        /// The layer's height; its bottom is the screen's (or the keyboard's) edge.
         var height: CGFloat { fade + inset }
         var knots: [ListTopFade.Spec.Knot] {
             [.init(y: 0, alpha: 0),
-             .init(y: fade, alpha: HomeChrome.capsuleTopWash),
-             .init(y: fade + Controls.height, alpha: HomeChrome.capsuleBottomWash),
-             .init(y: fade + HomeChrome.bottomBar, alpha: 1),
-             .init(y: height, alpha: 1)]
+             .init(y: fade, alpha: BottomBarFade.edgeWash),
+             .init(y: min(fade + controls, height), alpha: BottomBarFade.controlsWash),
+             .init(y: height, alpha: BottomBarFade.bottomWash)]
         }
         var stops: [Gradient.Stop] {
             guard height > 0 else { return [] }
             return knots.map { .init(color: .black.opacity($0.alpha), location: min(1, $0.y / height)) }
         }
-    }
-
-    static func spec(bottomInset: CGFloat) -> Spec {
-        Spec(fade: HomeChrome.bottomFade, inset: bottomInset)
-    }
-}
-
-struct HomeBottomFadeView: View {
-    var body: some View {
-        GeometryReader { geo in
-            let spec = HomeBottomFade.spec(bottomInset: geo.safeAreaInsets.bottom)
-            ComposerBandMaterial()
-                .frame(height: spec.height)
-                .mask(LinearGradient(stops: spec.stops, startPoint: .top, endPoint: .bottom))
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .ignoresSafeArea(edges: .bottom)
+        /// The mask's alpha `y` pt from the layer's top: linear between the knots around it.
+        func alpha(at y: CGFloat) -> Double {
+            let k = knots
+            guard let i = k.firstIndex(where: { $0.y >= y }) else { return k.last?.alpha ?? 0 }
+            if i == 0 || k[i].y == y { return k[i].alpha }
+            let a = k[i - 1], b = k[i]
+            return a.alpha + (b.alpha - a.alpha) * Double((y - a.y) / (b.y - a.y))
         }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+    }
+
+    /// The chat: the bar's top pad and the composer are the controls (the status row, when it
+    /// shows, rides above them in the same ramp).
+    static func chat(bottomInset: CGFloat) -> Spec {
+        Spec(fade: fade, controls: Theme.chatBarTopPad + Theme.composerHeight, inset: bottomInset)
+    }
+
+    /// Home: the search capsule sits at the bar's top edge.
+    static func home(bottomInset: CGFloat) -> Spec {
+        Spec(fade: fade, controls: Controls.height, inset: bottomInset)
     }
 }
 
-// MARK: - Composer bottom band
-
-/// What the chat bar sits on ([feedback iphone-composer-bottom-fade-2026-10-28], Jacob
-/// 2026-10-28): in Grok Bot the messages dissolve into a solid band above the composer and
-/// nothing reads behind or between the controls. Ours was a 24 pt `bg → clear` gradient and a
-/// `bg` fill as the *bar's* background (the safe-area inset's own layer): on Jacob's phone the
-/// transcript read through it around the controls, and the gradient sat over the ↓ chevron.
-/// Now one layer in the chat canvas (`ChatView.sessionCanvas`) — over the transcript, under the
-/// chevron and the new-messages pill, under the bar's controls — one material in two pieces:
-/// - **fade** — `Theme.composerFade` pt above the bar's top edge, masked from clear to full;
-/// - **band** — from the bar's top edge (`chatBarTopPad` over the status row / composer) down
-///   through the home indicator to the screen's edge (the layer ignores the bottom safe area).
-///   The canvas ends at the bar's top (the bar is a safe-area inset) and the keyboard is the
-///   safe area when it is up, so both pieces move with the keyboard: the band stays glued to
-///   the composer.
-/// Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash (the
-/// wash that hides text; 0.78 let a row read at half strength, #1988).
-/// `ComposerBottomBandTests` pins the geometry and the material's opacity.
-enum ComposerBottomBand {
-    static let fade: CGFloat = Theme.composerFade
-    static let glassWash: Double = ListTopFade.glassWash
-
-    /// The layer's geometry for a bottom safe-area inset (the bar + the home indicator, or the
-    /// bar + the keyboard): the fade above the inset, the band through it.
-    struct Spec: Equatable {
-        /// Clear → full over this height, above the bar's top edge.
-        let fade: CGFloat
-        /// Opaque from the bar's top edge to the screen's edge: the whole inset.
-        let band: CGFloat
-        /// The layer's height; its bottom is the screen's edge.
-        var height: CGFloat { fade + band }
-        /// Where the mask turns fully opaque, as a fraction of `height`.
-        var solidFrom: CGFloat { height > 0 ? fade / height : 0 }
-    }
-
-    static func spec(bottomInset: CGFloat) -> Spec {
-        Spec(fade: fade, band: bottomInset)
-    }
-
-    /// The material's own alpha on each surface — 1 on Matte, the wash on Glass (over a
-    /// material, so the result is opaque to text either way).
-    static func wash(glass: Bool) -> Double { glass ? glassWash : 1 }
-}
-
-/// The band's material: the page colour on Matte, material + wash on Glass.
-struct ComposerBandMaterial: View {
+struct BottomBarFadeView: View {
     @Environment(\.theme) private var theme
+    /// `BottomBarFade.chat` or `.home`, given the canvas's bottom inset.
+    let spec: (CGFloat) -> BottomBarFade.Spec
 
-    var body: some View {
-        ZStack {
-            if theme.isGlass {
-                Rectangle().fill(.ultraThinMaterial)
-            }
-            theme.bg.opacity(ComposerBottomBand.wash(glass: theme.isGlass))
-        }
-    }
-}
-
-/// The fade and the band, one view for the bottom of the chat canvas. The reader keeps the
-/// safe area, so its bottom inset is the bar (+ home indicator / keyboard); the layer inside it
-/// ignores that edge and so reaches the screen's edge, `fade` pt of it above the bar's top.
-struct ComposerBottomBandView: View {
     var body: some View {
         GeometryReader { geo in
-            let spec = ComposerBottomBand.spec(bottomInset: geo.safeAreaInsets.bottom)
-            ComposerBandMaterial()
-                .frame(height: spec.height)
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .black, location: spec.solidFrom),
-                            .init(color: .black, location: 1),
-                        ],
-                        startPoint: .top, endPoint: .bottom)
-                )
+            let s = spec(geo.safeAreaInsets.bottom)
+            theme.bg
+                .frame(height: s.height)
+                .mask(LinearGradient(stops: s.stops, startPoint: .top, endPoint: .bottom))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .ignoresSafeArea(edges: .bottom)
         }
