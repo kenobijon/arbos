@@ -10735,6 +10735,50 @@ mod reply_in_dm_tests {
         }
     }
 
+    /// A server channel's member row names its sender the way a group's does — by display
+    /// name, from the roster-filled `senderName` — and only falls back to the handle when
+    /// no name is known ([feedback server-member-names-2026-10-28]; Affinity: "referred to
+    /// as our handles instead of our usernames in server").
+    #[test]
+    fn a_channel_member_row_renders_the_display_name_not_the_handle() {
+        let t = 1_700_000_000_000u64;
+        let channel = "!general:arbos.life";
+        let mut named = row(channel, "c1", "user:test_01scout", "A", "yo", t);
+        named.sender_name = Some("Scout".into());
+        let nameless = row(channel, "c2", "user:test_01z", "Z", "me", t + 1_000);
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &[named, nameless],
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "test_01ME",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        let labels: Vec<(String, bool)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    from: Some(p),
+                    named,
+                    ..
+                } => Some((p.display_name(), *named)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("Scout".to_string(), true), ("Z".to_string(), true)],
+            "Scout's bubble is labelled Scout; a member with no known name keeps the handle"
+        );
+    }
+
     /// `build_rows` alone: a `replyRef` row quotes its snapshot and names the chat; a
     /// `replyTo` row quotes the in-chat original and names nothing.
     #[test]
