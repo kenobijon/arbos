@@ -257,6 +257,11 @@ pub fn overlay(
         }
     }
 
+    // One material ([feedback search-popup-single-layer-2026-10-28]): the
+    // popup plate — frosted on Glass, the flat card on Matte — is the only
+    // fill between the chat and the rows. The rows are transparent; the
+    // highlighted one is a tint on top (`highlight::row`). No dim behind,
+    // no second border: `glass::popup_plate`.
     let panel = div()
         .id("palette-panel")
         .key_context("Palette")
@@ -266,10 +271,6 @@ pub fn overlay(
         .flex()
         .flex_col()
         .rounded(px(RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
         .overflow_hidden()
         .debug_selector(|| "palette-panel".into())
         .on_action(cx.listener(|this, a: &Pick1, w, cx| this.palette_pick_action(a, w, cx)))
@@ -284,6 +285,7 @@ pub fn overlay(
         .child(field)
         .child(hairline)
         .child(list);
+    let panel = glass::popup_plate(RADIUS, &theme, panel);
 
     // Spotlight hangs high, not mid-window: the shared backdrop hangs the
     // panel `top` under the window edge.
@@ -861,5 +863,163 @@ mod tests {
         assert_eq!(pick_index(&Pick1), Some(0));
         assert_eq!(pick_index(&Pick9), Some(8));
         assert_eq!(pick_index(&crate::ui::shell::Escape), None);
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    //! The popup over the real shell: a DM long enough that bubbles fill the
+    //! column under the panel, and enough chats that the palette's own list
+    //! overflows.
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use crate::app::AppState;
+    use crate::model::{now_ms, Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+
+    /// Chats in the sidebar and the palette's Recent list: more than fit the
+    /// panel at its 72 % cap, so the list scrolls.
+    const CHATS: usize = 16;
+    /// Rows in the open DM: enough to fill the column top to bottom.
+    const ROWS: usize = 40;
+
+    struct Quiet;
+
+    impl SyncSource for Quiet {
+        fn name(&self) -> &'static str {
+            "quiet"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn dm_id(n: usize) -> String {
+        format!("01DM{n:02}000000000000000000000")
+    }
+
+    fn message(chat: &str, n: usize, at: u64) -> Message {
+        let (sender, handle) = if n % 2 == 0 {
+            ("user:gh_2", "sam")
+        } else {
+            ("user:gh_me", "unconst")
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": format!("{chat}-m{n}"), "chatId": chat, "role": "user", "sender": sender,
+            "senderHandle": handle, "senderName": if handle == "sam" { "Sam Rivera" } else { "Jacob" },
+            "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{chat}-m{n}-t"), "kind": "text",
+                        "text": format!("Line {n} of a long thread about the launch page and what a seat includes.") }],
+        }))
+        .expect("message")
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+        surface: Surface,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(surface));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Quiet), cx));
+        let now = now_ms();
+        state.update(cx, |s, cx| {
+            for n in 0..CHATS {
+                let id = dm_id(n);
+                let person = Person {
+                    id: format!("gh_{}", n + 2),
+                    handle: format!("person{n}"),
+                    name: Some(format!("Person {n}")),
+                    ..Person::default()
+                };
+                s.projects.push(Project {
+                    id: id.clone(),
+                    name: format!("person{n}"),
+                    kind: SpaceKind::Dm,
+                    people: vec![person],
+                    ..Project::default()
+                });
+                let last = now - (n as u64) * 60_000;
+                let chat: Chat = serde_json::from_value(serde_json::json!({
+                    "id": id, "project_id": id, "title": format!("person{n}"), "is_pinned": false,
+                    "is_system": false, "unread": false, "last_message_at": last,
+                }))
+                .expect("chat");
+                s.chats.insert(id.clone(), vec![chat]);
+                let rows = if n == 0 { ROWS } else { 1 };
+                s.messages.insert(
+                    id.clone(),
+                    (0..rows)
+                        .map(|m| message(&id, m, last - ((rows - m) as u64) * 1_000))
+                        .collect(),
+                );
+                s.active_tab.insert(id.clone(), id.clone());
+            }
+            s.selected_project = Some(dm_id(0));
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        settle(&state, &shell, vcx);
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..3 {
+            state.update(vcx, |_, cx| cx.notify());
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn open_palette(
+        state: &Entity<AppState>,
+        shell: &Entity<Shell>,
+        vcx: &mut gpui::VisualTestContext,
+    ) {
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(state, shell, vcx);
+        assert!(shell.read_with(&*vcx, |sh, _| sh.palette.open));
+    }
+
+    /// Layering ([feedback search-popup-single-layer-2026-10-28]) over the
+    /// real shell: the panel is drawn once, inside the see-through backdrop,
+    /// and no second plate or dim sits between the chat and the rows.
+    #[gpui::test]
+    fn the_panel_is_drawn_once_on_a_backdrop_that_does_not_dim(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        open_palette(&state, &shell, vcx);
+        let backdrop = vcx.debug_bounds("palette-backdrop").expect("backdrop");
+        let panel = vcx.debug_bounds("palette-panel").expect("panel");
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        assert_eq!(backdrop.size, viewport, "the backdrop spans the window");
+        assert!(backdrop.contains(&panel.center()));
+        assert_eq!(crate::ui::modal::PASSTHROUGH_BACKDROP_ALPHA, 0.0);
+        let material = vcx.update(|_, cx| crate::ui::glass::popup_material(Theme::of(cx)));
+        assert!(!material.dims_window && material.blur > 0.0 && material.fill.a > 0.0);
     }
 }
