@@ -805,10 +805,34 @@ struct ChatItemsList: View {
     private func rowLabel(_ item: ChatItem) -> some View {
         let when = Date(timeIntervalSince1970: Double(item.at) / 1000).formatted(date: .abbreviated, time: .omitted)
         return PaneRow(
-            leading: .glyph(item.kind == .voice ? "waveform" : item.kind == .link ? "link" : "doc.fill"),
+            leading: item.kind == .link
+                ? .avatar(AnyView(LinkRowTile(url: item.url)))
+                : .glyph(item.kind == .voice ? "waveform" : "doc.fill"),
             title: item.title,
             subtitle: item.kind == .link ? item.subtitle : "\(item.fromHandle.map { "@\($0) · " } ?? "")\(when)"
         )
+    }
+}
+
+/// A Links row's leading tile: the brand mark for a known host, else the relay's icon for the
+/// host once `LinkIcons` has it (asked for here, once), else the host's letter
+/// ([feedback link-icons-ios-tile-2026-10-27]; before, every link row drew the same `link`
+/// glyph). Observes the icon store so the tile fills in when the picture arrives.
+struct LinkRowTile: View {
+    @ObservedObject private var icons = LinkIcons.shared
+    let url: URL?
+    var size: CGFloat = PaneKit.avatar
+
+    /// The host an icon is keyed by at the relay: lower-case, `www.` kept, no port.
+    static func iconHost(_ url: URL?) -> String {
+        url?.host?.lowercased() ?? ""
+    }
+
+    var body: some View {
+        let host = Self.iconHost(url)
+        let brand = url.flatMap(LinkBrand.of(url:))
+        let picture = brand == nil && !host.isEmpty ? icons.picture(for: host) : nil
+        LinkTile(url: url, host: host, picture: picture, size: size)
     }
 }
 
@@ -1092,6 +1116,13 @@ struct GroupProfileView: View {
     private var isGroupOwner: Bool {
         if people?.myRole == "owner" { return true }
         return people?.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
+    }
+
+    /// May I change the group's name, picture and description? Owner and admins only —
+    /// the relay refuses everyone else (`PATCH /chats/{id}` 403 since 2026-10-27, after
+    /// members renamed Arbonites), so Edit group hides for plain members.
+    private var canEditGroupSettings: Bool {
+        projectId == nil && people?.isGroup == true && canManageMembers
     }
 
     /// My human row in this people group (for mute/ban rights).
@@ -1407,11 +1438,17 @@ struct GroupProfileView: View {
     }
 
     /// The hero picture: the agent's leaf for a shared project; the group's
-    /// cluster or picked image (tap → the edit sheet) for a people group.
+    /// cluster or picked image for a people group — tap → the edit sheet for the
+    /// owner and admins, full-size view (when there is a picture) for everyone else.
     @ViewBuilder private var heroPicture: some View {
         if let project {
             ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            }
+        } else if !canEditGroupSettings {
+            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
         } else {
             Button { showEdit = true } label: {
@@ -1435,19 +1472,27 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
-        // People groups: description lives in Edit group (same sheet as name + picture).
+        // People groups: description lives in Edit group (same sheet as name + picture) for
+        // the owner and admins; plain members read it (no row while it is empty).
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
-            list.append(AnyView(Button { showEdit = true } label: {
-                PaneRow(
-                    leading: .glyph("text.alignleft"),
-                    title: "Description",
-                    value: desc.isEmpty ? "Add a description" : desc,
-                    chevron: true
-                )
+            if canEditGroupSettings {
+                list.append(AnyView(Button { showEdit = true } label: {
+                    PaneRow(
+                        leading: .glyph("text.alignleft"),
+                        title: "Description",
+                        value: desc.isEmpty ? "Add a description" : desc,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+            } else if !desc.isEmpty {
+                list.append(AnyView(
+                    PaneRow(leading: .glyph("text.alignleft"), title: "Description", value: desc)
+                        .accessibilityLabel("Description: \(desc)")
+                ))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
         }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
@@ -2657,6 +2702,8 @@ enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
     static let agent = ["Details", "Library", "Computer"]
+    /// A connected (outside) agent has no Arbos machine (#2142).
+    static let outsideAgent = ["Details", "Library"]
     static let group = ["Members", "Library"]
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
