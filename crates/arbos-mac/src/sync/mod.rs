@@ -957,6 +957,13 @@ pub enum ClientCommand {
     OutsideAgentRevoke {
         project_id: Id,
     },
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card →
+    /// [`SyncEvent::OutsideAgentStatus`] with the effective set.
+    OutsideAgentScope {
+        project_id: Id,
+        scope: String,
+        on: bool,
+    },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
     DeletePeopleChat {
         chat_id: Id,
