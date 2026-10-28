@@ -15,7 +15,7 @@ use gpui::{
     RenderImage, SharedString,
 };
 
-use crate::app::{AppState, FORWARDED_FROM_PREFIX};
+use crate::app::{is_https_page_url, AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
 use crate::ui::highlight;
 use crate::ui::sf_symbols;
@@ -243,25 +243,25 @@ fn picture_bubble(
         ));
     }
     out = out.child(bubble);
-    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): a small
-    // "via <provider>" under the picture opens the source page. Nothing sets
-    // `source` yet; when a later picker does, this is where it shows.
+    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
+    // app-01M61EZD0GJ2XGV1EW4SCVXENK): a small "via <provider>" under the
+    // picture. Only an https `page_url` is a link; other schemes stay plain.
     if let Some(src) = attachment.source.clone() {
         let label = format!("via {}", src.provider);
         let url = src.page_url.clone();
-        out = out.child(
-            div()
-                .id(SharedString::from(format!("{row_id}-via")))
-                .pl(px(6.0))
-                .max_w(px(w))
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    cx.open_url(&url);
-                })
-                .child(label),
-        );
+        let mut via = div()
+            .id(SharedString::from(format!("{row_id}-via")))
+            .pl(px(6.0))
+            .max_w(px(w))
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .child(label);
+        if is_https_page_url(&url) {
+            via = via.cursor_pointer().on_click(move |_, _, cx| {
+                cx.open_url(&url);
+            });
+        }
+        out = out.child(via);
     }
     out.into_any_element()
 }
