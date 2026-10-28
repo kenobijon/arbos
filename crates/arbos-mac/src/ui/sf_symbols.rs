@@ -170,10 +170,11 @@ mod mac {
     /// The image element: the raster is produced at paint time, when the
     /// window's scale factor is known, and cached.
     pub fn element(name: &'static str, size: f32, weight: Weight, color: Hsla) -> Img {
+        // No `Styled` calls here (the trait is not in this module's scope and the
+        // frame in `symbol` already fixes the size); the caller sizes the element.
         img(ImageSource::Custom(Arc::new(move |window, _cx| {
             raster(name, size, weight, window.scale_factor(), color).map(Ok)
         })))
-        .flex_shrink_0()
     }
 
     fn raster(
