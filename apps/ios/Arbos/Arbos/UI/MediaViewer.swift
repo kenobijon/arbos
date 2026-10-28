@@ -9,7 +9,7 @@ import UIKit
 // viewer for every chat kind, opened from an image / file bubble or a Library
 // tile. Black backdrop; the album (the chat's pictures and videos in order)
 // pages with a swipe; swipe down, ×, or the Close pill closes. Caption
-// top-centre (who, when), counter top-right, Close · Download · Forward pills
+// top-centre (who, when), counter top-right, Close · Copy · Download · Forward pills
 // at the bottom ([feedback ABUo19aGqPpSnnw4Ha6F6H0] — the top × was easy to
 // miss / not hittable over the paged image; Close matches Mac). Video plays
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
@@ -300,6 +300,11 @@ struct MediaViewer: View {
                 pill("Close", system: "xmark") { close() }
                 // A profile picture is not a chat attachment: Close only.
                 if item?.pictureURL == nil {
+                    // The picture itself, original bytes under its own type
+                    // ([feedback copy-image-messages-ios-2026-10-27]).
+                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
                     pill("Download", system: "arrow.down.to.line") { Task { await download() } }
                         .disabled(!canAct || busy)
                         .opacity(canAct ? 1 : 0.5)
@@ -332,6 +337,21 @@ struct MediaViewer: View {
         Task {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             if toast == text { toast = nil }
+        }
+    }
+
+    // ----- Copy ---------------------------------------------------------------
+
+    /// The open picture or file on the pasteboard (`AppModel.copyAttachment`).
+    @MainActor
+    private func copy() async {
+        guard let item, canAct else { return }
+        busy = true
+        defer { busy = false }
+        let attachment = Attachment(name: item.name, mime: item.mime, blobRef: item.blobRef,
+                                    kind: item.kind == .image ? "image" : item.kind == .video ? "video" : nil)
+        if await model.copyAttachment(attachment, slot: item.slot) {
+            flash(item.kind == .image ? "Copied the picture" : "Copied \(item.name)")
         }
     }
 
@@ -380,6 +400,11 @@ struct MediaViewer: View {
 
 /// Shared swipe-down-to-dismiss for every page kind: a vertical drag at 1×
 /// follows the finger, fades the chrome, and closes past 120 pt.
+///
+/// Uses a UIKit pan that only *begins* when the drag is clearly vertical, so a
+/// horizontal album swipe is never claimed by dismiss. A SwiftUI `DragGesture`
+/// recognizes after ~12 pt in any direction and freezes paging even when its
+/// handlers then no-op ([feedback app-01M5ZFF6EW6QE7RB7M5EQ4F2NP]).
 private struct DismissDrag: ViewModifier {
     @Binding var progress: CGFloat
     let onClose: () -> Void
@@ -390,27 +415,127 @@ private struct DismissDrag: ViewModifier {
         content
             .offset(y: offset)
             .scaleEffect(max(0.85, 1 - offset / 1000))
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12)
-                    .onChanged { v in
-                        guard enabled else { return }
-                        let t = v.translation
-                        guard t.height > 0, t.height >= abs(t.width) * 1.2 else { return }
-                        offset = t.height
-                        progress = min(1, t.height / 400)
-                    }
-                    .onEnded { v in
-                        guard enabled else { return }
-                        if offset > 120, v.translation.height > abs(v.translation.width) * 1.2 {
-                            onClose()
-                        } else {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                offset = 0
-                                progress = 0
-                            }
-                        }
-                    }
+            .background(
+                VerticalDismissProbe(enabled: enabled, offset: $offset, progress: $progress, onClose: onClose)
             )
+    }
+}
+
+/// Installs a vertical-only pan on the page host. The probe itself never takes
+/// hits (`isUserInteractionEnabled = false`); the recognizer lives on the
+/// enclosing page view so Play / Open / double-tap still work.
+private struct VerticalDismissProbe: UIViewRepresentable {
+    var enabled: Bool
+    @Binding var offset: CGFloat
+    @Binding var progress: CGFloat
+    var onClose: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(offset: $offset, progress: $progress, onClose: onClose)
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        probe.coordinator = context.coordinator
+        return probe
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {
+        context.coordinator.enabled = enabled
+        context.coordinator.offset = $offset
+        context.coordinator.progress = $progress
+        context.coordinator.onClose = onClose
+        DispatchQueue.main.async { uiView.attachIfNeeded() }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var enabled = true
+        var offset: Binding<CGFloat>
+        var progress: Binding<CGFloat>
+        var onClose: () -> Void
+        /// How far down this drag has already moved the page (for the end threshold).
+        private var dragOffset: CGFloat = 0
+
+        init(offset: Binding<CGFloat>, progress: Binding<CGFloat>, onClose: @escaping () -> Void) {
+            self.offset = offset
+            self.progress = progress
+            self.onClose = onClose
+        }
+
+        @objc func handle(_ pan: UIPanGestureRecognizer) {
+            guard enabled else { return }
+            let t = pan.translation(in: pan.view)
+            switch pan.state {
+            case .changed:
+                guard t.y > 0, t.y >= abs(t.x) * 1.2 else { return }
+                dragOffset = t.y
+                offset.wrappedValue = t.y
+                progress.wrappedValue = min(1, t.y / 400)
+            case .ended, .cancelled:
+                if dragOffset > 120, t.y > abs(t.x) * 1.2 {
+                    onClose()
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offset.wrappedValue = 0
+                        progress.wrappedValue = 0
+                    }
+                }
+                dragOffset = 0
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard enabled, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+            let v = pan.velocity(in: pan.view)
+            return v.y > 0 && v.y >= abs(v.x) * 1.2
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+
+    final class Probe: UIView {
+        weak var coordinator: Coordinator?
+        private weak var host: UIView?
+        private var pan: UIPanGestureRecognizer?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+
+        deinit {
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+        }
+
+        func attachIfNeeded() {
+            guard window != nil, let coordinator else { return }
+            guard let found = Self.pageHost(from: self) else { return }
+            if host === found, pan != nil { return }
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+            let gr = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handle(_:)))
+            gr.delegate = coordinator
+            gr.cancelsTouchesInView = false
+            found.addGestureRecognizer(gr)
+            host = found
+            pan = gr
+        }
+
+        /// First ancestor large enough to be the page (the probe is zero-sized).
+        private static func pageHost(from view: UIView) -> UIView? {
+            var node: UIView? = view.superview
+            while let current = node {
+                if current.bounds.width > 100, current.bounds.height > 100 { return current }
+                node = current.superview
+            }
+            return view.superview
+        }
     }
 }
 
@@ -446,7 +571,9 @@ private struct ZoomableImagePage: View {
                         .scaleEffect(scale)
                         .offset(offset)
                         .gesture(magnify)
-                        .simultaneousGesture(pan)
+                        // Pan only while zoomed: an always-on DragGesture steals the
+                        // album's horizontal page swipe at 1× and freezes it.
+                        .simultaneousGesture(pan, including: scale > minScale + 0.01 ? .all : .subviews)
                         .onTapGesture(count: 2, perform: toggleZoom)
                         .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
                         .accessibilityLabel("Image")
@@ -712,7 +839,8 @@ struct ForwardSheet: View {
             AgentAvatar(project: p, theme: theme, size: 44, still: true)
         case .people(let c):
             if c.isGroup {
-                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick, neutralName: c.isNeutralAvatar ? c.title : nil)
+                // The group's own picture first; the member stack only when it has none.
+                GroupAvatar(chat: c, model: model, size: 44, members: c.humans)
             } else {
                 let other = c.counterpart(me: model.user?.id)
                 PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 44, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
@@ -985,7 +1113,7 @@ extension AppModel {
         guard let url = blobURL(projectId: item.slot, key: ref) else { return }
         Task { @MainActor in
             guard let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
-                notice = Notice(text: "Couldn't forward \(item.name)")
+                fail(UserError.fromText("forward \(item.name)", "the file could not be fetched"))
                 return
             }
             let pending = PendingAttachment(name: item.name, mime: item.mime, data: data)
@@ -999,26 +1127,123 @@ extension AppModel {
         }
     }
 
-    /// Bubble long-press → Forward: open `target` with the message text drafted
-    /// in the composer (user taps Send). Carries `forwardedFrom: by` so the
-    /// eventual send draws "Forwarded from <by>" (feedback
-    /// app-01M5MXRZ7609S70P9S9P2RZDDF, app-01M5YF7JWEZXPD1JSKBH9TMCES).
-    func forwardText(_ text: String, from by: String, to target: ForwardTarget) {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return }
+    /// Bubble long-press → Forward. Text-only messages open `target` with the
+    /// words drafted so the user taps Send (feedback
+    /// app-01M5YF7JWEZXPD1JSKBH9TMCES). Messages with pictures / files / videos /
+    /// charts still send at once into `target` ([feedback
+    /// forward-attachments-ios-2026-10-27]). Both paths carry `forwardedFrom: by`
+    /// (app-01M5MXRZ7609S70P9S9P2RZDDF).
+    func forwardMessage(_ message: Message, from by: String, slot: String, to target: ForwardTarget) {
+        guard let payload = message.body else { return }
         let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
         let forwardedFrom = name.isEmpty ? nil : name
         let chatId: Id
+        let targetSlot: String
         switch target.kind {
         case .people(let c):
             chatId = c.id
-            open(peopleChat: c)
+            targetSlot = "\(peopleSlot):\(c.id)"
         case .agent(let p):
             guard let chat = primaryChat(of: p.id) else { return }
             chatId = chat.id
-            open(chat: chat)
+            targetSlot = chat.projectId
         }
-        setComposerDraft(body, for: chatId)
-        pendingForwardDraft = (chatId, body, forwardedFrom)
+        // Text alone: open the chat with the draft ready (user taps Send).
+        if !payload.hasMedia {
+            let body = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return }
+            switch target.kind {
+            case .people(let c):
+                open(peopleChat: c)
+            case .agent(let p):
+                guard let chat = primaryChat(of: p.id) else { return }
+                open(chat: chat)
+            }
+            setComposerDraft(body, for: chatId)
+            pendingForwardDraft = (chatId, body, forwardedFrom)
+            return
+        }
+        #if DEBUG
+        if isFixture {
+            // No blob store to copy between: the rows land with the same keys. A chart
+            // travels as its fallback picture here.
+            fixtureAppend(chatId: chatId, text: payload.text,
+                          attachments: payload.attachments + payload.charts.compactMap(\.fallback),
+                          forwardedFrom: forwardedFrom)
+            return
+        }
+        #endif
+        Task { @MainActor in
+            var pending: [PendingAttachment] = []
+            for a in payload.attachments {
+                guard let data = await fetchForForward(a, slot: slot) else { continue }
+                pending.append(PendingAttachment(name: a.name, mime: a.mime, data: data))
+            }
+            // A chart's fallback picture is written as its own part, linked to the chart,
+            // so it is uploaded here rather than through the send's attachment list.
+            var extraParts: [[String: Any]] = []
+            for c in payload.charts {
+                var fallbackRef: String?
+                if let a = c.fallback, let data = await fetchForForward(a, slot: slot) {
+                    do {
+                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
+                    } catch {
+                        fail("forward the chart's picture", error)
+                    }
+                }
+                extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
+            }
+            guard !payload.text.isEmpty || !pending.isEmpty || !extraParts.isEmpty else {
+                notice = Notice(text: "Couldn't forward the message")
+                return
+            }
+            switch target.kind {
+            case .people(let c):
+                sendPeople(chatId: c.id, text: payload.text, replyTo: nil, attachments: pending,
+                           forwardedFrom: forwardedFrom, extraParts: extraParts)
+            case .agent:
+                send(chatId: chatId, text: payload.text, attachments: pending, forwardedFrom: forwardedFrom,
+                     extraParts: extraParts)
+            }
+        }
+    }
+
+    /// The bytes of one attachment being forwarded, from the source chat's slot; a
+    /// miss is reported and the attachment is left out.
+    private func fetchForForward(_ a: Attachment, slot: String) async -> Data? {
+        guard let ref = a.blobRef, let url = blobURL(projectId: slot, key: ref),
+              let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            notice = Notice(text: "Couldn't forward \(a.name)")
+            return nil
+        }
+        return data
+    }
+}
+
+/// Forward writes a chart again as its own parts ([feedback forward-attachments-ios-2026-10-27]).
+extension ChartBody {
+    /// The doc parts a forwarded chart becomes on the new row: its copied fallback picture
+    /// (when it has one, uploaded under `fallbackRef`) naming the chart as `chartPart`, then
+    /// the `chart` part itself with fresh ids and `fallback` pointing at that picture — the
+    /// shape `post_chart` writes, so a client that draws charts hides the picture and an
+    /// older one shows it. The spec travels as the JSON object it is.
+    func forwardParts(fallbackRef: String?) -> [[String: Any]] {
+        let chartId = newId()
+        var out: [[String: Any]] = []
+        var fallbackId: String?
+        if let a = fallback {
+            let id = newId()
+            var attachment: [String: Any] = ["name": a.name, "mime": a.mime, "chartPart": chartId]
+            if let kind = a.kind { attachment["kind"] = kind }
+            if let ref = fallbackRef { attachment["ref"] = ref }
+            out.append(["id": id, "kind": "attachment", "attachment": attachment])
+            fallbackId = id
+        }
+        let specValue: Any = spec.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? spec
+        var chart: [String: Any] = ["id": chartId, "kind": "chart", "specVersion": specVersion,
+                                    "chart": specValue, "table": table]
+        if let fallbackId { chart["fallback"] = fallbackId }
+        out.append(chart)
+        return out
     }
 }

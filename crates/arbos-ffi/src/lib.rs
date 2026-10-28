@@ -19,8 +19,10 @@ uniffi::setup_scaffolding!();
 pub mod avatar;
 pub mod chart;
 pub mod highlight;
+pub mod markdown;
 pub mod matrix;
 pub mod search;
+pub mod settings_search;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -359,6 +361,19 @@ impl RoomSession {
         self.lock().is_closed()
     }
 
+    /// This connection stands refused (`not_available`); local commits queue until an ACK,
+    /// a reconnect or `retry_refused` clears it.
+    pub fn push_refused(&self) -> bool {
+        self.lock().push_refused()
+    }
+
+    /// The condition behind a refusal may have changed (a people-chat event for this room,
+    /// the user unblocked someone): resend every pending batch now with the same ids and
+    /// drop the refusal. True when a resend went out ([feedback 2005]).
+    pub fn retry_refused(&self, now_ms: u64) -> bool {
+        self.lock().retry_refused(now_ms)
+    }
+
     pub fn drain_actions(&self) -> Vec<RoomAction> {
         self.lock()
             .drain_actions()
@@ -468,6 +483,8 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             mime: r.mime,
             kind: r.kind,
             blob_ref: r.blob_ref,
+            // GIF-picker attribution is written by a later path; clients leave it unset.
+            source: None,
         }
     }
 }
@@ -540,14 +557,16 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
 }
 
 /// Whether `sender` currently holds `emoji` on a message (flat key or legacy bucket).
+/// Skin-tone variants of the same base count as the same hold.
 fn reaction_is_on(doc: &CoreChatDoc, message_id: &str, emoji: &str, sender: &str) -> bool {
     let Some(map) = doc.find_message(message_id) else {
         return false;
     };
     let mut json = serde_json::to_value(map.get_deep_value()).unwrap_or(Value::Null);
     doc::project_reactions(&mut json);
+    let base = doc::normalize_reaction_emoji(emoji);
     json.get("reactions")
-        .and_then(|r| r.get(emoji))
+        .and_then(|r| r.get(base.as_str()))
         .and_then(|bucket| bucket.get(sender))
         .and_then(Value::as_bool)
         .unwrap_or(false)
@@ -853,6 +872,20 @@ impl ChatDoc {
             return Err(FfiError::Write("payload_json must be a JSON object".into()));
         }
         Ok(self.lock_doc().push_command(&kind, payload, &device_id))
+    }
+
+    /// Append one part to a message from its JSON object (`kind` + fields, a string
+    /// `id` kept, else minted) — core's `add_part_from_json`. Forward writes a chart
+    /// part and its fallback picture after the row's text and attachments with it
+    /// ([feedback forward-attachments-ios-2026-10-27]). Returns the part id.
+    pub fn add_part_json(&self, message_id: String, part_json: String) -> Result<String, FfiError> {
+        let part: Value = serde_json::from_str(&part_json).map_err(write_err)?;
+        if !part.is_object() {
+            return Err(FfiError::Write("part_json must be a JSON object".into()));
+        }
+        self.lock_doc()
+            .add_part_from_json(&message_id, &part)
+            .ok_or_else(|| FfiError::Write(format!("no message {message_id} to add a part to")))
     }
 
     /// Mirror the model picker into project `settings`. Does not commit.

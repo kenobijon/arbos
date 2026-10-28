@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::app::{AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 
@@ -106,6 +107,7 @@ fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful
         .items_center()
         .justify_center()
         .cursor_pointer()
+        // hover-fill: exception overlay
         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.75)))
         .child(icon("arrow-down", 12.0, fg))
 }
@@ -230,14 +232,35 @@ fn picture_bubble(
                 ),
         );
     }
-    let mut out = div().flex().flex_col().gap(px(4.0)).child(bubble);
+    let mut out = div().flex().flex_col().gap(px(4.0));
     if let Some(from) = forwarded_from {
+        // The same header a forwarded text bubble carries, above the picture
+        // (Telegram / iMessage) — so a forwarded picture + caption reads as one
+        // forwarded message ([feedback forward-attachments-mac-2026-10-27]).
+        let by = from.strip_prefix(FORWARDED_FROM_PREFIX).unwrap_or(from);
+        out = out.child(div().pl(px(6.0)).max_w(px(w)).child(
+            crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
+        ));
+    }
+    out = out.child(bubble);
+    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): a small
+    // "via <provider>" under the picture opens the source page. Nothing sets
+    // `source` yet; when a later picker does, this is where it shows.
+    if let Some(src) = attachment.source.clone() {
+        let label = format!("via {}", src.provider);
+        let url = src.page_url.clone();
         out = out.child(
             div()
+                .id(SharedString::from(format!("{row_id}-via")))
                 .pl(px(6.0))
+                .max_w(px(w))
                 .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(from.to_owned()),
+                .text_color(theme.text_faint)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    cx.open_url(&url);
+                })
+                .child(label),
         );
     }
     out.into_any_element()
@@ -347,10 +370,7 @@ fn file_card(
         );
     }
     if let Some(open) = open {
-        card = card
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(move |_, _, cx| open(cx));
+        card = highlight::button(card.cursor_pointer(), theme).on_click(move |_, _, cx| open(cx));
     }
     card.into_any_element()
 }

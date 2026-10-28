@@ -13,7 +13,7 @@ use arbos_core::doc::ChatDoc;
 use arbos_core::ids::ulid;
 use arbos_core::wire::{self, Frame, FrameType};
 use bytes::Bytes;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::matrix::backfill::load_doc;
 use crate::people::PEOPLE_PROJECT;
@@ -81,6 +81,18 @@ pub async fn write_doc(
     chat_id: &str,
     edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
 ) -> anyhow::Result<i64> {
+    write_doc_as(state, project_id, chat_id, RELAY_DEVICE, edit).await
+}
+
+/// [`write_doc`] signed as `device` — the relay writing **for** a member it hosts (an outside
+/// agent, `outside::<project>`), so the row says whose words these are.
+pub async fn write_doc_as(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+    device: &str,
+    edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
+) -> anyhow::Result<i64> {
     let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
     let doc = load_doc(state, chat_id, project_id)?.unwrap_or_else(|| ChatDoc::new(None, false));
     let base = doc.oplog_vv();
@@ -88,13 +100,11 @@ pub async fn write_doc(
     let bytes = doc.export_updates_since(&base);
     anyhow::ensure!(!bytes.is_empty(), "the edit produced no update");
     let batch_id = ulid();
-    let (seq, dup) = state
-        .db
-        .append_row(&room_name, RELAY_DEVICE, &batch_id, &bytes)?;
+    let (seq, dup) = state.db.append_row(&room_name, device, &batch_id, &bytes)?;
     if !dup {
         let frame = Frame::new(
             FrameType::Row,
-            json!({ "seq": seq, "device": RELAY_DEVICE, "batchId": batch_id }),
+            json!({ "seq": seq, "device": device, "batchId": batch_id }),
             Bytes::from(bytes),
         )
         .encode();
@@ -138,16 +148,46 @@ pub fn compact_shallow(
     Ok(())
 }
 
-/// Write `text` as a system line into a people chat's doc and broadcast the row. Returns the
-/// row's seq. Errors are the caller's to log: a notice must never fail the membership change
-/// it describes.
+/// The facts behind a membership line, so a client renders it from the live roster: the actor
+/// by user id (never the name of the moment — "Const added Aureum", 2026-10-26, when the
+/// profile had been renamed Jacob), the subjects by id. `text` stays on the row as the
+/// fallback for clients that predate the field.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Notice {
+    /// `added` | `removed` | `left` | `joined`.
+    pub kind: &'static str,
+    /// User id of the person who acted (or left / joined).
+    pub actor: String,
+    /// `{"kind": "user" | "agent", "id": …}` for each person or agent the line names.
+    pub subjects: Vec<Value>,
+}
+
+pub fn subject_user(id: &str) -> Value {
+    json!({ "kind": "user", "id": id })
+}
+pub fn subject_agent(project_id: &str) -> Value {
+    json!({ "kind": "agent", "id": project_id })
+}
+
+/// Write `text` as a system line into a people chat's doc, with `notice` (its facts) on the
+/// row, and broadcast it. Returns the row's seq. Errors are the caller's to log: a notice
+/// must never fail the membership change it describes.
 pub async fn post_people_notice(
     state: &AppState,
     chat_id: &str,
     text: &str,
+    notice: Notice,
 ) -> anyhow::Result<i64> {
     let seq = write_doc(state, None, chat_id, |doc| {
-        doc.append_system_line(&ulid(), text, RELAY_DEVICE, None)?;
+        let id = ulid();
+        doc.append_system_line(&id, text, RELAY_DEVICE, None)?;
+        doc.set_message_fields(
+            &id,
+            &[(
+                "notice",
+                serde_json::to_value(&notice).unwrap_or(Value::Null),
+            )],
+        );
         Ok(())
     })
     .await?;
