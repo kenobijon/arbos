@@ -331,7 +331,7 @@ struct FunPickerSheet: View {
                 .frame(maxWidth: 260)
             Spacer()
             Button { dismiss() } label: {
-                GlassCircle(size: 36) { Image(systemName: "xmark").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text) }
+                GlassCircle { Image(systemName: "xmark").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text) }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close")
@@ -359,10 +359,8 @@ struct FunPickerSheet: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 14)
-        .frame(height: Controls.height - 8)
-        .background(Capsule().fill(theme.field))
-        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        // The control family's field (Controls.height, ControlSurface, the family rim).
+        .controlField()
         .padding(.horizontal, 16)
     }
 
@@ -440,7 +438,7 @@ struct FunPickerSheet: View {
                         Text("Tone")
                         Circle().fill(EmojiCatalog.toneSwatches[min(tone, EmojiCatalog.toneSwatches.count - 1)])
                             .frame(width: 14, height: 14)
-                            .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .overlay(Circle().strokeBorder(theme.muted.opacity(0.4), lineWidth: 1))
                     }
                 }
                 .buttonStyle(.plain)
