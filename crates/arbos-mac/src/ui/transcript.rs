@@ -26,7 +26,6 @@ use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::markdown::{
     self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
@@ -37,6 +36,7 @@ use crate::ui::people;
 use crate::ui::profile_target;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -452,7 +452,7 @@ pub(crate) fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<D
         .items_center()
         .gap(px(6.0))
         .min_w_0()
-        .child(icon("forward", 12.0, muted))
+        .child(sf_symbols::glyph("arrowshape.turn.up.right", 12.0, muted))
         .child(
             div()
                 .min_w_0()
@@ -826,13 +826,6 @@ pub struct Transcript {
     /// list holds while it lays its items out — v0.6.224 crashed on launch,
     /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
     measured: Rc<std::cell::RefCell<Measured>>,
-    /// Reaction chip whose senders are listed under the chips (iPhone
-    /// `reactionSenders`): `(message_id, emoji)`. Set while the pointer is
-    /// over that chip; click still toggles my reaction (capsule also toggles).
-    /// The names paint out of flow so the list row's height never changes
-    /// under the pointer (in-flow names grew the row, the bottom-aligned
-    /// list shifted the chip away, and hover oscillated).
-    reaction_senders: Option<(String, String)>,
 }
 
 /// Last-frame geometry, by row id, plus the transcript's viewport.
@@ -840,6 +833,26 @@ pub struct Transcript {
 struct Measured {
     rows: HashMap<String, Bounds<Pixels>>,
     viewport: Bounds<Pixels>,
+}
+
+/// Hover tip on a reaction chip: who used that emoji (iPhone `reactionSenders`).
+/// Floats above the list so the row's height never changes on hover.
+struct ReactionSendersTip(SharedString);
+
+impl Render for ReactionSendersTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(theme.surface_2)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(TEXT_TINY))
+            .text_color(theme.text)
+            .child(self.0.clone())
+    }
 }
 
 impl Transcript {
@@ -904,7 +917,6 @@ impl Transcript {
             }),
             drag_scroll: None,
             measured: Rc::default(),
-            reaction_senders: None,
         }
     }
 
@@ -1408,7 +1420,6 @@ impl Transcript {
         self.pane_open = pane_open;
         if chat_changed {
             self.drag_scroll = None;
-            self.reaction_senders = None;
         }
         let messages: Vec<Message> = chat_id
             .as_deref()
@@ -1869,7 +1880,7 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .min_w_0()
-            .child(icon("bubble", 12.0, muted))
+            .child(sf_symbols::glyph("bubble.left", 12.0, muted))
             .child(
                 div()
                     .min_w_0()
@@ -1967,7 +1978,7 @@ impl Transcript {
         });
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
         let more_opacity = if just_copied { 1.0 } else { opacity };
-        let more_glyph = if just_copied { "check" } else { "ellipsis" };
+        let more_glyph = if just_copied { "checkmark" } else { "ellipsis" };
         let more_color = if just_copied {
             theme.online
         } else {
@@ -1985,7 +1996,7 @@ impl Transcript {
                 .cursor_pointer()
                 .opacity(opacity)
                 .map(|el| highlight::button(el, theme))
-                .child(icon(glyph, RAIL_GLYPH, color))
+                .child(sf_symbols::glyph(glyph, RAIL_GLYPH, color))
         };
         div()
             .flex()
@@ -1994,7 +2005,7 @@ impl Transcript {
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
+                    "face.smiling",
                     opacity,
                     theme.text_muted,
                 )
@@ -2013,7 +2024,7 @@ impl Transcript {
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
-                    "reply",
+                    "arrowshape.turn.up.left",
                     opacity,
                     theme.text_muted,
                 )
@@ -2315,7 +2326,8 @@ impl Transcript {
     }
 
     /// Display name for a reaction sender id (`user:…` / `agent:…`), matching
-    /// the iPhone's `reactionSenderLabel` ("You" for self).
+    /// the iPhone's `reactionSenderLabel` ("You" for self). Shown in the chip's
+    /// floating tip so the reaction row never grows on hover.
     fn reaction_sender_label(&self, sender: &str, me: &str, cx: &App) -> String {
         if sender == me {
             return "You".into();
@@ -2959,30 +2971,30 @@ impl Transcript {
                 indent,
             } => {
                 // iPhone parity: small capsules under the bubble, mine tinted;
-                // click toggles my reaction. Hover lists who used that emoji
-                // under the chips — iPhone `reactionSenders`. Names hang out
-                // of flow (absolute) so the row height stays put: in-flow
-                // names grew the row, the bottom-aligned list shifted the
-                // chip out from under the pointer, and hover oscillated.
+                // click toggles my reaction. Hover shows who used that emoji
+                // in a floating tip (iPhone `reactionSenders`) — never an
+                // in-flow names row, which grew/shrunk the message and made
+                // the list jump while the pointer sat on the chip
+                // ([feedback app-01M61440FP54FHVZ69QWEVD844]).
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
-                let showing = self
-                    .reaction_senders
-                    .as_ref()
-                    .filter(|(mid, _)| mid == &row.message_id)
-                    .map(|(_, e)| e.clone());
                 let mut chips = div().flex().flex_wrap().gap(px(4.0));
                 for (emoji, senders) in &reactions {
                     let on = senders.contains(&me);
-                    let selected = showing.as_ref() == Some(emoji);
                     let (state, chat, message_id, e) = (
                         self.state.clone(),
                         chat_id.clone(),
                         row.message_id.clone(),
                         emoji.clone(),
                     );
-                    let hover_mid = row.message_id.clone();
-                    let hover_emoji = emoji.clone();
+                    let names: SharedString = senders
+                        .iter()
+                        .map(|s| self.reaction_sender_label(s, &me, cx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into();
+                    let accent_soft = Theme::with_alpha(theme.accent, 0.22);
+                    let accent_edge = Theme::with_alpha(theme.accent, 0.55);
                     chips = chips.child(
                         div()
                             .id(SharedString::from(format!("{}#{}", row.id, emoji)))
@@ -2992,18 +3004,18 @@ impl Transcript {
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded_full()
-                            .bg(if on || selected {
-                                Theme::with_alpha(theme.accent, 0.22)
+                            .bg(if on {
+                                accent_soft
                             } else {
                                 theme.bubble_assistant
                             })
                             .border_1()
-                            .border_color(if on || selected {
-                                Theme::with_alpha(theme.accent, 0.55)
-                            } else {
-                                theme.border
-                            })
+                            .border_color(if on { accent_edge } else { theme.border })
                             .cursor_pointer()
+                            .map(|el| highlight::button(el, &theme))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ReactionSendersTip(names.clone())).into()
+                            })
                             .child(div().text_size(px(14.0)).child(emoji.clone()))
                             .when(senders.len() > 1, |el| {
                                 el.child(
@@ -3014,18 +3026,6 @@ impl Transcript {
                                         .child(senders.len().to_string()),
                                 )
                             })
-                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                                let key = (hover_mid.clone(), hover_emoji.clone());
-                                if *hovered {
-                                    if this.reaction_senders.as_ref() != Some(&key) {
-                                        this.reaction_senders = Some(key);
-                                        cx.notify();
-                                    }
-                                } else if this.reaction_senders.as_ref() == Some(&key) {
-                                    this.reaction_senders = None;
-                                    cx.notify();
-                                }
-                            }))
                             .on_click(move |_, _, cx| {
                                 let (chat, message_id, e) =
                                     (chat.clone(), message_id.clone(), e.clone());
@@ -3034,18 +3034,6 @@ impl Transcript {
                             }),
                     );
                 }
-                let names = showing.as_ref().and_then(|emoji| {
-                    reactions
-                        .iter()
-                        .find(|(e, _)| e == emoji)
-                        .map(|(_, senders)| {
-                            senders
-                                .iter()
-                                .map(|s| self.reaction_sender_label(s, &me, cx))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                });
                 div()
                     .w_full()
                     .relative()
@@ -3056,20 +3044,6 @@ impl Transcript {
                     .mt(px(-2.0))
                     .pb(px(ROW_GAP_HALF))
                     .child(chips)
-                    .when_some(names, |el, names| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .top(relative_width(1.0))
-                                .pt(px(4.0))
-                                .when(mine, |d| d.right_0())
-                                .when(!mine, |d| d.left_0())
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .whitespace_nowrap()
-                                .child(names),
-                        )
-                    })
                     .into_any_element()
             }
             RowKind::Handoff { names, total } => {
@@ -3627,7 +3601,7 @@ impl Render for Transcript {
                                 .shadow_md()
                                 .cursor_pointer()
                                 .map(|el| highlight::washed(el, theme.card(), &theme))
-                                .child(icon("arrow-down", 15.0, theme.text))
+                                .child(sf_symbols::glyph("arrow.down", 15.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
@@ -3856,7 +3830,7 @@ fn pending_glyph(theme: &Theme) -> Div {
         .items_center()
         .justify_center()
         .debug_selector(|| "own-bubble-pending-glyph".into())
-        .child(icon("hourglass", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("hourglass", 12.0, theme.text_muted))
 }
 
 /// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
@@ -3870,7 +3844,11 @@ fn failed_glyph(theme: &Theme) -> Div {
         .items_center()
         .debug_selector(|| "own-bubble-failed-glyph".into())
         // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
-        .child(icon("exclamation", RAIL_GLYPH, theme.danger))
+        .child(sf_symbols::glyph(
+            "exclamationmark.circle",
+            RAIL_GLYPH,
+            theme.danger,
+        ))
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -5370,7 +5348,7 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
         .flex()
         .items_center()
         .gap(px(7.0))
-        .child(icon("key", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("key", 13.0, theme.text_muted))
         .child(
             div()
                 .flex()
@@ -6337,9 +6315,9 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
         .child(if copied {
             div()
                 .debug_selector(|| "copy-check".into())
-                .child(icon("check", 13.0, fg))
+                .child(sf_symbols::glyph("checkmark", 13.0, fg))
         } else {
-            div().child(icon("copy", 13.0, fg))
+            div().child(sf_symbols::glyph("doc.on.doc", 13.0, fg))
         })
         .on_click(move |_, window, cx| {
             if let Some(on_copy) = &on_copy {
@@ -8427,6 +8405,53 @@ mod transcript_smoke_tests {
                 assert!(c.value_input.read(cx).text().is_empty());
             });
         });
+    }
+
+    /// An expanded link card under a long line (v0.6.310 proof shot, the YouTube row): the
+    /// bubble is as wide as the sentence, the card stops at 400 pt, and the card's title
+    /// wraps there — the card must still be tall enough for its own footer.
+    #[gpui::test]
+    fn expanded_link_card_under_a_long_line_keeps_its_footer(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let mut m = message(
+            "m2",
+            "user",
+            "this one explains the render pipeline better than the docs, worth the ten minutes https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            t + 2_000,
+        );
+        m.parts.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "lp", "kind": "link_preview", "specVersion": 1,
+                "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                "canonicalUrl": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                "provider": "youtube", "providerName": "YouTube", "type": "video",
+                "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+                "description": "Blender", "facts": ["Blender"], "siteHost": "www.youtube.com",
+                "image": { "ref": "lp-yt.jpg", "width": 1280, "height": 720, "mime": "image/jpeg", "art": false },
+                "layout": "expanded", "fetchedAt": t
+            }))
+            .expect("preview part"),
+        );
+        let (_rt, _state, transcript) = mount_with(
+            cx,
+            vec![message("m1", "user", "How did the review go?", t), m],
+        );
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        let card = vcx.debug_bounds("link-card").expect("the card draws");
+        let text = vcx
+            .debug_bounds("link-text")
+            .expect("the card's text block draws");
+        assert!(
+            card.size.width <= px(crate::ui::link_card::CARD_MAX_WIDTH + 0.5),
+            "the card stops at its width: {card:?}"
+        );
+        assert!(
+            text.bottom() + px(crate::ui::link_card::CARD_PAD) <= card.bottom() + px(0.5),
+            "the text block (title, line, footer) fits inside the card: text {text:?} card {card:?}"
+        );
     }
 
     /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every

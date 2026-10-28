@@ -4,8 +4,7 @@
 //! toggles my reaction on that message (`AppState::toggle_reaction`, a
 //! reaction row in the chat doc, synced like any other op) and closes it.
 //! The chips under the bubble (`RowKind::Reactions`) show the result; hovering
-//! a chip lists who used that emoji (iPhone `reactionSenders`) in an out-of-flow
-//! line so the list row does not grow under the pointer.
+//! a chip lists who used that emoji (iPhone `reactionSenders`).
 
 use gpui::{
     div, point, prelude::*, px, size, Context, Div, Entity, Focusable, Pixels, Point, Size, Window,
@@ -14,7 +13,7 @@ use gpui::{
 use crate::model::{Id, REACTION_PALETTE};
 use crate::ui::composer::ComposerInput;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
@@ -139,7 +138,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             )
             .child(cell(
                 "react-pick-close",
-                icon("xmark", 14.0, theme.text_muted),
+                sf_symbols::glyph("xmark", 14.0, theme.text_muted),
                 false,
                 &theme,
                 cx.listener(|this, _, _, cx| {
@@ -168,7 +167,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             div()
                 .relative()
                 .size(px(20.0))
-                .child(icon("face-smile", 20.0, theme.text_muted))
+                .child(sf_symbols::glyph("face.smiling", 20.0, theme.text_muted))
                 .child(
                     div()
                         .absolute()
@@ -180,7 +179,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("plus", 10.0, theme.text_muted)),
+                        .child(sf_symbols::glyph("plus", 10.0, theme.text_muted)),
                 ),
             false,
             &theme,
