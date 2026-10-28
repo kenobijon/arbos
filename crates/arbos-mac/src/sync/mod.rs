@@ -131,6 +131,18 @@ pub enum SyncEvent {
         project_id: Id,
         info: crate::model::OutsideInfo,
     },
+    /// The Wake URL form was saved (`PATCH /outside-agents/{id}`); `error` is the relay's
+    /// short reason when it refused.
+    OutsideAgentWakeSaved {
+        project_id: Id,
+        error: Option<String>,
+    },
+    /// "Send test wake" came back: `text` is "Delivered · HTTP 200" or the short error.
+    OutsideAgentWakeTested {
+        project_id: Id,
+        ok: bool,
+        text: String,
+    },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
     /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
@@ -246,6 +258,14 @@ pub enum SyncEvent {
     ChatArchived {
         chat_id: Id,
         archived_at: Option<u64>,
+    },
+    /// My sidebar pins, top first (`GET /me/pins`, the local cache at launch, a
+    /// `pins_changed` push from another device, or the relay's answer to `SetPins`):
+    /// row keys `agent:<project>` / `chat:<people chat>` / `server:<server>`; `cap` is
+    /// the relay's limit ([feedback sidebar-pinning-mac-2026-10-28]).
+    Pins {
+        pins: Vec<String>,
+        cap: usize,
     },
     /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
     /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
@@ -826,6 +846,12 @@ pub enum ClientCommand {
         chat_id: Id,
         archived: bool,
     },
+    /// Replace my sidebar pins (`PUT /me/pins {pins}`): the whole list, top first —
+    /// one command for pin, unpin and reorder. The relay's answer comes back as
+    /// `SyncEvent::Pins` ([feedback sidebar-pinning-mac-2026-10-28]).
+    SetPins {
+        pins: Vec<String>,
+    },
     /// Rename a chat tab (`PATCH /projects/{id}/chats/{chat}` + a `retitle`
     /// command in the chat doc so the box's local index matches).
     Retitle {
@@ -955,6 +981,24 @@ pub enum ClientCommand {
     },
     /// `DELETE /outside-agents/{id}` (revoke the key; the agent stays) → status refresh.
     OutsideAgentRevoke {
+        project_id: Id,
+    },
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card →
+    /// [`SyncEvent::OutsideAgentStatus`] with the effective set.
+    OutsideAgentScope {
+        project_id: Id,
+        scope: String,
+        on: bool,
+    },
+    /// `PATCH /outside-agents/{id} {wake_url, wake_auth}`: `None` leaves a field alone, an
+    /// empty string clears it → [`SyncEvent::OutsideAgentWakeSaved`] + a status refresh.
+    OutsideAgentWakeSet {
+        project_id: Id,
+        url: Option<String>,
+        auth: Option<String>,
+    },
+    /// `POST /outside-agents/{id}/wake/test` → [`SyncEvent::OutsideAgentWakeTested`].
+    OutsideAgentWakeTest {
         project_id: Id,
     },
     /// Delete a people chat I own (`DELETE /chats/{id}`).

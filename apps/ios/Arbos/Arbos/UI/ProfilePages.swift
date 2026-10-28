@@ -160,7 +160,16 @@ struct PaneCard<Rows: View>: View {
                     .padding(.leading, PaneKit.inset)
             }
             _VariadicView.Tree(PaneCardLayout(separator: theme.separator, inset: separatorInset)) { rows() }
-                .background(RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous).fill(theme.bubbleAssistant))
+                // Glass: a translucent wash with a hairline rim; Matte: the solid grey as before
+                // ([feedback right-pane-glass-cards-ios-2026-10-28], the Mac's `kit::card`).
+                .background(
+                    RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                        .fill(theme.paneCardFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                                .strokeBorder(theme.paneCardRim, lineWidth: 1)
+                        )
+                )
             if let footer {
                 Text(footer)
                     .font(theme.font(Theme.tiny))
@@ -219,10 +228,13 @@ struct PaneRow: View {
         HStack(spacing: PaneKit.gap) {
             leadingView
             VStack(alignment: .leading, spacing: 2) {
+                // Over a subtitle (a member's @handle) an emoji-only title is raised onto
+                // the baseline; a one-line title stays centred where Core Text puts it.
                 Text(title)
                     .font(theme.font(Theme.body, weight: titleWeight))
                     .foregroundStyle(titleTint ?? theme.text)
                     .lineLimit(1)
+                    .emojiNameLift(subtitle?.isEmpty == false ? title : "", size: theme.pt(Theme.body))
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
                         .font(theme.font(Theme.small))
@@ -380,7 +392,10 @@ struct PaneTabs: View {
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
                         .padding(.top, hitAbove)
                         .padding(.bottom, hitBelow)
-                        .contentShape(Rectangle())
+                        // `.interaction` so the padded band is the real hit target, not only
+                        // the accessibility frame (UITests were missing the bottom corners of
+                        // Home's All tab — feedback app-01M61EZD0GJ2XGV1EW4SCVXENK / filter taps).
+                        .contentShape(.interaction, Rectangle())
                         .overlay { hitRectOverlay }
                 }
                 .buttonStyle(.plain)
@@ -464,10 +479,13 @@ struct PaneHeader<Avatar: View>: View {
 
     private var nameLine: some View {
         HStack(spacing: 6) {
+            // The subtitle (@handle) sits under this: an emoji-only name is raised
+            // onto the baseline so it keeps a text name's distance.
             Text(name)
                 .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+                .emojiNameLift(name, size: theme.pt(28))
             if let badge {
                 Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
             }

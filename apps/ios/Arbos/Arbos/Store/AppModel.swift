@@ -300,6 +300,9 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Bool, Never>?
     /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
     @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
+    /// Connected agents' session logs (`GET /outside-agents/{id}/log`, #2224), oldest first,
+    /// for the Details pane's Session log card and its View all page.
+    @Published var outsideLogs: [Id: [OutsideLogEntry]] = [:]
     @Published var projects: [Project] = [] {
         didSet {
         }
@@ -468,6 +471,8 @@ final class AppModel: ObservableObject {
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
     var channelLoading: Set<Id> = []
+    /// Servers whose member list was asked for this session (`wantServerRosters`).
+    var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
     var matrixStarting = false
 
@@ -587,6 +592,7 @@ final class AppModel: ObservableObject {
         guard archivedServerIds.contains(serverId) != archived else { return }
         if archived { archivedServerIds.insert(serverId) } else { archivedServerIds.remove(serverId) }
         UserDefaults.standard.set(Array(archivedServerIds), forKey: "archivedServers")
+        if archived { unpinHome(serverId: serverId) }
         archiveLocalUntil["s:" + serverId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
         guard credentials != nil, !isFixture else { return }
         Task {
@@ -630,6 +636,7 @@ final class AppModel: ObservableObject {
         archiveLocalUntil.removeValue(forKey: (kind == "server" ? "s:" : "p:") + spaceId)
         if kind == "server" {
             reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: &archivedServerIds, defaultsKey: "archivedServers")
+            if archived { unpinHome(serverId: spaceId) }
         } else {
             reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: &archivedProjectIds, defaultsKey: "archivedProjects")
             if archived { unpinHome(projectId: spaceId) }
@@ -654,82 +661,162 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Home pins (device-local)
+    // MARK: Home pins (synced through the relay)
 
-    /// How many home rows may sit pinned at once (agents + people chats).
+    /// The relay's cap until `GET /me/pins` says otherwise (Jacob 2026-10-28: 5, no tiers).
     static let maxHomePins = 5
 
-    /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
-    /// Order is the pin strip: index 0 is the topmost row.
-    @Published private(set) var pinnedHomeIds: [String] = {
-        var seen = Set<String>()
-        return (UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
-            .filter { seen.insert($0).inserted }
-    }()
+    /// How many rows may sit pinned at once — the relay's number.
+    @Published private(set) var pinCap = AppModel.maxHomePins
 
-    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
-    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+    /// My pins as the relay keeps them, top first — row keys `agent:<project>` /
+    /// `chat:<people chat>` / `server:<server>`, one list for every device
+    /// ([feedback sidebar-pinning-ios-2026-10-28]; `GET` / `PUT /me/pins`, `pins_changed`
+    /// push). Cached in `UserDefaults[HomePins.cacheKey]` so the section is there at launch.
+    /// Before the synced list this device kept `p:` / `c:` keys under `pinnedHome`; the
+    /// first launch with the relay list empty uploads them once (`HomePins.migrateLegacy`).
+    @Published private(set) var pinnedHomeIds: [String] = HomePins.cached()
 
-    /// Position in the pin strip (0 = top), or `nil` when not pinned.
-    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "p:" + projectId) }
-    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "c:" + peopleChatId) }
+    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains(HomePins.key(projectId: projectId)) }
+    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains(HomePins.key(peopleChatId: peopleChatId)) }
+    func isHomePinned(serverId: Id) -> Bool { pinnedHomeIds.contains(HomePins.key(serverId: serverId)) }
+
+    /// Position in the Pinned section (0 = top), or `nil` when not pinned.
+    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: HomePins.key(projectId: projectId)) }
+    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: HomePins.key(peopleChatId: peopleChatId)) }
+    func homePinIndex(serverId: Id) -> Int? { pinnedHomeIds.firstIndex(of: HomePins.key(serverId: serverId)) }
 
     func pinHome(projectId: Id) {
         unarchive(projectId)
-        setHomePinned("p:" + projectId, true)
+        setHomePinned(HomePins.key(projectId: projectId), true)
     }
 
-    func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
+    func unpinHome(projectId: Id) { setHomePinned(HomePins.key(projectId: projectId), false) }
 
     func pinHome(peopleChatId: Id) {
         unarchive(peopleChatId: peopleChatId)
-        setHomePinned("c:" + peopleChatId, true)
+        setHomePinned(HomePins.key(peopleChatId: peopleChatId), true)
     }
-    func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
+    func unpinHome(peopleChatId: Id) { setHomePinned(HomePins.key(peopleChatId: peopleChatId), false) }
 
-    /// Put a pinned home row first in the pin strip (long-press → Move to top).
-    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: "p:" + projectId) }
-    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: "c:" + peopleChatId) }
+    func pinHome(serverId: Id) {
+        unarchive(serverId: serverId)
+        setHomePinned(HomePins.key(serverId: serverId), true)
+    }
+    func unpinHome(serverId: Id) { setHomePinned(HomePins.key(serverId: serverId), false) }
 
-    /// Move a pinned home row one step toward the top of the strip.
-    func moveHomePinUp(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: -1) }
-    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: -1) }
+    /// Put a pinned home row first in the section (long-press → Move to top).
+    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: HomePins.key(projectId: projectId)) }
+    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: HomePins.key(peopleChatId: peopleChatId)) }
+    func moveHomePinToTop(serverId: Id) { moveHomePinToTop(key: HomePins.key(serverId: serverId)) }
 
-    /// Move a pinned home row one step toward the bottom of the strip.
-    func moveHomePinDown(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: 1) }
-    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: 1) }
+    /// Move a pinned home row one step toward the top of the section.
+    func moveHomePinUp(projectId: Id) { moveHomePin(key: HomePins.key(projectId: projectId), delta: -1) }
+    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: HomePins.key(peopleChatId: peopleChatId), delta: -1) }
+    func moveHomePinUp(serverId: Id) { moveHomePin(key: HomePins.key(serverId: serverId), delta: -1) }
+
+    /// Move a pinned home row one step toward the bottom of the section.
+    func moveHomePinDown(projectId: Id) { moveHomePin(key: HomePins.key(projectId: projectId), delta: 1) }
+    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: HomePins.key(peopleChatId: peopleChatId), delta: 1) }
+    func moveHomePinDown(serverId: Id) { moveHomePin(key: HomePins.key(serverId: serverId), delta: 1) }
 
     private func setHomePinned(_ key: String, _ pinned: Bool) {
+        var next = pinnedHomeIds
         if pinned {
-            guard !pinnedHomeIds.contains(key) else { return }
-            // Cap at five so the top of Home stays a short favourites strip.
-            guard pinnedHomeIds.count < Self.maxHomePins else {
-                failRefused("pin the chat", "You can pin up to five chats.")
+            guard !next.contains(key) else { return }
+            // The relay's cap, mirrored here so the refusal is instant and worded once.
+            guard next.count < pinCap else {
+                failRefused("pin the chat", "You can pin up to \(pinCap) chats.")
                 return
             }
-            // New pins land at the top; later Move to top / up / down adjusts order.
-            pinnedHomeIds.insert(key, at: 0)
+            // New pins land at the top; Move to top / up / down adjusts the order.
+            next.insert(key, at: 0)
         } else {
-            guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
-            pinnedHomeIds.remove(at: i)
+            guard let i = next.firstIndex(of: key) else { return }
+            next.remove(at: i)
         }
-        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+        storePins(next)
     }
 
     private func moveHomePinToTop(key: String) {
         guard let i = pinnedHomeIds.firstIndex(of: key), i > 0 else { return }
-        pinnedHomeIds.remove(at: i)
-        pinnedHomeIds.insert(key, at: 0)
-        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+        var next = pinnedHomeIds
+        next.remove(at: i)
+        next.insert(key, at: 0)
+        storePins(next)
     }
 
     private func moveHomePin(key: String, delta: Int) {
         guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
         let j = i + delta
         guard pinnedHomeIds.indices.contains(j) else { return }
-        pinnedHomeIds.swapAt(i, j)
-        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+        var next = pinnedHomeIds
+        next.swapAt(i, j)
+        storePins(next)
     }
+
+    /// The new list, shown and cached at once, then sent to the relay — whose answer (the
+    /// list it kept, cleaned and capped) is the truth. A refusal re-reads the relay's list;
+    /// an older relay without the endpoint keeps the local list.
+    private func storePins(_ pins: [String]) {
+        guard pins != pinnedHomeIds else { return }
+        pinnedHomeIds = pins
+        HomePins.cache(pins)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do {
+                applyPins(try await api.setPins(pins))
+            } catch let e as RelayError where e.status == 404 {
+                // Older relay: the pins stay on this device.
+            } catch let e as RelayError where e.status == 409 {
+                failRefused("pin the chat", e.message.isEmpty ? "You can pin up to \(pinCap) chats." : e.message)
+                await refreshPins()
+            } catch {
+                fail("save your pins", error)
+                await refreshPins()
+            }
+        }
+    }
+
+    /// `GET /me/pins`: the relay's list replaces the cached one. On the first launch with the
+    /// synced list — the relay has nothing and this device still holds `pinnedHome` — the old
+    /// local pins go up once, in their order (Jacob's option A, 2026-10-28); the local list
+    /// stands until the relay confirms.
+    func refreshPins() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            let dto = try await api.pins()
+            let legacy = HomePins.legacyLocal()
+            if dto.pins.isEmpty, !legacy.isEmpty, !HomePins.migrated() {
+                let migrated = HomePins.migrateLegacy(legacy, cap: Int(dto.cap))
+                let kept = try await api.setPins(migrated)
+                HomePins.markMigrated()
+                applyPins(kept)
+            } else {
+                if !legacy.isEmpty { HomePins.markMigrated() }
+                applyPins(dto)
+            }
+        } catch let e as RelayError where e.status == 404 {
+            // Older relay: the cached list stands, quietly.
+        } catch {
+            NSLog("pins: \(error)")
+        }
+    }
+
+    /// Another device of mine replaced the list (`pins_changed` push).
+    func applyRemotePins(_ pins: [String]) {
+        pinnedHomeIds = pins
+        HomePins.cache(pins)
+    }
+
+    private func applyPins(_ dto: PinsDto) {
+        pinCap = max(1, Int(dto.cap))
+        pinnedHomeIds = dto.pins
+        HomePins.cache(dto.pins)
+    }
+
+    /// `refreshPins()` ran once this launch (the loop re-reads only on a push or a refusal).
+    private var pinsLoaded = false
 
     @Published private(set) var machineError: String?
     /// Compatibility shim: setting it posts an **info** toast (something that worked or a plain
@@ -1761,6 +1848,10 @@ final class AppModel: ObservableObject {
                 // The New Message sheet's list, ahead of the first "+" (TTL-gated, off this loop).
                 Task { await self.loadDirectory() }
                 await self.refreshServers()
+                if !self.pinsLoaded {
+                    await self.refreshPins()
+                    self.pinsLoaded = true
+                }
                 await self.startMatrixIfNeeded()
                 await self.drainPushes()
                 await self.refreshUnread()
@@ -4229,15 +4320,28 @@ final class AppModel: ObservableObject {
         for c in peopleChats {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.id }
         }
+        if let m = serverMember(handle: handle) { return m.id }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.id
     }
 
+    /// A person's display name by handle: me, the people chats' members, the servers' members
+    /// (a channel bubble's sender need not share a group with me — [feedback
+    /// server-member-names-2026-10-28]), then the directory. `nil` = no name known.
     func personName(handle: String) -> String? {
         if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return me.name }
         for c in peopleChats {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
+        if let name = serverMember(handle: handle)?.name, !name.isEmpty { return name }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
+    }
+
+    /// A server member by handle, across every server's roster.
+    func serverMember(handle: String) -> ServerMember? {
+        for s in servers {
+            if let m = s.members.first(where: { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m }
+        }
+        return nil
     }
 
     /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
@@ -4291,6 +4395,9 @@ final class AppModel: ObservableObject {
             return .user(ProfilePerson(m))
         } else if let p = directory.first(where: { $0.handle == handle }) {
             return .user(ProfilePerson(p))
+        } else if let m = serverMember(handle: handle) {
+            return .user(ProfilePerson(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl,
+                                       lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex))
         } else {
             return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
         }
@@ -4648,6 +4755,10 @@ final class AppModel: ObservableObject {
                 }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .pinsChanged(let payload):
+                // Another device of mine pinned, unpinned or reordered: the push carries the
+                // whole list ([feedback sidebar-pinning-ios-2026-10-28]).
+                applyRemotePins(payload.pins)
             case .notificationsCleared(let payload):
                 applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
@@ -6237,9 +6348,28 @@ final class AppModel: ObservableObject {
         guard !isFixture else { return nil }
         if let info = try? await api.outsideAgent(projectId) {
             outsideInfo[projectId] = info
+            if info.logSummary != nil { await refreshOutsideLog(projectId) }
             return info
         }
         return outsideInfo[projectId]
+    }
+
+    /// The session log for the Details pane's card and View all (#2224).
+    func refreshOutsideLog(_ projectId: Id) async {
+        guard !isFixture else { return }
+        if let entries = try? await api.outsideAgentLog(projectId) {
+            outsideLogs[projectId] = entries
+        }
+    }
+
+    /// The chat a log line names, as the person knows it: a group's or DM's name, the agent's
+    /// own chat, or "Chat" when it is not in this app's lists any more.
+    func outsideLogChatTitle(_ chat: String, agent: Id) -> String {
+        if let p = project(chat) { return p.name }
+        for p in projects where chats(of: p.id).contains(where: { $0.id == chat }) {
+            return p.id == agent ? "Your chat" : p.name
+        }
+        return "Chat"
     }
 
     func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
@@ -6253,6 +6383,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Details → Can → a switch. The row flips at once; the relay's answer confirms it.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) {
+        outsideInfo[projectId]?.scopes[scope] = on
+        guard !isFixture else { return }
+        Task {
+            do {
+                if let info = try await api.setOutsideScope(projectId, scope, on: on) {
+                    outsideInfo[projectId] = info
+                }
+            } catch {
+                outsideInfo[projectId]?.scopes[scope] = !on
+                fail("change what the agent may do", error)
+            }
+        }
+    }
+
     func revokeOutsideAgent(_ projectId: Id) async {
         do {
             try await api.revokeOutsideAgent(projectId)
@@ -6260,6 +6406,40 @@ final class AppModel: ObservableObject {
         } catch {
             fail("revoke the agent's access", error)
         }
+    }
+
+    /// Connection card → Wake URL → Save ([feedback outside-agents-wake-ios-2026-10-28]). An empty
+    /// URL clears the URL and the header value together; an empty value with a URL keeps the stored
+    /// value (it is never shown back, so blank means "unchanged"). Returns the relay's short reason
+    /// when it refused, `nil` when saved.
+    func saveOutsideWake(_ projectId: Id, url: String, auth: String) async -> String? {
+        let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let auth = auth.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let info = url.isEmpty
+                ? try await api.setOutsideWake(projectId, url: "", auth: "")
+                : try await api.setOutsideWake(projectId, url: url, auth: auth.isEmpty ? nil : auth)
+            if let info { outsideInfo[projectId] = info }
+            return nil
+        } catch let e as RelayError where !e.message.isEmpty {
+            return e.message
+        } catch {
+            return "Could not reach the relay"
+        }
+    }
+
+    /// Connection card → Wake URL → Send test wake: `(ok, text)` for the line under the buttons.
+    func testOutsideWake(_ projectId: Id) async -> (ok: Bool, text: String) {
+        let result: (ok: Bool, text: String)
+        do {
+            result = try await api.testOutsideWake(projectId)
+        } catch let e as RelayError where !e.message.isEmpty {
+            result = (false, e.message)
+        } catch {
+            result = (false, "Could not reach the relay")
+        }
+        await refreshOutsideInfo(projectId)
+        return result
     }
 
     // MARK: Create sheet pictures (Jacob, 2026-10-25)
@@ -6445,4 +6625,52 @@ extension AppModel {
         if let b = availableUpdate?.build { UserDefaults.standard.set(b, forKey: Self.dismissedBuildKey) }
         availableUpdate = nil
     }
+}
+
+/// The Home pin list's keys and its cache ([feedback sidebar-pinning-ios-2026-10-28]). The
+/// relay's row keys are the Mac's: `agent:<project id>`, `chat:<people chat id>`,
+/// `server:<server id>`. Pure, so the migration from the device-local list is testable.
+enum HomePins {
+    /// The synced list as the relay last confirmed it (shown at launch before `/me/pins`).
+    static let cacheKey = "homePins.synced"
+    /// The device-local list every build before the synced one kept (`p:` / `c:` keys).
+    static let legacyKey = "pinnedHome"
+    /// Set once the legacy list was uploaded (or found redundant); never uploaded twice.
+    static let migratedKey = "homePins.migrated"
+
+    static func key(projectId: String) -> String { "agent:" + projectId }
+    static func key(peopleChatId: String) -> String { "chat:" + peopleChatId }
+    static func key(serverId: String) -> String { "server:" + serverId }
+
+    /// The old `p:<project>` / `c:<people chat>` keys as relay row keys, in the same order,
+    /// duplicates folded, anything else dropped, capped like the relay.
+    static func migrateLegacy(_ legacy: [String], cap: Int) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for k in legacy {
+            let mapped: String?
+            if k.hasPrefix("p:") { mapped = key(projectId: String(k.dropFirst(2))) }
+            else if k.hasPrefix("c:") { mapped = key(peopleChatId: String(k.dropFirst(2))) }
+            else if k.hasPrefix("agent:") || k.hasPrefix("chat:") || k.hasPrefix("server:") { mapped = k }
+            else { mapped = nil }
+            guard let m = mapped, let colon = m.firstIndex(of: ":"), m.index(after: colon) < m.endIndex,
+                  seen.insert(m).inserted else { continue }
+            out.append(m)
+            if out.count == cap { break }
+        }
+        return out
+    }
+
+    static func cached() -> [String] {
+        var seen = Set<String>()
+        let synced = UserDefaults.standard.stringArray(forKey: cacheKey)
+        // No synced copy yet: the legacy list, translated, so nothing vanishes before `/me/pins`.
+        let base = synced ?? migrateLegacy(legacyLocal(), cap: AppModel.maxHomePins)
+        return base.filter { seen.insert($0).inserted }
+    }
+
+    static func cache(_ pins: [String]) { UserDefaults.standard.set(pins, forKey: cacheKey) }
+    static func legacyLocal() -> [String] { UserDefaults.standard.stringArray(forKey: legacyKey) ?? [] }
+    static func migrated() -> Bool { UserDefaults.standard.bool(forKey: migratedKey) }
+    static func markMigrated() { UserDefaults.standard.set(true, forKey: migratedKey) }
 }
