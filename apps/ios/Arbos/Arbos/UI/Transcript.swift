@@ -2904,8 +2904,15 @@ struct ImageBubble: View {
     }
 
     private var size: CGSize {
-        guard let image, image.size.width > 0, image.size.height > 0 else { return Self.placeholder }
-        return Self.fit(image.size, maxWidth: bubbleWidth)
+        if let image, image.size.width > 0, image.size.height > 0 {
+            return Self.fit(image.size, maxWidth: bubbleWidth)
+        }
+        // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
+        // natural size keeps the row's height steady while the picture comes back.
+        if let ref = item.blobRef, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+            return Self.fit(known, maxWidth: bubbleWidth)
+        }
+        return Self.placeholder
     }
 
     static func fit(_ natural: CGSize, maxWidth: CGFloat) -> CGSize {
@@ -3019,26 +3026,31 @@ struct ImageBubble: View {
     }
 
     private func load() async {
+        // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
+        // no decode, no placeholder flash.
+        if let ref = item.blobRef, let hit = ChatImageCache.decoded(for: ref) {
+            show(hit)
+            return
+        }
         guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
             failed = true
             return
         }
-        // Animated GIF / WebP: every frame, no ImageTrim (feedback
-        // app-01M5TGH18WV3QCK5KZT6XKG7FG). Still pictures keep the trim.
-        if let animated = AnimatedImageFrames.animatedImage(from: data) {
-            image = animated
-            stillFrame = animated.images?.first ?? animated
-            animate = true
-            failed = false
-        } else if let img = UIImage(data: data) {
-            let trimmed = ImageTrim.trimmed(img)
-            image = trimmed
-            stillFrame = nil
-            animate = false
-            failed = false
-        } else {
+        // Decode + trim off the main actor (`ChatImageCache.decode`); animated GIF / WebP keep
+        // every frame, no ImageTrim (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+        guard let decoded = await ChatImageCache.decode(data) else {
             failed = true
+            return
         }
+        if let ref = item.blobRef { ChatImageCache.store(decoded, for: ref) }
+        show(decoded)
+    }
+
+    private func show(_ decoded: ChatImageCache.Decoded) {
+        image = decoded.image
+        stillFrame = decoded.stillFrame
+        animate = decoded.animated
+        failed = false
     }
 }
 
