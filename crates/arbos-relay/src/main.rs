@@ -592,8 +592,8 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/outside-agents/{id}",
             get(outside::get)
-                .delete(outside::revoke)
-                .patch(outside::patch),
+                .patch(outside::patch)
+                .delete(outside::revoke),
         )
         .route("/outside-agents/{id}/rotate", post(outside::rotate))
         .route("/outside-agents/{id}/wake/test", post(outside::wake_test))
@@ -603,6 +603,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/inbox", get(outside::inbox))
         .route("/asp/events", post(outside::events))
         .route("/asp/socket", get(outside::socket))
+        .route("/asp/files/{slot}/{key}", get(outside::file))
+        .route("/asp/chats/{id}/messages", get(outside::history))
         .route("/asp/connect/{id}", get(outside::connect_page))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",

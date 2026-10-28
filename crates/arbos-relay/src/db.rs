@@ -540,6 +540,9 @@ impl Db {
         )?;
         c.execute_batch(SCHEMA)?;
         c.execute_batch(crate::outside::SCHEMA)?;
+        for m in crate::outside::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
         for m in crate::outside_wake::MIGRATIONS {
             let _ = c.execute(m, []);
         }
