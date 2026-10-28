@@ -1316,7 +1316,8 @@ the approved mocks: `media/feedback/error-messages/mock-errors-*.png`).
 |---|---|
 | The element | a `danger_soft` block (radius 10, padding 10 / 12), a 15 pt `danger` disc with a white "!" — **the only red** — the sentence `TEXT_SMALL` 13 / 17 in `text`, then the actions: **Try again** (a 24 pt `surface_2` capsule, 12.5 semibold; **Sign in** on 401 / 403) and **Details** (12.5 `text_muted` + chevron) at the end of the sentence's line when they fit, else right-aligned on a row under it. Details unfolds a `code_bg` mono block (11 / 15 `text_muted`): *what · call · where / when / build*, ids shortened in the middle, with a 20 pt **Copy** capsule (the full raw error for a feedback report). A toast adds `shadow_md` and a × |
 | The words | `sync::user_error::UserError` — a **verb** (what the user tried: "generate the image", "send your message", "save the secret") and a **class**: Timeout "The server took too long." · Offline "You're offline." / "Arbos can't reach the server right now." · Refused (4xx) the relay's own sentence, else "That wasn't accepted." · NotFound "It isn't there any more." · Server (5xx) "The server had a problem." · RateLimited (429) "Too many requests — wait a moment." · ContentRefused "That prompt was refused — try different words." · Upload "The file couldn't be read." / "That file is too large (25 MB max)." / "That file type isn't supported." · AuthExpired "You were signed out." · Unknown "Something went wrong." Sentence = "Couldn't <verb>. <why>". Try again only where a retry can help (not on content refused, 404, size / type, a 4xx with the relay's reason); Sign in replaces it on 401 / 403 |
-| Where (takes space, never absolute over controls) | **Sheets** (avatar picker, Create sheets, New Message / group / Add members, server sheets, feedback): the top of the body under the bar / tab pill, before the first control; the sheet grows by the note. **Pane pages** (Secrets, Devices, Updates, connectors, routines): under the pane header, before the first card / field. **Composer** failures (send refused, offline, attachment, recording): directly above the composer, the composer's width; the failed bubble keeps its red mark (the word "Retry" moved into the note). **Chat-level** ("Messages in this chat aren't being delivered right now.", "Can't reach your machine."): the slot under the header where the machine banner lives, the column's width. **Toasts** (download / save / forward / connect failures with no surface up): the notice stack top-right under the header, 380 wide, 10 s (info notices 6 s), the pointer holds it, × dismisses, Try again re-issues the command. **Sign-in**: under the button row and the hint, 420 wide. Field validation ("Pick someone…", "Give the routine a name.") is the same element with the words as a refusal |
+| Where (takes space, never absolute over controls) | **Sheets** (avatar picker, Create sheets, New Message / group / Add members, server sheets, feedback): the top of the body under the bar / tab pill, before the first control; the sheet grows by the note. **Pane pages** (Secrets, Devices, Updates, connectors, routines): under the pane header, before the first card / field. **Composer** failures (send refused, offline, attachment, recording): directly above the composer, the composer's width; the failed bubble keeps its red mark (the word "Retry" moved into the note). **Chat-level** ("Messages in this chat aren't being delivered right now.", "Can't reach your machine."): the slot under the header where the machine banner lives, the column's width. **Toasts** (download / save / forward / connect failures with no surface up): **the one toast slot** — see the row below (Jacob 2026-10-27: no longer the top-right stack). **Sign-in**: under the button row and the hint, 420 wide. Field validation ("Pick someone…", "Give the routine a name.") is the same element with the words as a refusal |
+| The toast slot (Jacob 2026-10-27, [feedback toast-stack-mac-2026-10-27]; iPhone [feedback toast-stack-ios-2026-10-27]) | **One fixed slot just below the current chat's header profile-picture pill, top centre of the chat column** (`header::metrics::TOAST_SLOT_TOP` = pill bottom + the connection pill's band + 8, centred between the sidebar and the pane; 380 wide), the same on the iPhone (under the chat header pill; the root slot under the status bar only when no chat is up). **Stacked compactly, newest at the bottom, at most 3 visible**; older ones fold into one "N more notices" line above the stack whose × clears the slot. **Identical failures never stack**: the same sentence again while its toast stands bumps a small **×N** after the sentence and restarts the clock — one note per failure, however often it repeats (eight "Couldn't load your secrets. You're offline." toasts down the right side on v0.6.296 are the reason). 10 s (info 6 s), the pointer on a toast holds it for at most 60 s unless Details is open, × dismisses, Try again re-issues the command. **Background polls never toast**: a 15 s refresh that fails (secrets, registry) backs off (30 s → 1 → 2 → 4 → 5 min, one fetch in flight at a time) and says nothing — the connection pill is the one place a link fault shows; the pane's own note speaks when a person asked. |
 | Never | raw URLs, HTTP verbs, status numbers, ids, Rust / Swift error chains or `localizedDescription` in a sentence; red body text; a failure as a plain notice card; a failure drawn at a sheet's footer or over buttons |
 
 Code: `sync/user_error.rs` (`UserError::classify / from_relay / from_status / from_text / of`,
@@ -1328,7 +1329,10 @@ for things that worked), `SyncEvent::Failure { error, retry }`, `AppState::push_
 `.text_color(theme.danger)` outside the element without `// error-ui: exception <case>`, every
 surface's note present through `error_note::render` with its id) and the headless
 `avatar_picker::me_picker_tests` (`a_timed_out_generation_shows_the_shared_note_above_the_body`,
-`a_failure_event_is_an_error_toast_with_details_try_again_and_close`). Rig:
+`a_failure_event_is_an_error_toast_with_details_try_again_and_close`,
+`the_same_failure_eight_times_is_one_toast_and_the_slot_shows_at_most_three`,
+`a_held_toast_is_let_go_after_the_hold_cap_unless_details_are_open`; `AppState::notice_stack`,
+`NOTICE_VISIBLE_MAX`, `NOTICE_HOLD_MAX_MS`, `relay::secrets_poll_skip_after`). Rig:
 `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people`; a Generate prompt containing
 "timeout" fails after 2 s.
 
@@ -1350,6 +1354,30 @@ Code: `message_menu::run` (Delete → `AppState::delete_message`),
 `sidebar::row_menu` (Delete → `delete_project` / `delete_people_chat` /
 `leave_group`); pinned by `message_menu::tests::delete_is_offered_only_when_allowed`
 and `sidebar::row_menu_tests::delete_fires_at_once`.
+
+## Composer: staged attachments (Jacob 2026-10-27, [feedback composer-attachment-removal-2026-10-27]; iPhone [feedback composer-attachment-removal-ios-2026-10-27])
+
+**Every pending attachment in the composer can be removed, with the mouse or
+the keyboard, and removing one never touches the others or the typed text.**
+With files pending the pill opens into the card (redesign mock e, 2026-10-20):
+the strip above the text, "+" bottom-left, mic / send bottom-right.
+
+| Item | Value |
+|---|---|
+| Strip | one horizontal row (`Composer::staged_row`, selector `composer-staged-strip`), tiles **8** apart (`STAGED_GAP`), 12 in from the card's edges; it **scrolls sideways** past the card's width, never wraps into a second row |
+| Tile | **64** tall (`STAGED_TILE`), radius **10** (`STAGED_RADIUS`), fill `surface_2`, a **1 pt `border_strong` hairline drawn as an overlay ring** — one rounded rect per attachment, no shadow, nothing outside it. Pictures are 64 × 64 (thumbnail decoded at ≤ 256 px, `ObjectFit::Cover`); other files are the icon tile · name · size chip, at most 320 wide |
+| Remove disc | **always drawn** (trackpad and keyboard users — never hover-only), a **20 pt** circle (`STAGED_REMOVE`, the hit target) **inset 4** from the tile's top and right (`STAGED_REMOVE_INSET`), black 62 % with a white ✕ and a faint white ring so it reads on dark and light pictures alike; it sits fully inside its tile, so it never overlaps the neighbour. Role `Button`, accessible label and tooltip **"Remove attachment"**; selector `composer-remove-attachment-<i>` |
+| Click | removes that attachment only; the others, the typed text and the caret stay |
+| ⌫ / ⌦ | with an **empty draft** the field has nothing to delete and lets the key through; the composer removes the **last** staged attachment. With text in the draft the keys edit text only — even with the caret at the start, where ⌫ is a no-op — and never the strip. The rule lives on the composer (`delete_key_on_strip`), not in the field's key routing |
+| Empty strip | the card folds back to the 44 pt pill |
+
+Code: `composer::staged_tile`, `remove_attachment`, `delete_key_on_strip`;
+`ComposerInput::backspace` / `delete` propagate when there is nothing to
+delete. Pinned by `composer::staged_tests::{removing_one_attachment_keeps_the_others_and_the_text,
+backspace_on_an_empty_draft_removes_the_last_attachment, the_strip_lays_the_tiles_out_as_pinned}`.
+iPhone: the chip's ✕ has a 24 pt hit frame and the same label; ⌫ on an empty
+field removes the last pending attachment (`MentionUITextView.deleteBackward`);
+pinned by `ComposerMetricsTests` (pending attachments).
 
 ## Secrets agent picker: chips + "Add agent" (Jacob 2026-10-26, [feedback secrets-agent-picker-mac-2026-10-26], iPhone [feedback secrets-agent-picker-ios-2026-10-26])
 
