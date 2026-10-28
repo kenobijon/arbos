@@ -352,8 +352,9 @@ pub enum Skip {
 
 /// What the daemon tells the engine.
 pub enum Signal {
-    /// A row (or membership change) that asks the agent to act.
-    Event(WakeCandidate),
+    /// A row (or membership change) that asks the agent to act (boxed: the unit variant is
+    /// 0 B, the candidate ≈ 200 B).
+    Event(Box<WakeCandidate>),
     /// The agent signalled "done": it posted, replied, reacted or marked a chat answered.
     Done,
 }
@@ -670,7 +671,7 @@ impl Engine {
             tokio::select! {
                 sig = rx.recv() => match sig {
                     Some(Signal::Event(c)) => {
-                        match self.offer(c) {
+                        match self.offer(*c) {
                             Ok(()) => self.try_fire(),
                             Err(skip) => tracing::debug!(?skip, "wake candidate skipped"),
                         }
@@ -798,7 +799,8 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
         let t0 = std::time::Instant::now();
-        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 1, false))))
+            .unwrap();
         let at = tokio::time::timeout(Duration::from_secs(1), hit_rx.recv())
             .await
             .expect("webhook hit within 1 s")
@@ -818,7 +820,8 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
         for i in 0..20 {
-            tx.send(Signal::Event(cand("c1", i, false))).unwrap();
+            tx.send(Signal::Event(Box::new(cand("c1", i, false))))
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -844,16 +847,17 @@ mod tests {
         let (_d, e, mut out) = engine(WakerConfig::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
-        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 1, false))))
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(drain(&mut out).len(), 1, "leading");
         // Mid-turn burst across two chats.
         for i in 2..12 {
-            tx.send(Signal::Event(cand(
+            tx.send(Signal::Event(Box::new(cand(
                 if i % 2 == 0 { "c1" } else { "c2" },
                 i,
                 false,
-            )))
+            ))))
             .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -878,10 +882,12 @@ mod tests {
         let (_d, e, mut out) = engine(WakerConfig::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
-        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 1, false))))
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(drain(&mut out).len(), 1);
-        tx.send(Signal::Event(cand("c1", 2, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 2, false))))
+            .unwrap();
         tx.send(Signal::Done).unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(drain(&mut out).is_empty(), "inside the floor");
@@ -898,11 +904,11 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
         for i in 0..1000 {
-            tx.send(Signal::Event(cand(
+            tx.send(Signal::Event(Box::new(cand(
                 if i % 2 == 0 { "c1" } else { "c2" },
                 i,
                 false,
-            )))
+            ))))
             .unwrap();
         }
         tokio::time::sleep(Duration::from_secs(6)).await;
@@ -973,15 +979,18 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
         for i in 0..2 {
-            tx.send(Signal::Event(cand("c1", i, false))).unwrap();
+            tx.send(Signal::Event(Box::new(cand("c1", i, false))))
+                .unwrap();
             tx.send(Signal::Done).unwrap();
             tokio::time::sleep(Duration::from_secs(3)).await;
             assert_eq!(drain(&mut out).len(), 1);
         }
-        tx.send(Signal::Event(cand("c1", 10, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 10, false))))
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(60)).await;
         assert!(drain(&mut out).is_empty(), "capped");
-        tx.send(Signal::Event(cand("c1", 11, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 11, false))))
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(300)).await;
         let n = drain(&mut out);
         assert_eq!(n.len(), 1);
@@ -1008,7 +1017,8 @@ mod tests {
         );
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
-        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 1, false))))
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(60)).await;
         let last = m.last_wake().unwrap();
         assert_eq!(last["ok"], false);
@@ -1077,7 +1087,8 @@ mod tests {
         );
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
-        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tx.send(Signal::Event(Box::new(cand("c1", 1, false))))
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(5)).await;
         let last = m.last_wake().unwrap();
         assert_eq!(last["ok"], false);

@@ -67,7 +67,7 @@ pub fn apply_page(
         }
         match mirror.apply_event(e) {
             Ok(Some(c)) => {
-                let _ = wake_tx.send(Signal::Event(c));
+                let _ = wake_tx.send(Signal::Event(Box::new(c)));
             }
             Ok(None) => {}
             Err(err) => tracing::warn!(event = id, error = %err, "event not mirrored"),
