@@ -299,16 +299,18 @@ pub async fn run_command(
         let _ = stdin.write_all(json.as_bytes()).await;
         let _ = stdin.shutdown().await;
     }
+    // Head and tail of each stream: the head carries `thread.started` (codex's session id), the
+    // tail the agent's last words; the middle is the agent's business.
     let tail = |b: &[u8]| {
         let s = String::from_utf8_lossy(b);
         let s = s.trim();
-        s.chars()
-            .rev()
-            .take(8192)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<String>()
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= 8192 {
+            return s.to_owned();
+        }
+        let head: String = chars[..4096].iter().collect();
+        let end: String = chars[chars.len() - 4096..].iter().collect();
+        format!("{head}\n…\n{end}")
     };
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(out)) => {
