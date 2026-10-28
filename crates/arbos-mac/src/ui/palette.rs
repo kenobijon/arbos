@@ -871,8 +871,6 @@ mod shell_tests {
     //! The popup over the real shell: a DM long enough that bubbles fill the
     //! column under the panel, and enough chats that the palette's own list
     //! overflows.
-    use std::sync::{Arc, Mutex};
-
     use futures::future::BoxFuture;
     use gpui::{AppContext as _, Entity, TestAppContext};
     use tokio::sync::mpsc;

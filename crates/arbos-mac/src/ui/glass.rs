@@ -530,6 +530,7 @@ impl PopupMaterial {
     /// the backdrop's luminance difference survives the fill. The blur is not
     /// credited here (it is what makes the line unreadable); this is the floor
     /// the tint provides even where the blur has nothing to smear.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn backdrop_bleed(&self) -> f32 {
         1.0 - self.fill.a.clamp(0.0, 1.0)
     }
@@ -773,10 +774,12 @@ mod popup_tests {
     use crate::ui::modal::PASSTHROUGH_BACKDROP_ALPHA;
     use crate::ui::theme::{Appearance, Backdrop, Surface, POPUP_WASH_FLOOR, TEXT_BODY};
 
-    /// GPUI's default line height is φ × the font size: one 15 pt transcript
-    /// line to the next is ≈ 24 pt. A blur radius at least that wide smears
-    /// a line into its neighbours — there is no stroke left to read.
-    const LINE_PITCH: f32 = TEXT_BODY * 1.618;
+    /// A 15 pt line's glyphs stand ≈ 11 pt tall (cap height) on ≈ 1.5 pt
+    /// strokes. A blur radius wider than the whole glyph box — 1.5 × the
+    /// font size, 22.5 pt — leaves no stroke and no letter shape to read;
+    /// it smears each line into the next (GPUI's default pitch is φ × 15 ≈
+    /// 24 pt) and what remains is a band of the line's mean tone.
+    const GLYPH_BOX: f32 = TEXT_BODY * 1.5;
 
     fn themes() -> Vec<(String, Theme)> {
         let mut out = Vec::new();
@@ -803,8 +806,8 @@ mod popup_tests {
             if theme.is_frost() {
                 assert_eq!(m.blur, POPUP_BLUR, "{name}: the sheet's blur");
                 assert!(
-                    m.blur >= LINE_PITCH,
-                    "{name}: blur {} under a {LINE_PITCH} pt line pitch leaves strokes",
+                    m.blur >= GLYPH_BOX,
+                    "{name}: blur {} narrower than a {GLYPH_BOX} pt glyph box leaves strokes",
                     m.blur
                 );
                 assert!(
@@ -838,9 +841,9 @@ mod popup_tests {
 
     /// Readability: a line of transcript under the panel must not read
     /// through. The tint alone lets at most a fifth of the backdrop's
-    /// luminance difference survive (`backdrop_bleed`), and the blur covers
-    /// a whole line pitch — together there is nothing left to read. The
-    /// popup floor sits above the menus' card floor on purpose.
+    /// luminance difference survive (`backdrop_bleed`), and the blur is
+    /// wider than the glyph box — together there is nothing left to read.
+    /// The popup floor sits above the menus' card floor on purpose.
     #[test]
     fn a_transcript_line_under_the_glass_popup_is_not_legible() {
         for (name, theme) in themes().into_iter().filter(|(_, t)| t.is_frost()) {
@@ -850,11 +853,12 @@ mod popup_tests {
                 "{name}: {:.0} % of the chat bleeds through the tint",
                 m.backdrop_bleed() * 100.0
             );
-            assert!(m.blur >= LINE_PITCH, "{name}");
+            assert!(m.blur >= GLYPH_BOX, "{name}");
         }
+        let (popup, card) = (POPUP_WASH_FLOOR, crate::ui::theme::CARD_WASH_FLOOR);
         assert!(
-            POPUP_WASH_FLOOR > crate::ui::theme::CARD_WASH_FLOOR,
-            "the popup is thicker than a menu"
+            popup > card,
+            "the popup ({popup}) is thicker than a menu ({card})"
         );
     }
 
