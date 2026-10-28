@@ -488,7 +488,12 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
         }
         Principal::Device { user_id, .. } | Principal::Box { user_id } => {
             let device = matches!(principal, Principal::Device { .. });
-            for p in state.db.projects_of_user(user_id).map_err(internal)? {
+            let mut mine = state.db.projects_of_user(user_id).map_err(internal)?;
+            if !device {
+                // A box never serves an outside agent (#2140).
+                mine = crate::outside::served(&state, mine);
+            }
+            for p in mine {
                 let mut dto = project_dto(&state, &p).await;
                 dto.shared = Some(false);
                 dto.my_role = Some("owner".into());
@@ -1961,7 +1966,10 @@ pub async fn box_hello(
             }
         }
     }
-    let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let projects = crate::outside::served(
+        &state,
+        state.db.projects_of_user(user_id).map_err(internal)?,
+    );
     let owner = owner_json(&state, user_id);
     let mut workspaces = Vec::new();
     for p in &projects {
@@ -1985,7 +1993,10 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
     boxes::box_seen_http(&state, user_id).await;
-    let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let projects = crate::outside::served(
+        &state,
+        state.db.projects_of_user(user_id).map_err(internal)?,
+    );
     let owner = owner_json(&state, user_id);
     let mut out = Vec::new();
     for p in &projects {
