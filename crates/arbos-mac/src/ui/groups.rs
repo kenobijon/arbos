@@ -3,7 +3,7 @@
 //! header with its picker. Everything here is pure rendering over `AppState`; the shell owns
 //! the open/closed state of the picker.
 
-use gpui::{div, prelude::*, px, Div, Hsla};
+use gpui::{div, prelude::*, px, Div};
 
 use crate::app::AppState;
 use crate::model::{Chat, ChatKind, Project};
