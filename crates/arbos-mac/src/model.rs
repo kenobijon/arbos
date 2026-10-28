@@ -2116,15 +2116,16 @@ impl Message {
         }
         let mut used = BTreeSet::new();
         let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        // Chip glyphs are the untoned base (matches core + iPhone orderedReactions).
         for e in REACTION_PALETTE {
             let base = normalize_reaction_emoji(e);
             let Some(people) = by_base.get(&base) else {
                 continue;
             };
-            if people.is_empty() || !used.insert(base) {
+            if people.is_empty() || !used.insert(base.clone()) {
                 continue;
             }
-            out.push((e.to_string(), people.iter().cloned().collect()));
+            out.push((base, people.iter().cloned().collect()));
         }
         for (base, people) in &by_base {
             if people.is_empty() || used.contains(base) {

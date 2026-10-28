@@ -668,14 +668,6 @@ struct MessageReaction: Equatable, Hashable {
         normalizeEmoji(a) == normalizeEmoji(b)
     }
 
-    /// Prefer a palette glyph when its base matches; else the untoned base.
-    static func displayEmoji(forBase base: String) -> String {
-        if let match = palette.first(where: { normalizeEmoji($0) == base }) {
-            return match
-        }
-        return base
-    }
-
     /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
     /// Skin-tone variants of the same base share one bucket.
     static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {
@@ -702,7 +694,9 @@ struct MessageReaction: Equatable, Hashable {
         return orderedReactions(byBase)
     }
 
-    /// Palette order first (matched by base), then the rest by display glyph.
+    /// Palette order first (matched by base), then the rest alphabetically.
+    /// Chip glyphs are the untoned base so they match core `normalize_reaction_emoji`
+    /// (👍🏽 and 👍🏿 both read as 👍).
     static func orderedReactions(_ byBase: [String: [String]]) -> [MessageReaction] {
         var used = Set<String>()
         var out: [MessageReaction] = []
@@ -710,11 +704,11 @@ struct MessageReaction: Equatable, Hashable {
             let base = normalizeEmoji(e)
             guard let s = byBase[base], !s.isEmpty, !used.contains(base) else { continue }
             used.insert(base)
-            out.append(MessageReaction(emoji: e, senders: s))
+            out.append(MessageReaction(emoji: base, senders: s))
         }
         let rest = byBase.keys.filter { !used.contains($0) }.sorted().compactMap { base -> MessageReaction? in
             guard let s = byBase[base], !s.isEmpty else { return nil }
-            return MessageReaction(emoji: displayEmoji(forBase: base), senders: s)
+            return MessageReaction(emoji: base, senders: s)
         }
         return out + rest
     }
