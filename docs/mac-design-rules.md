@@ -867,8 +867,9 @@ is readable behind or between the `+`, the field and the voice pill. Ours hung a
 
 | Item | Rule (pt) | Code |
 | --- | --- | --- |
-| Band | opaque from the bar's top edge (8 over the status row / composer) through the home indicator; keyboard up → ends on the keyboard and moves with it | `ComposerBandMaterial`, the bar's `.background` in `ChatView` |
-| Fade | **28** above the bar's top, clear → band, over the transcript; drawn in the chat canvas under the ↓ chevron and the new-messages pill | `Theme.composerFade`, `ComposerBottomFade` |
+| Band | opaque from the bar's top edge (8 over the status row / composer) through the home indicator to the screen's edge; keyboard up → the keyboard is the inset, the band moves with it | `ComposerBottomBandView` (the chat canvas's bottom overlay, not the bar's own background) |
+| Fade | **28** above the bar's top, clear → band, over the transcript; the same layer, under the ↓ chevron and the new-messages pill, under the bar's controls | `Theme.composerFade`, `ComposerBottomBand.spec` |
+| System edge effect | none under the bar on iOS 26+ (`scrollEdgeEffectHidden(for: .bottom)`): one fade, ours | `NoBottomScrollEdgeEffect` |
 | Last row at rest | fully above the fade: the transcript's tail = the fade's height | `Theme.transcriptTail` |
 | Material | Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash | `ComposerBottomBand.wash(glass:)` |
 

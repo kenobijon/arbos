@@ -4,11 +4,11 @@ import XCTest
 /// The band the chat composer sits on ([feedback iphone-composer-bottom-fade-2026-10-28],
 /// Jacob 2026-10-28 15:56 UTC): Grok's rows dissolve into a solid band over the composer;
 /// ours read through behind and between the controls. Geometry from `ComposerBottomBand.spec`,
-/// the same the views draw from, so a change to the fade, the tail or the wash fails here.
+/// the same the view draws from, so a change to the fade, the tail or the wash fails here.
 final class ComposerBottomBandTests: XCTestCase {
-    /// iPhone 17 / Air home indicator, the SE's none, and the keyboard up (the keyboard is the
-    /// bar's safe area then, so the band stops on it: 0).
-    let safeBottoms: [CGFloat] = [34, 0]
+    /// The canvas's bottom inset = the bar + the home indicator (iPhone 17 / Air 34, SE 0), or
+    /// the bar + the keyboard (≈ 336 on an iPhone 17) when it is up.
+    let belowBar: [CGFloat] = [34, 0, 336]
     /// The bar with the composer alone, keyboard down / up, and with the status row over it.
     var bars: [CGFloat] {
         let composer = Theme.chatBarTopPad + Theme.composerHeight
@@ -31,16 +31,20 @@ final class ComposerBottomBandTests: XCTestCase {
 
     func testBandCoversTheBarAndTheHomeIndicatorAndGluesToTheKeyboard() {
         for bar in bars {
-            for safe in safeBottoms {
-                let spec = ComposerBottomBand.spec(bar: bar, safeBottom: safe)
-                XCTAssertEqual(spec.bottomInset, 0, "bar \(bar) @\(safe): the band reaches the bottom edge")
-                XCTAssertEqual(spec.band, bar + safe, "bar \(bar) @\(safe): opaque through the bar and the inset")
+            for below in belowBar {
+                let spec = ComposerBottomBand.spec(bottomInset: bar + below)
+                XCTAssertEqual(spec.band, bar + below, "bar \(bar) + \(below): opaque from the bar's top edge to the screen's edge")
+                XCTAssertEqual(spec.height, ComposerBottomBand.fade + bar + below, "the layer is the fade plus the band")
                 XCTAssertGreaterThanOrEqual(spec.band, bar, "the band is never shorter than the bar")
                 XCTAssertEqual(spec.fade, ComposerBottomBand.fade)
+                // The mask is fully opaque exactly where the bar starts.
+                XCTAssertEqual(spec.solidFrom * spec.height, ComposerBottomBand.fade, accuracy: 0.001)
+                XCTAssertGreaterThan(spec.solidFrom, 0)
+                XCTAssertLessThan(spec.solidFrom, 1)
             }
-            // Keyboard up: the home indicator is under the keyboard, the band ends on the keyboard.
-            XCTAssertEqual(ComposerBottomBand.spec(bar: bar, safeBottom: 0).band, bar)
         }
+        // No inset at all (nothing below the canvas): the layer is the fade alone.
+        XCTAssertEqual(ComposerBottomBand.spec(bottomInset: 0).height, ComposerBottomBand.fade)
     }
 
     func testBandIsOpaqueToTextOnBothSurfaces() {

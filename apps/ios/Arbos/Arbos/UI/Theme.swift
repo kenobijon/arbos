@@ -971,14 +971,17 @@ extension HomeChrome {
 
 /// What the chat bar sits on ([feedback iphone-composer-bottom-fade-2026-10-28], Jacob
 /// 2026-10-28): in Grok Bot the messages dissolve into a solid band above the composer and
-/// nothing reads behind or between the controls. Ours was a 24 pt `bg → clear` gradient hung
-/// over the bar's own `bg`, under the ↓ chevron. Now one material in two pieces:
-/// - **band** — the bar's background, opaque from the bar's top edge (`chatBarTopPad` over the
-///   status row / composer) through the home indicator; with the keyboard up the bar's safe
-///   area is the keyboard, so the band ends on it and moves with it.
-/// - **fade** — `Theme.composerFade` pt above the bar's top, the same material masked from
-///   clear to full, over the transcript. It lives in the chat canvas (`ChatView.sessionCanvas`),
-///   not in the bar, so the ↓ chevron and the new-messages pill are drawn over it, crisp.
+/// nothing reads behind or between the controls. Ours was a 24 pt `bg → clear` gradient and a
+/// `bg` fill as the *bar's* background (the safe-area inset's own layer): on Jacob's phone the
+/// transcript read through it around the controls, and the gradient sat over the ↓ chevron.
+/// Now one layer in the chat canvas (`ChatView.sessionCanvas`) — over the transcript, under the
+/// chevron and the new-messages pill, under the bar's controls — one material in two pieces:
+/// - **fade** — `Theme.composerFade` pt above the bar's top edge, masked from clear to full;
+/// - **band** — from the bar's top edge (`chatBarTopPad` over the status row / composer) down
+///   through the home indicator to the screen's edge (the layer ignores the bottom safe area).
+///   The canvas ends at the bar's top (the bar is a safe-area inset) and the keyboard is the
+///   safe area when it is up, so both pieces move with the keyboard: the band stays glued to
+///   the composer.
 /// Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash (the
 /// wash that hides text; 0.78 let a row read at half strength, #1988).
 /// `ComposerBottomBandTests` pins the geometry and the material's opacity.
@@ -986,19 +989,21 @@ enum ComposerBottomBand {
     static let fade: CGFloat = Theme.composerFade
     static let glassWash: Double = ListTopFade.glassWash
 
-    /// The band's geometry for a bar of `bar` pt over a `safeBottom` pt home-indicator inset
-    /// (0 with the keyboard up: the keyboard is the safe area then).
+    /// The layer's geometry for a bottom safe-area inset (the bar + the home indicator, or the
+    /// bar + the keyboard): the fade above the inset, the band through it.
     struct Spec: Equatable {
-        /// The fade's height over the bar's top edge.
+        /// Clear → full over this height, above the bar's top edge.
         let fade: CGFloat
-        /// Opaque from the bar's top edge to the screen's (or the keyboard's) edge.
+        /// Opaque from the bar's top edge to the screen's edge: the whole inset.
         let band: CGFloat
-        /// How far the band stops short of the bottom edge: always 0.
-        let bottomInset: CGFloat
+        /// The layer's height; its bottom is the screen's edge.
+        var height: CGFloat { fade + band }
+        /// Where the mask turns fully opaque, as a fraction of `height`.
+        var solidFrom: CGFloat { height > 0 ? fade / height : 0 }
     }
 
-    static func spec(bar: CGFloat, safeBottom: CGFloat) -> Spec {
-        Spec(fade: fade, band: bar + safeBottom, bottomInset: 0)
+    static func spec(bottomInset: CGFloat) -> Spec {
+        Spec(fade: fade, band: bottomInset)
     }
 
     /// The material's own alpha on each surface — 1 on Matte, the wash on Glass (over a
@@ -1020,15 +1025,28 @@ struct ComposerBandMaterial: View {
     }
 }
 
-/// The fade: `ComposerBottomBand.fade` tall, clear at its top, the band's material at its
-/// bottom. Aligned to the bottom of the chat canvas — the bar's top edge — under the chevron.
-struct ComposerBottomFade: View {
+/// The fade and the band, one view for the bottom of the chat canvas. The reader keeps the
+/// safe area, so its bottom inset is the bar (+ home indicator / keyboard); the layer inside it
+/// ignores that edge and so reaches the screen's edge, `fade` pt of it above the bar's top.
+struct ComposerBottomBandView: View {
     var body: some View {
-        ComposerBandMaterial()
-            .frame(height: ComposerBottomBand.fade)
-            .mask(LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom))
-            .frame(maxWidth: .infinity)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+        GeometryReader { geo in
+            let spec = ComposerBottomBand.spec(bottomInset: geo.safeAreaInsets.bottom)
+            ComposerBandMaterial()
+                .frame(height: spec.height)
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: .black, location: spec.solidFrom),
+                            .init(color: .black, location: 1),
+                        ],
+                        startPoint: .top, endPoint: .bottom)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .ignoresSafeArea(edges: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
