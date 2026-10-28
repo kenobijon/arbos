@@ -711,6 +711,8 @@ mod tests {
             "phone-down",
             "trash",
             "branch",
+            // Landed on main while this freeze was gating (group pane's Description row).
+            "text-align-left",
         ];
         let src = include_str!("icons.rs");
         let lines: Vec<&str> = src.lines().collect();
