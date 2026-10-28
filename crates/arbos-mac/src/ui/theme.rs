@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowAppearance, WindowBackgroundAppearance};
 
 use crate::sync::credentials::config_dir;
+use crate::ui::mock_backdrop;
 
 /// Chat-list sidebar (the iPhone home list, one column). Default width; the
 /// user can drag the right edge between [`SIDEBAR_WIDTH_MIN`] and
@@ -778,7 +779,10 @@ impl Theme {
         theme.glass_opacity = GlassOpacity::load(theme.appearance);
         // Keep the sampled desktop across a theme change: a fresh theme with
         // no sample would paint the worst-case washes until the next sample.
-        theme.backdrop = cx.try_global::<Theme>().and_then(|t| t.backdrop);
+        theme.backdrop = cx
+            .try_global::<Theme>()
+            .and_then(|t| t.backdrop)
+            .or_else(|| mock_backdrop::lum().map(Backdrop::uniform));
         theme
     }
 
@@ -848,7 +852,10 @@ impl Theme {
     /// underneath is already grey, and a grey-on-grey wash is what made Light
     /// + Glass look muddy (Jacob's shot, 2026-10-21).
     pub fn shell(&self) -> Hsla {
-        if !self.is_glass() {
+        // The rig's stand-in desktop (`ui::mock_backdrop`) stands in for the
+        // window material: the wash goes translucent over it as on a Mac.
+        let over_backdrop = self.is_glass() || (self.is_frost() && mock_backdrop::active());
+        if !over_backdrop {
             return self.bg;
         }
         let mut c = self.shell_tint();
