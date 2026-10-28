@@ -611,6 +611,10 @@ pub enum RowKind {
         time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
         forwarded_from: Option<String>,
+        /// A reply's quote header above the first card of the message — a picture
+        /// reply quotes like a text one ([feedback picture-reply-quote-mac-2026-10-28]);
+        /// the caption bubble under it then carries none.
+        quote: Option<Quote>,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -3065,6 +3069,7 @@ impl Transcript {
                 disc,
                 time,
                 forwarded_from,
+                quote,
             } => {
                 let preview = match attachment.blob_ref.as_ref() {
                     None => attachments::Preview::Unavailable,
@@ -3089,6 +3094,12 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
+                // A reply's quote header above the first card, the same one a text
+                // bubble carries ([feedback picture-reply-quote-mac-2026-10-28]).
+                let quote_header = quote.map(|q| {
+                    self.quote_header(&row.id, q, theme.text, cx)
+                        .into_any_element()
+                });
                 // Same reply · copy rail and right-click menu as text bubbles
                 // (feedback app-01M5N8ZQVWC63V54HM70D9SJ4H): an image / file
                 // row was a bare card with no way to reply.
@@ -3103,6 +3114,7 @@ impl Transcript {
                         &attachment,
                         preview,
                         forwarded_from.as_deref(),
+                        quote_header,
                         open,
                         self.state.clone(),
                         &theme,
@@ -4255,8 +4267,31 @@ pub fn build_rows_with_cache(
                 let show_text = !text.is_empty()
                     && !(has_image && is_generic_media_label(&text))
                     && legacy_hint.is_none();
+                // A cross-chat reply (Reply in DM) quotes its own snapshot; an in-chat
+                // reply quotes the row it points at. A forward never quotes. With
+                // attachments the quote sits once, above the first card, so a picture
+                // reply keeps its reply — with or without a caption ([feedback
+                // picture-reply-quote-mac-2026-10-28]: a wordless picture had no bubble
+                // to carry it and the reply vanished).
+                let quote = if forwarded_by.is_some() || legacy_hint.is_some() {
+                    None
+                } else {
+                    message
+                        .reply_ref
+                        .as_ref()
+                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                        .map(Quote::for_reply_ref)
+                        .or_else(|| {
+                            message
+                                .reply_to
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .map(|id| Quote::for_reply(id, messages))
+                        })
+                };
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
+                    let quote = quote.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
                         .blob_ref
                         .as_deref()
@@ -4279,6 +4314,7 @@ pub fn build_rows_with_cache(
                                 from.as_ref().map(|p| &p.handle),
                                 card_named,
                                 disc,
+                                &quote,
                             ),
                             false,
                         ),
@@ -4293,24 +4329,13 @@ pub fn build_rows_with_cache(
                             disc,
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
+                            quote,
                         },
                     });
                 }
                 if show_text || attachment_parts.is_empty() || preview.is_some() {
-                    // A cross-chat reply (Reply in DM) quotes its own snapshot;
-                    // an in-chat reply quotes the row it points at.
-                    let quote = message
-                        .reply_ref
-                        .as_ref()
-                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
-                        .map(Quote::for_reply_ref)
-                        .or_else(|| {
-                            message
-                                .reply_to
-                                .as_deref()
-                                .filter(|id| !id.is_empty())
-                                .map(|id| Quote::for_reply(id, messages))
-                        });
+                    // The quote is on the first card when the message has any.
+                    let quote = quote.filter(|_| attachment_parts.is_empty());
                     let delivery = delivery_state(message, is_mine);
                     // The label is on the first card when the message has any.
                     let forwarded_from = forwarded_by.filter(|_| attachment_parts.is_empty());
@@ -4708,6 +4733,7 @@ pub fn build_rows_with_cache(
                                     disc,
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
+                                    quote: None,
                                 },
                             })
                         }
@@ -9850,6 +9876,107 @@ mod system_line_tests {
             [(None, false), (Some("Sam Rivera".into()), false)],
             "the forward header is trimmed and a forward never quotes"
         );
+    }
+
+    /// A user message whose parts are a picture then `text` (the send shape), replying
+    /// to `reply_to`.
+    fn picture_reply(sender: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": sender,
+            "senderHandle": "bob",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "parts": [
+                { "id": format!("a-{at}"), "kind": "attachment",
+                  "attachment": { "name": "IMG_0042.jpeg", "mime": "image/jpeg", "ref": "blob-42" } },
+                { "id": format!("p-{at}"), "kind": "text", "text": text },
+            ],
+        }))
+        .expect("picture reply")
+    }
+
+    /// Per row: `("attachment" | "user", quote text)`.
+    fn quotes(rows: &[Row]) -> Vec<(&str, Option<String>)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Attachment { quote, .. } => {
+                    Some(("attachment", quote.as_ref().map(|q| q.text.clone())))
+                }
+                RowKind::User { quote, .. } => {
+                    Some(("user", quote.as_ref().map(|q| q.text.clone())))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Tester bug ([feedback picture-reply-quote-mac-2026-10-28]): a reply that carries a
+    /// picture lost its quote — a wordless picture had no bubble to hold it, and a captioned
+    /// picture drew it under the picture. The quote now sits above the first card, once;
+    /// the caption bubble stays plain; a text reply to a picture quotes the file's name.
+    #[test]
+    fn picture_replies_quote_above_the_first_card() {
+        let t = 1_700_000_000_000u64;
+        let original = message("user", "user:gh_bob", "look at this", t);
+        let wordless = picture_reply("user:gh_me", "", &original.id, t + 1_000);
+        let captioned = picture_reply("user:gh_me", "same here", &original.id, t + 2_000);
+        let mut to_picture = message("user", "user:gh_bob", "nice shot", t + 3_000);
+        to_picture.reply_to = Some(wordless.id.clone());
+        let messages = [original, wordless, captioned, to_picture];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            quotes(&rows),
+            [
+                ("user", None),
+                ("attachment", Some("look at this".into())),
+                ("attachment", Some("look at this".into())),
+                ("user", None),
+                ("user", Some("IMG_0042.jpeg".into())),
+            ],
+            "{rows:?}"
+        );
+    }
+
+    /// A forwarded picture keeps its forward header and never quotes, on the card or
+    /// the caption.
+    #[test]
+    fn forwarded_picture_never_quotes() {
+        let t = 1_700_000_000_000u64;
+        let original = message("user", "user:gh_bob", "look at this", t);
+        let mut forwarded = picture_reply("user:gh_me", "caption", &original.id, t + 1_000);
+        forwarded.forwarded_from = Some("Sam Rivera".into());
+        let messages = [original, forwarded];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            quotes(&rows),
+            [("user", None), ("attachment", None), ("user", None)]
+        );
+        assert!(rows.iter().any(|r| matches!(
+            &r.kind,
+            RowKind::Attachment { forwarded_from: Some(f), .. } if f.ends_with("Sam Rivera")
+        )));
     }
 
     /// … and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody, and carries no
