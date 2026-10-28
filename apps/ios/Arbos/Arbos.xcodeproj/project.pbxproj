@@ -54,6 +54,7 @@
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
 		A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000030 /* ScrollPerfUITests.swift */; };
 		A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */; };
+		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
@@ -120,6 +121,7 @@
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
 		A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000020 /* AddMembersPlanTests.swift */; };
 		A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000040 /* MessageDeleteRuleTests.swift */; };
+		A15A00000000000000000051 /* ReactionPickTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000050 /* ReactionPickTests.swift */; };
 		A1BC00000000000000000002 /* MessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000001 /* MessageMenu.swift */; };
 		A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000003 /* MessageMenuTests.swift */; };
 		A1BC00000000000000000006 /* MessageActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000005 /* MessageActions.swift */; };
@@ -279,6 +281,7 @@
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFilterTabsUITests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000010 /* ArbosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
@@ -343,6 +346,7 @@
 		A15A00000000000000000001 /* ArbosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A15A00000000000000000003 /* CoreFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFixturesTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000012 /* ReactionToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionToggleTests.swift; sourceTree = "<group>"; };
+		A15A00000000000000000050 /* ReactionPickTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000020 /* AddMembersPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersPlanTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000040 /* MessageDeleteRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageDeleteRuleTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000001 /* MessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenu.swift; sourceTree = "<group>"; };
@@ -652,6 +656,7 @@
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
 				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
+				A15A00000000000000000050 /* ReactionPickTests.swift */,
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
 				A1C1E00000000000000000B1 /* PresenceRowTests.swift */,
 				A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */,
@@ -707,6 +712,7 @@
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
 				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 				A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */,
+				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
 			);
 			path = ArbosUITests;
 			sourceTree = "<group>";
@@ -998,6 +1004,7 @@
 				A1EE00000000000000000006 /* UserErrorTests.swift in Sources */,
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
+				A15A00000000000000000051 /* ReactionPickTests.swift in Sources */,
 				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
 				A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */,
 				A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */,
@@ -1070,6 +1077,7 @@
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
 				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */,
+				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
