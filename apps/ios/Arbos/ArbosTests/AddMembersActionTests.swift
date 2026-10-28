@@ -61,7 +61,8 @@ final class AddMembersActionTests: XCTestCase {
         XCTAssertTrue(chat.hasAgent(Self.agentId), "the agent is in the roster the relay returned")
         XCTAssertTrue(chat.hasPerson(Person(id: "test_01M5XATTMAKGAKK1Q11CT56MBC", handle: "amb-third-1026", avatarUrl: nil, name: nil, status: "member"), meId: nil))
         XCTAssertEqual(chat.members.count, 4)
-        XCTAssertFalse(model.notice?.text.contains("add") ?? false, "a success shows no add notice (\(model.notice?.text ?? ""))")
+        XCTAssertFalse(model.toasts.contains { $0.error?.verb.hasPrefix("add") ?? false }, "a success raises no add failure")
+        XCTAssertNil(model.claimedFailure)
     }
 
     func testARefusalIsReportedAndNothingIsClaimed() async throws {
@@ -69,13 +70,25 @@ final class AddMembersActionTests: XCTestCase {
             guard req.path.hasPrefix("/chats/") else { return (404, Data("{}".utf8)) }
             return (403, #"{"error":{"type":"own_project_only","message":"you can only add or change your own Project's agent"}}"#.data(using: .utf8)!)
         }
+        // No sheet up: the failure is an error toast (ErrorNote, #1955).
         let ok = await model.addMembers(chatId: Self.chatId, handles: [], agentIds: [Self.agentId])
         XCTAssertFalse(ok)
-        let text = try XCTUnwrap(model.notice?.text, "the sheet copies this notice under its search field")
-        XCTAssertFalse(text.isEmpty)
+        let toast = try XCTUnwrap(model.toasts.last, "the refusal is reported")
+        let error = try XCTUnwrap(toast.error, "as a failure, not an info line")
+        XCTAssertEqual(error.verb, "add members")
+        XCTAssertFalse(error.sentence.isEmpty)
         XCTAssertFalse(model.peopleChat(Self.chatId)!.hasAgent(Self.agentId), "the roster is untouched")
         XCTAssertFalse(model.messages[Self.chatId, default: []].contains { $0.id.hasPrefix(OptimisticNotice.idPrefix) },
                        "the optimistic “added” line is withdrawn")
+
+        // The Add members sheet up (it claims these verbs): the same refusal draws in the sheet's
+        // own note under the search field, not as a toast.
+        model.failureClaim = FailureClaim(surface: "people-sheet", verbs: ["add members", "add @", "add the agent", "add them", "create the group"])
+        let toastsBefore = model.toasts.count
+        XCTAssertFalse(await model.addMembers(chatId: Self.chatId, handles: [], agentIds: [Self.agentId]))
+        let claimed = try XCTUnwrap(model.claimedFailure, "the sheet shows it inline")
+        XCTAssertEqual(claimed.verb, "add members")
+        XCTAssertEqual(model.toasts.count, toastsBefore, "no toast while the sheet claims the verb")
     }
 
     func testAnOldRelayWithoutTheBatchRouteGetsThePerItemCalls() async throws {

@@ -1213,6 +1213,9 @@ struct NewGroupView: View {
             }
         }
         .background(theme.bg)
+        // A refused add or create draws in this sheet's note, not as a toast (the error-messages
+        // rule): the verbs `addMembers` / `addServerMembers` / `addSecretPeople` / `createGroup` fail with.
+        .claimFailures("people-sheet", ["add members", "add @", "add the agent", "add them", "create the group"])
         // Our own bar ([feedback iphone-add-members-2026-10-26]): the system inline bar
         // squeezed the Add pill to "A…" under "Add members to Arbonites" and the tap went
         // with it. The controls keep their width; the title shrinks, then truncates.
