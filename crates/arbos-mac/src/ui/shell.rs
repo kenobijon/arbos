@@ -3,13 +3,15 @@
 //! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
 //! float centred over everything.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
+    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div,
+    Entity, FocusHandle, Focusable, FontWeight, Pixels, Render, ScrollHandle, SharedString,
+    Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -27,6 +29,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::chart_viewer;
 use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
+use crate::ui::connect_agent;
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -35,6 +38,7 @@ use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
@@ -237,6 +241,8 @@ pub struct Shell {
     pub(crate) create_picker: avatar_picker::Picker,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
+    /// Connect an agent (#2141): the transport picked on the Create screen.
+    pub(crate) connect_transport: create_entity::Transport,
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
     /// the pending choice.
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
@@ -254,6 +260,11 @@ pub struct Shell {
     chat_search_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
+    /// Where the palette's panel was painted last frame; a mouse-down outside
+    /// it closes the palette without swallowing the click (`click_outside`).
+    pub(crate) palette_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Likewise the Search-in-chat bar.
+    pub(crate) chat_search_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The palette's result list scroll (keeps the highlight in view).
     palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
@@ -337,8 +348,11 @@ pub struct Shell {
     pub(crate) rail_hover: Option<crate::model::Id>,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
+    /// The sidebar filter capsules' horizontal scroll (a narrow column,
+    /// [feedback sidebar-narrow-wrap-2026-10-27]).
+    pub(crate) filter_scroll: ScrollHandle,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
-    /// screen (the rail's toggle at its top-left slot) where the platform
+    /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
     rig_fullscreen: bool,
     /// Rig: `ARBOS_RIG_RAIL_T=0.4` freezes the collapse morph at that
@@ -449,7 +463,6 @@ pub struct Shell {
     pub(crate) profile_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
     pub(crate) handle_input: Entity<ComposerInput>,
-    pub add_agent_open: bool,
     pub members_open: bool,
     /// Double-click rename on a chat tab: the chat being edited, and its field.
     pub(crate) renaming_tab: Option<crate::model::Id>,
@@ -653,6 +666,7 @@ impl Shell {
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
+            crate::ui::working::WorkingClock::set_window_active(cx, active);
             this.state
                 .update(cx, |s, cx| s.set_window_active(active, cx));
         })
@@ -713,6 +727,8 @@ impl Shell {
                     let _ = weak.update(cx, |this, cx| {
                         let kind = if this.create_group_open {
                             CreateKind::Group
+                        } else if this.state.read(cx).connect_open {
+                            CreateKind::Connect
                         } else {
                             CreateKind::Agent
                         };
@@ -1060,6 +1076,7 @@ impl Shell {
             new_agent_color: None,
             create_picker,
             create_group_open,
+            connect_transport: create_entity::Transport::default(),
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
@@ -1068,6 +1085,8 @@ impl Shell {
                 .ok()
                 .filter(|q| !q.trim().is_empty()),
             palette,
+            palette_bounds: Rc::new(Cell::new(None)),
+            chat_search_bounds: Rc::new(Cell::new(None)),
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
@@ -1147,6 +1166,7 @@ impl Shell {
             morph: Default::default(),
             rail_hover: None,
             rail_scroll: ScrollHandle::new(),
+            filter_scroll: ScrollHandle::new(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
@@ -1183,7 +1203,6 @@ impl Shell {
             profile_edit_open: false,
             name_input,
             handle_input,
-            add_agent_open: false,
             members_open: false,
             feedback,
         };
@@ -1646,6 +1665,26 @@ impl Shell {
         });
     }
 
+    /// "Connect an agent" in the New Message sheet (#2141): the Create screen in its connect
+    /// form (name + transport), then the key reveal.
+    pub(crate) fn open_connect_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_create_picture(cx);
+        self.create_group_open = false;
+        self.connect_transport = create_entity::Transport::default();
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = false;
+            s.connect_open = true;
+            cx.notify();
+        });
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Connect.placeholder());
+            input.clear(cx);
+        });
+        let handle = self.project_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// Open the Create group screen (step 1) over the New Message backdrop.
     pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_group_open = true;
@@ -1672,6 +1711,23 @@ impl Shell {
     ) {
         match kind {
             CreateKind::Agent => self.submit_project(window, cx),
+            CreateKind::Connect => {
+                let name = self.project_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let transport = self.connect_transport;
+                self.project_input.update(cx, |input, cx| input.clear(cx));
+                let color = self.new_agent_color.take();
+                // The picture options are drawn but a connected agent starts with the neutral
+                // initial; a picture can be set from its profile like any agent.
+                let _ = self.take_create_picture(cx);
+                self.state.update(cx, |s, cx| {
+                    s.close_new_chat(cx);
+                    s.connect_agent(name, transport.wire(), color, cx);
+                });
+                Composer::focus(&self.composer, window, cx);
+            }
             CreateKind::Group => {
                 let name = self.project_input.read(cx).text().trim().to_string();
                 if name.is_empty() {
@@ -1716,6 +1772,10 @@ impl Shell {
     ) {
         match kind {
             CreateKind::Agent | CreateKind::Group => self.close_new_chat_sheet(window, cx),
+            CreateKind::Connect => {
+                self.state.update(cx, |s, _| s.connect_open = false);
+                self.close_new_chat_sheet(window, cx);
+            }
             CreateKind::Server => self.close_server_sheet(window, cx),
         }
     }
@@ -2577,7 +2637,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(window, cx);
+        // A toggle ([feedback search-toggle-click-outside-mac-2026-10-27],
+        // Jacob 2026-10-27): ⌘⇧F on an open palette closes it, field focused or not.
+        if self.palette.open {
+            self.close_palette(window, cx);
+        } else {
+            self.open_palette(window, cx);
+        }
     }
 
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2619,7 +2685,34 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_chat_search(window, cx);
+        // A toggle ([feedback search-toggle-click-outside-mac-2026-10-27],
+        // Jacob 2026-10-27): ⌘F on an open bar closes it like ✕ / Esc, field
+        // focused or not.
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+        } else {
+            self.open_chat_search(window, cx);
+        }
+    }
+
+    /// Capture-phase mouse-down anywhere in the window: a click outside the
+    /// open Search-in-chat bar closes it, a click outside the open palette's
+    /// panel dismisses the palette — and the click goes on to whatever is
+    /// under it (a message, a sidebar row, a button answers in the same
+    /// click). Nothing here stops propagation.
+    fn click_outside(
+        &mut self,
+        at: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inside = |b: Option<Bounds<Pixels>>| b.is_some_and(|b| b.contains(&at));
+        if self.palette.open && !inside(self.palette_bounds.get()) {
+            self.close_palette(window, cx);
+        }
+        if self.state.read(cx).chat_search_open() && !inside(self.chat_search_bounds.get()) {
+            self.close_chat_search(window, cx);
+        }
     }
 
     pub(crate) fn open_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2901,7 +2994,6 @@ impl Shell {
         }
         let floating = self.menu_open
             || self.members_open
-            || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
@@ -3076,7 +3168,6 @@ impl Shell {
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
-            || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.channel_menu.is_some()
@@ -3090,7 +3181,6 @@ impl Shell {
             self.member_menu = None;
             self.library.menu = None;
             self.members_open = false;
-            self.add_agent_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
@@ -3138,16 +3228,7 @@ impl Shell {
             sidebar::footer_disc_frame("sidebar-update")
                 .bg(fill)
                 .when(!busy, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| {
-                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
-                        })
-                        .active(|s| {
-                            s.bg(Theme::lighter(
-                                theme.update_disc,
-                                sidebar::DISC_PRESSED_LIFT,
-                            ))
-                        })
+                    highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
@@ -3698,47 +3779,21 @@ impl Shell {
             let (avatar_state, person_image) =
                 hero_data.unwrap_or((avatars::AvatarState::Idle, None));
             let _ = avatar_state;
-            if !is_people {
-                // D92 amendment: an agent's uploaded / generated picture wins over the leaf.
-                let state = self.state.read(cx);
-                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
-            } else if let Some(person) = space.person() {
+            // A DM shows the other person; everything else — an agent, a people group, a
+            // group of agents — shows the space's own picture through `groups::picture`. A
+            // people group used to fall into the DM arm (`space.person()` is just the first
+            // member) and open on that member's disc instead of the group's picture
+            // ([feedback group-row-avatar-mac-2026-10-27]).
+            let dm_partner = space
+                .person()
+                .filter(|_| is_people && !space.is_people_group());
+            if let Some(person) = dm_partner {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
-                // A group of agents only: its own picture, else the initials disc.
+                // D92 amendment: the uploaded / generated picture wins over the leaf / initials.
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
-            // Empty people chat: a clear "Add agent" control so bringing your
-            // own agent in is discoverable ([feedback
-            // app-01M5WKBR85JVW1KKJH96FWZVK5]); the right pane has the same
-            // entry for chats that already have messages.
-            let add_agent = is_people.then(|| {
-                div()
-                    .id("empty-add-agent")
-                    .mt(px(4.0))
-                    .px(px(14.0))
-                    .py(px(7.0))
-                    .rounded(px(8.0))
-                    .bg(theme.surface_2)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bubble_assistant))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(icon("sparkles", 14.0, theme.text_muted))
-                    .child(
-                        div()
-                            .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text)
-                            .child("Add agent"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.members_open = false;
-                        this.add_agent_open = true;
-                        cx.notify();
-                    }))
-            });
             column = column.child(
                 div()
                     .flex_1()
@@ -3764,7 +3819,6 @@ impl Shell {
                             .max_w(px(460.0))
                             .child(hint),
                     )
-                    .children(add_agent)
                     .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(12.0)).child(
                         match &blocked_peer {
                             Some(person) => self.blocked_composer(person, &theme, cx),
@@ -4563,47 +4617,91 @@ impl Shell {
         )
     }
 
-    fn render_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// The one toast slot (Jacob 2026-10-27, [feedback toast-stack-mac-2026-10-27]): just
+    /// below the header's profile-picture pill, centred on the chat column (between the
+    /// sidebar and the pane), the newest `NOTICE_VISIBLE_MAX` toasts stacked compactly, older
+    /// ones folded into one "N more" line with a × that clears the slot. Info notices are the
+    /// plain card (click dismisses); failures are the shared error element as a toast — ×,
+    /// Details, Try again, 10 s, the pointer on it holds it, the same failure again bumps its
+    /// "×N" instead of adding a toast ([feedback error-messages-mac-2026-10-26]).
+    fn render_notices(&self, left: f32, right: f32, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
-        let notices = self.state.read(cx).live_notices();
-        if notices.is_empty() {
+        let stack = self.state.read(cx).notice_stack();
+        if stack.visible.is_empty() {
             return None;
         }
         PulseClock::request(cx);
-        // Top right, under the header: never over the composer's send / mic button or a note
-        // above it (the busy end of the column). Info notices are the plain card (click
-        // dismisses); failures are the shared error element as a toast — ×, Details, Try
-        // again, 10 s, and the pointer on it holds it ([feedback error-messages-mac-2026-10-26]).
-        let mut stack = div()
-            .absolute()
-            .right(px(16.0))
-            .top(px(HEADER_HEIGHT + 12.0))
+        let mut column = div()
+            .id("toast-slot")
+            .debug_selector(|| "toast-slot".into())
             .w(px(error_note::TOAST_WIDTH))
             .flex()
             .flex_col()
             .gap(px(6.0));
-        for n in notices {
-            let at = n.at;
+        if stack.folded > 0 {
+            let folded = stack.folded;
+            column = column.child(
+                div()
+                    .id("toast-folded")
+                    .debug_selector(|| "toast-folded".into())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(12.0))
+                    .h(px(24.0))
+                    .rounded_full()
+                    .bg(theme.surface_2)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(format!(
+                        "{folded} more {}",
+                        if folded == 1 { "notice" } else { "notices" }
+                    ))
+                    .child(
+                        div()
+                            .id("toast-folded-close")
+                            .debug_selector(|| "toast-folded-close".into())
+                            .size(px(16.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.7))
+                            .child(icon("xmark", 12.0, theme.text_muted))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.dismiss_all_notices();
+                                    cx.notify();
+                                });
+                            })),
+                    ),
+            );
+        }
+        for n in stack.visible {
+            let nid = n.id;
+            let id = format!("notice-{nid}");
             let element: gpui::AnyElement = match &n.error {
                 Some(error) => {
-                    let id = format!("notice-{at}");
                     let mut handlers = error_note::Handlers::new()
+                        .count(n.count)
                         .toggle_details(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.toggle_notice_details(at);
+                                s.toggle_notice_details(nid);
                                 cx.notify();
                             });
                         }))
                         .dismiss(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.dismiss_notice(at);
+                                s.dismiss_notice(nid);
                                 cx.notify();
                             });
                         }));
                     if n.retry.is_some() {
                         handlers = handlers.try_again(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.retry_notice(at);
+                                s.retry_notice(nid);
                                 cx.notify();
                             });
                         }));
@@ -4611,7 +4709,7 @@ impl Shell {
                     if error.action() == crate::sync::user_error::Action::SignIn {
                         handlers = handlers.sign_in(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.dismiss_notice(at);
+                                s.dismiss_notice(nid);
                                 s.sign_in(cx);
                             });
                         }));
@@ -4626,12 +4724,12 @@ impl Shell {
                     )
                     .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                         let hovering = *hovering;
-                        this.state.update(cx, |s, _| s.hold_notice(at, hovering));
+                        this.state.update(cx, |s, _| s.hold_notice(nid, hovering));
                     }))
                     .into_any_element()
                 }
                 None => div()
-                    .id(SharedString::from(format!("notice-{at}")))
+                    .id(SharedString::from(id.clone()))
                     .w_full()
                     .px(px(14.0))
                     .py(px(10.0))
@@ -4643,18 +4741,31 @@ impl Shell {
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
                     .cursor_pointer()
-                    .child(n.text.clone())
+                    .child(if n.count >= 2 {
+                        format!("{} (×{})", n.text, n.count)
+                    } else {
+                        n.text.clone()
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.update(cx, |s, cx| {
-                            s.dismiss_notice(at);
+                            s.dismiss_notice(nid);
                             cx.notify();
                         });
                     }))
                     .into_any_element(),
             };
-            stack = stack.child(element);
+            column = column.child(element);
         }
-        Some(stack)
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .right(px(right))
+                .top(px(header::metrics::TOAST_SLOT_TOP))
+                .flex()
+                .justify_center()
+                .child(column),
+        )
     }
 }
 
@@ -4702,7 +4813,7 @@ pub(crate) fn fmt_uptime(ms: u64) -> String {
     }
 }
 
-fn cards_spinner(theme: &Theme, cx: &App) -> Div {
+fn cards_spinner(theme: &Theme, cx: &mut App) -> Div {
     crate::ui::cards::spinner(theme, cx)
 }
 
@@ -4760,6 +4871,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        this.click_outside(event.position, window, cx);
+                    }
+                },
+            ))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
@@ -4878,18 +4996,12 @@ impl Render for Shell {
         // at rest that is 72 + the disc with the sidebar hidden, nothing with
         // it docked; mid-slide the disc holds its spot (72 + 12) from the
         // moment the sidebar's own disc has left until the sidebar is back.
-        // With the rail the header's toggle is only for a plain window at rest
-        // (full screen puts it in the rail's top-left slot; the morph's
-        // overlay carries it in between) — and for the narrow band's hidden
-        // sidebar, as before.
+        // With the rail the toggle is the rail's own (the morph's overlay
+        // carries it in between), so the header draws one only for the
+        // narrow band's hidden sidebar, as before
+        // ([feedback sidebar-toggle-in-rail-2026-10-27]).
         let rail_progress = frame.rail_progress(sidebar_width);
-        let show_sidebar_toggle = rail::header_toggle_shown(
-            sidebar_hidden,
-            frame.sidebar_visible,
-            rail,
-            frame.sidebar_sliding,
-            self.fullscreen,
-        );
+        let show_sidebar_toggle = rail::header_toggle_shown(sidebar_hidden, frame.sidebar_visible);
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
             show_sidebar_toggle,
@@ -5141,14 +5253,6 @@ impl Render for Shell {
         }
         if let Some(space) = people_space {
             let right = 16.0;
-            if self.add_agent_open {
-                root = root.child(glass::popover(people::add_agent_picker(
-                    &space,
-                    &self.state,
-                    right,
-                    cx,
-                )));
-            }
             if self.members_open {
                 root = root.child(glass::popover(people::members_popover(
                     &space,
@@ -5201,6 +5305,8 @@ impl Render for Shell {
             // (a group goes on to the member picker as step 2).
             if self.state.read(cx).new_project_open {
                 root = root.child(create_entity::sheet(self, CreateKind::Agent, cx));
+            } else if self.state.read(cx).connect_open {
+                root = root.child(create_entity::sheet(self, CreateKind::Connect, cx));
             } else if self.create_group_open {
                 root = root.child(create_entity::sheet(self, CreateKind::Group, cx));
             } else {
@@ -5212,6 +5318,9 @@ impl Render for Shell {
                 ServerSheet::NewServer => create_entity::sheet(self, CreateKind::Server, cx),
                 other => servers::sheet(self, &other, cx),
             });
+        }
+        if let Some(reveal) = self.state.read(cx).connect_reveal.clone() {
+            root = root.child(connect_agent::reveal_sheet(self, &reveal, cx));
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
@@ -5333,7 +5442,7 @@ impl Render for Shell {
         if let Some(prompt) = self.render_notify_prompt(cx) {
             root = root.child(prompt);
         }
-        if let Some(notices) = self.render_notices(cx) {
+        if let Some(notices) = self.render_notices(frame.sidebar_visible, frame.pane_visible, cx) {
             root = root.child(notices);
         }
         // D82: first sign-in — the terminal screen covers the shell until the

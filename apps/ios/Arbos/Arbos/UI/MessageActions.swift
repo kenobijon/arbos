@@ -133,7 +133,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     Text(emoji)
                         .font(.system(size: ReactionCapsule.emojiSize))
                         .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
-                        .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
+                        .background(Circle().fill(held.contains(where: { MessageReaction.sameBase($0, emoji) }) ? theme.accent.opacity(0.22) : Color.clear))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
@@ -365,9 +365,11 @@ extension View {
             // simultaneous so the chat ScrollView keeps vertical pans that start
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
+            // A hold on a chart plot reads a value instead (`ChartTouch`).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in onLongPress() }
+                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
+                enabled: ChatGestures.longPress
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }

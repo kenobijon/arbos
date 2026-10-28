@@ -6,15 +6,20 @@
 
 import ArbosFFI
 import PhotosUI
+import QuickLook
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Long-press → Forward payload for the chat picker sheet.
+/// Long-press → Forward payload for the chat picker sheet: the message (its text, its
+/// pictures / files / videos and its charts all travel) and who wrote it
+/// ([feedback forward-attachments-ios-2026-10-27]).
 private struct PendingForward: Identifiable, Equatable {
     let id = UUID()
-    let text: String
+    let message: Message
     let from: String
+    /// The blob slot the message's attachments live in (copied from there).
+    let slot: String
 }
 
 /// Long-press → View thread payload for the reply-chain sheet.
@@ -175,6 +180,8 @@ struct ChatSession: View {
     @State private var sentOnce = false
     @State private var transcribing = false
     @State private var pending: [AppModel.PendingAttachment] = []
+    /// Quick Look URL for a staged picture/video (tap the chip while writing a description).
+    @State private var pendingPreviewURL: URL?
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -188,6 +195,10 @@ struct ChatSession: View {
     @State private var pinnedToBottom = true
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
+    /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
+    @State private var firstRowMarked = false
+    /// When the history window last grew (the near-top reporter fires per scroll sample).
+    @State private var lastGrowAt = Date.distantPast
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -222,20 +233,30 @@ struct ChatSession: View {
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
+    /// Driven by the transcript's one swipe recognizer (`TranscriptSwipeHost`).
     @State private var timeReveal: CGFloat = 0
-    /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
-    @State private var timeRevealLocked = false
+    /// The reply swipe in progress: which row follows the finger and how far (same recognizer).
+    @State private var replySwipe = ReplySwipe()
+    /// Row frames in the transcript space, for the recognizer's row-by-location lookup.
+    @State private var rowFrames = RowFrameIndex()
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
     @State private var showTasks = false
     @State private var pendingThread: PendingThread?
 
-    /// Rows after the in-chat search filter (profile "search").
+    /// Rows after the in-chat search filter (profile "search"). Matching
+    /// messages also get a soft accent wash while the keyword is set
+    /// ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     private var visibleRows: [Row] {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
+
+    /// True while Search-in-chat has a keyword: every filtered message is a hit.
+    private var searchHitsActive: Bool {
+        showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
@@ -351,10 +372,14 @@ struct ChatSession: View {
         return ProfileToggle.label(name: who, showing: model.profileShows(headerTarget))
     }
 
-    /// Hardware ⌘F ([feedback iphone-chat-search-cmd-f-2026-10-26]): open the bar, or
-    /// put the cursor back in it when it is already up. Never closes it.
+    /// Hardware ⌘F toggles the bar ([feedback iphone-chat-search-cmd-f-toggle-2026-10-27]):
+    /// closed → open and focus the field; open → close it like ✕ / Esc.
     private func openSearchFromKeyboard() {
         let effect = ChatSearchShortcut.apply(open: showSearch)
+        if !effect.open {
+            closeSearch()
+            return
+        }
         if effect.animate {
             withAnimation(.easeOut(duration: 0.18)) { showSearch = effect.open }
         } else {
@@ -459,9 +484,11 @@ struct ChatSession: View {
     /// Long-press → Edit: the own message whose text is in the composer.
     @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
-    @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// After a quote tap: the reply we came from. The ↓ disc returns here once
+    /// (not to the latest message); cleared on use, send, or a real jump-to-latest.
+    @State private var jumpBackTo: Id?
     /// The bubble whose long-press actions (reaction capsule + menu) are open.
     @State private var actionsRow: Row?
     /// The composer had the keyboard up when the bubble was pressed (`openActions`).
@@ -761,6 +788,14 @@ struct ChatSession: View {
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         let _ = SendTrace.recent ? SendTrace.mark("session-body", detail: "tick=\(tick) version=\(model.messagesVersion[chatId] ?? 0) rows=\(rows.count) msgs=\(messages.count)", once: false) : ()
         #endif
+        // Split so the type checker can finish (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG
+        // paste path tipped the one-expression body over Xcode's limit).
+        sessionRoot
+    }
+
+    /// Transcript canvas + composer inset (no sheets / lifecycle).
+    @ViewBuilder
+    private var sessionCanvas: some View {
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
         // centre the glass bar over the transcript (feedback app-01M5P98RB40WKA70R70DMDN97E).
@@ -771,6 +806,12 @@ struct ChatSession: View {
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
+                        // A tap on a hidden `||spoiler||` (`arbos://spoiler/<key>`) shows it for
+                        // this viewer; nothing leaves the device.
+                        if let key = SpoilerState.key(from: url) {
+                            SpoilerState.shared.toggle(key)
+                            return .handled
+                        }
                         guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
                         // A chip is a profile target like the sender name beside it: open,
                         // dismiss on the same subject, swap for someone else (`ProfileToggle`).
@@ -786,6 +827,14 @@ struct ChatSession: View {
             VStack(spacing: 8) {
                 header
                 linkPill.padding(.top, -5)
+                // The toast slot (Jacob 2026-10-27, [feedback toast-stack-ios-2026-10-27]): just
+                // below the pill (and the connection pill), hanging over the transcript without
+                // taking space — a zero-height anchor with the host as its overlay.
+                Color.clear.frame(height: 0)
+                    .overlay(alignment: .top) {
+                        ToastHost().environmentObject(model)
+                    }
+                    .zIndex(2)
                 // The chat-level note (Jacob 2026-10-26): pinned under the header pill, 16 inset —
                 // the pushes refused for this chat, or the machine in error. One element.
                 chatNote.padding(.horizontal, 16)
@@ -923,7 +972,8 @@ struct ChatSession: View {
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
-                                                hasReplies: row.replyCount > 0),
+                                                hasReplies: row.replyCount > 0,
+                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -934,9 +984,13 @@ struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
+                            // showReactionSenders: holding the message lists who
+                            // used each emoji under the held bubble (chip hold
+                            // does the same one-emoji list in the transcript).
                             RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
-                                    mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
+                                    mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
+                                    showReactionSenders: !row.reactions.isEmpty)
                                 .padding(.horizontal, 16)
                         }
                     )
@@ -944,6 +998,12 @@ struct ChatSession: View {
             }
             .ignoresSafeArea()
         }
+    }
+
+    /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
+    @ViewBuilder
+    private var sessionRoot: some View {
+        sessionCanvas
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
@@ -974,18 +1034,16 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
-        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
-            Button(BlockedState.unblock) {
-                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
-            }
-        } message: { Text(BlockedState.confirmNote) }
+        .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
+            if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+        }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(item: $pendingForward) { pending in
-            ForwardSheet(fromName: pending.from) { target in
+            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
                 pendingForward = nil
-                model.forwardText(pending.text, from: pending.from, to: target)
+                model.forwardMessage(pending.message, from: pending.from, slot: pending.slot, to: target)
                 model.notice = Notice(text: "Forwarded to \(target.title)")
             }
             .environmentObject(model)
@@ -1191,6 +1249,25 @@ struct ChatSession: View {
                         startCall(.voice)
                         #endif
                     case "recording": recorder.start()
+                    // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
+                    // the n-th newest message row (0 = newest) through the menu's own path, the
+                    // pasteboard printed to the console, then the composer's paste 2 s later.
+                    case let s where s.hasPrefix("copy"):
+                        #if DEBUG
+                        let n = Int(s.split(separator: ":").dropFirst().first ?? "0") ?? 0
+                        let candidates = rows.filter { isMessageRow($0) }
+                        if n < candidates.count {
+                            let row = candidates[candidates.count - 1 - n]
+                            runMessageMenu(.copy, row: row)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                MessagePasteboard.debugDump()
+                                let media = MessagePasteboard.pendingAttachments()
+                                if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
+                                if let words = UIPasteboard.general.string { composerDraft.text = words }
+                                print("rig copy: composer staged \(media.count) attachment(s), draft \"\(composerDraft.text)\"")
+                            }
+                        }
+                        #endif
                     case "scrollup":
                         if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "media", "media-forward", "media-file":
@@ -1514,7 +1591,7 @@ struct ChatSession: View {
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
                             if let project {
-                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
+                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state), working: streaming)
                             }
                             Text(name)
                                 .font(.system(size: Theme.body, weight: .semibold))
@@ -1563,6 +1640,17 @@ struct ChatSession: View {
         composerFocused ? Theme.composerInsetKeyboard : Theme.composerInset
     }
 
+    /// ↓ after a quote tap: return to the reply we came from. Otherwise jump to
+    /// the latest row ([feedback app-01M5WDFMAZX82JNSEVZ94BM90D]).
+    private func jumpBackOrLatest() {
+        if let back = jumpBackTo {
+            jumpBackTo = nil
+            revealQuoted(back)
+            return
+        }
+        jumpToLatest()
+    }
+
     /// Jump to the latest row and resume stick-to-bottom.
     ///
     /// From deep in history — the window slid past the tail (`windowSkipEnd > 0`) —
@@ -1572,6 +1660,7 @@ struct ChatSession: View {
     /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
     /// same shape of bug). Within the tail window the short animated hop stays.
     private func jumpToLatest() {
+        jumpBackTo = nil
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
@@ -1619,15 +1708,15 @@ struct ChatSession: View {
             Image(systemName: "chevron.down")
                 .font(theme.font(15, weight: .medium))
                 .foregroundStyle(theme.text)
-            ScrollInterruptTap(action: jumpToLatest)
+            ScrollInterruptTap(action: jumpBackOrLatest)
                 .frame(width: 44, height: 44)
         }
         .frame(width: Theme.voiceButton, height: Theme.voiceButton)
         .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Scroll to bottom")
+        .accessibilityLabel(jumpBackTo == nil ? "Scroll to bottom" : "Back to reply")
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction { jumpToLatest() }
+        .accessibilityAction { jumpBackOrLatest() }
     }
 
     /// Shown when rows land below while the reader is up in history — tap jumps
@@ -1654,45 +1743,36 @@ struct ChatSession: View {
         .accessibilityAction { jumpToLatest() }
     }
 
-    /// Drag left on the transcript to peek each bubble's send time (iMessage).
-    /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
-    /// Skips (and undoes) when a nested table is scrolling sideways
+    /// The transcript's swipe recognizer (`TranscriptSwipeHost`): the reply swipe on a row and
+    /// the iMessage time peek, both decided on the first points so a vertical pan is the
+    /// scroll view's alone. A nested table scrolling sideways undoes a peek in progress
     /// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
-    private var timeRevealGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .local)
-            .onChanged { value in
-                if NestedHorizontalScroll.claiming {
-                    if timeRevealLocked || timeReveal != 0 {
-                        timeRevealLocked = false
-                        var t = Transaction()
-                        t.disablesAnimations = true
-                        withTransaction(t) { timeReveal = 0 }
-                    }
-                    return
-                }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                if !timeRevealLocked {
-                    guard abs(dx) + abs(dy) >= 12 else { return }
-                    // Vertical scroll or swipe-right-to-back: do not steal the gesture.
-                    guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return }
-                    timeRevealLocked = true
-                }
-                // iMessage feel: 1:1 up to the reveal width, then rubber-band
-                // (a fifth of the excess, at most 24 pt) instead of a hard stop.
-                let raw = max(0, -dx)
-                let w = RowView.timeRevealWidth
-                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { timeReveal = reveal }
+    private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
+        var still = Transaction()
+        still.disablesAnimations = true
+        switch event {
+        case .replyChanged(let row, let dx):
+            let reveal = BubbleSwipe.reveal(for: dx)
+            let armed = BubbleSwipe.triggers(reveal: reveal)
+            if armed, !replySwipe.armed { Haptics.pick() }
+            withTransaction(still) { replySwipe = ReplySwipe(rowId: row, reveal: reveal, armed: armed) }
+        case .replyEnded(let row, let fire):
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replySwipe = ReplySwipe() }
+            if fire, let target = windowedRows.first(where: { $0.id == row }) { beginReply(to: target) }
+        case .timeChanged(let dx):
+            if NestedHorizontalScroll.claiming {
+                if timeReveal != 0 { withTransaction(still) { timeReveal = 0 } }
+                return
             }
-            .onEnded { _ in
-                timeRevealLocked = false
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                    timeReveal = 0
-                }
-            }
+            // iMessage feel: 1:1 up to the reveal width, then rubber-band
+            // (a fifth of the excess, at most 24 pt) instead of a hard stop.
+            let raw = max(0, -dx)
+            let w = RowView.timeRevealWidth
+            let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
+            withTransaction(still) { timeReveal = reveal }
+        case .timeEnded:
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
+        }
     }
 
     // MARK: Transcript
@@ -1700,10 +1780,15 @@ struct ChatSession: View {
     private func transcript(width: CGFloat, height: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // VStack (not LazyVStack): a growing vertical TextField resizes the
-                // bottom safe-area inset, and LazyVStack can drop every visible row
-                // for a white transcript until the next layout pass.
-                VStack(alignment: .leading, spacing: 0) {
+                // Lazy: SwiftUI builds and lays out only the rows near the viewport. With a
+                // plain VStack every one of the windowed rows (80 at open, up to 360 while
+                // reading history) was laid out on every change of the row set — a 1.6–2.7 s
+                // frame at open, a 0.3–0.45 s stall per 30-row grow step, 1 s on jump-to-bottom
+                // (iphone-scroll-perf, Time Profiler: 7.7 of 10.3 busy main-thread seconds in
+                // AttributeGraph layout). An older iOS let a LazyVStack drop its visible rows
+                // when the composer's safe-area inset grew; the rig's keyboard / typing pass
+                // on iOS 27 is what guards that now.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     // iOS 17 window growth: report this top edge's position in the scroll space.
                     Color.clear.frame(height: 0)
                         .background(
@@ -1715,6 +1800,11 @@ struct ChatSession: View {
                             }
                         )
                     Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
+                    #if DEBUG
+                    if DebugHooks.perfTouch {
+                        ScrollPerfProbe().frame(height: 0)
+                    }
+                    #endif
                     if let banner = machineBannerText {
                         // Grok (Mac refs 69/70): a quiet line while the machine wakes. The error
                         // state is the pinned note under the header (`chatNote`).
@@ -1745,30 +1835,11 @@ struct ChatSession: View {
                     // One MentionTable for every bubble (Mac builds Mentions once per
                     // sync). Per-row rebuilds were the main group-chat lag on iPhone.
                     let mentions = MentionTable.Cache.shared.table(model: model, theme: theme)
-                    // Equatable host: composer keystrokes re-evaluate ChatView but
-                    // skip the ForEach when the transcript inputs are unchanged.
-                    TranscriptRows(
-                        model: model,
-                        theme: theme,
-                        composerInset: composerSideInset,
-                        people: isPeople || isChannel,
-                        mentions: mentions,
-                        shown: shown,
-                        shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
-                        chatId: chatId,
-                        width: width,
-                        timeReveal: timeReveal,
-                        highlightedMessage: highlightedMessage,
-                        rowsCount: rows.count,
-                        messagesCount: messages.count,
-                        canReply: { isMessageRow($0) },
-                        onQuoteTap: { revealQuoted($0) },
-                        onReply: { beginReply(to: $0) },
-                        onMenu: { runMessageMenu($0, row: $1) },
-                        actionsRowId: actionsRow?.id,
-                        onLongPress: { row in openActions(row) }
-                    )
-                    .equatable()
+                    // The ForEach sits directly in the LazyVStack: that is what makes the rows
+                    // lazy (wrapped in another view it is one child, and every row is built).
+                    // Keystrokes do not reach this body (the composer is isolated); the other
+                    // publishes re-diff the ids and let each realized `RowView` skip by `==`.
+                    transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
@@ -1777,6 +1848,14 @@ struct ChatSession: View {
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // The rows report their frames in this space; the one swipe recognizer for
+                // reply (right, on a row) and time peek (left) lives on the scroll view.
+                .coordinateSpace(name: TranscriptSpace.name)
+                .background {
+                    if ChatGestures.replySwipe || ChatGestures.timeReveal {
+                        TranscriptSwipeHost(frames: rowFrames, onEvent: handleTranscriptSwipe)
+                    }
+                }
                 // The avatar column follows the `+` as the composer inset animates with the keyboard.
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
                 // Short threads: fill the viewport and pin rows to the bottom so
@@ -1792,8 +1871,6 @@ struct ChatSession: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            // Drag left → reveal message times (iMessage). simultaneous so vertical scroll still works.
-            .simultaneousGesture(timeRevealGesture)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript.
             .onTapGesture {
                 composerFocused = false
@@ -1811,6 +1888,11 @@ struct ChatSession: View {
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
                 guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
+                // One step per quarter second at most: the reporter now fires per scroll sample
+                // inside the top band (lazy rows), and a flick's deceleration there should bring
+                // a few slices in, not run away through the whole history.
+                guard Date().timeIntervalSince(lastGrowAt) > 0.25 else { return }
+                lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
@@ -1856,6 +1938,7 @@ struct ChatSession: View {
             }
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
+                jumpBackTo = nil
                 pinnedToBottom = true
                 awayFromBottom = false
                 newBelowCount = 0
@@ -1864,9 +1947,11 @@ struct ChatSession: View {
                 }
             }
             .onChange(of: awayFromBottom) { _, away in
-                // Reader scrolled back to the end by hand — clear the pill; when the window
-                // had slid into history, its end is not the tail: jump to the real end.
+                // Reader scrolled back to the end by hand — clear the pill and any
+                // quote-tap jump-back; when the window had slid into history, its end
+                // is not the tail: jump to the real end.
                 if !away {
+                    jumpBackTo = nil
                     newBelowCount = 0
                     if windowSkipEnd > 0 { settleToBottom(proxy) }
                 }
@@ -2006,19 +2091,30 @@ struct ChatSession: View {
         return "you"
     }
 
-    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment. A
-    /// cross-chat quote (Reply in DM) opens the source chat on the original instead; the
-    /// header is not tappable when the viewer is not in that chat.
-    private func revealQuoted(_ quote: Quote) {
+    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment.
+    /// `from` is the reply we left — the ↓ disc returns there once. A cross-chat quote
+    /// (Reply in DM) opens the source chat on the original instead; the header is not
+    /// tappable when the viewer is not in that chat.
+    private func revealQuoted(_ quote: Quote, from replyId: Id) {
         if let src = quote.source {
-            if src.chatId == chatId { revealQuoted(src.messageId) } else { model.reveal(src) }
+            if src.chatId == chatId {
+                jumpBackTo = replyId
+                revealQuoted(src.messageId)
+            } else {
+                jumpBackTo = nil
+                model.reveal(src)
+            }
             return
         }
+        jumpBackTo = replyId
         revealQuoted(quote.messageId)
     }
 
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
+        // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
+        // the reader off the revealed row / the reply they jumped back to.
+        pinnedToBottom = false
         if includeInWindow(messageId: messageId) {
             // The original was outside the window: let the grown VStack lay out first.
             DispatchQueue.main.async {
@@ -2095,7 +2191,8 @@ struct ChatSession: View {
         return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
     }
 
-    /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
+    /// The long-press menu's actions (`MessageMenu`): Copy the message (text and
+    /// pictures), Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// View thread (when the message has replies), Forward to another chat,
     /// Reply in DM (open a private chat with the human who wrote it), Edit
@@ -2103,7 +2200,12 @@ struct ChatSession: View {
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
-            UIPasteboard.general.string = m_text(row)
+            // The whole message — words and pictures / files — through the one copy path
+            // ([feedback copy-image-messages-ios-2026-10-27]: the text alone went out before,
+            // and a picture message copied nothing).
+            guard let m = messageById[row.messageId] else { return }
+            let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+            Task { await model.copyMessage(m, slot: slot) }
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -2118,6 +2220,8 @@ struct ChatSession: View {
             model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
         case .edit:
             beginEdit(row)
+        case .removePreview:
+            model.removeLinkPreview(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         case .delete:
             // Deletes at once, for everyone (Jacob, feedback remove-delete-confirms-2026-10-24:
             // no "Delete message?" step); the menu only offers Delete where `canDelete` holds.
@@ -2149,16 +2253,26 @@ struct ChatSession: View {
     }
 
 
-    /// Long-press → Forward: open the chat picker with this row's text.
+    /// Long-press → Forward: open the chat picker for this row's message — words,
+    /// pictures, files, charts, any of them is enough
+    /// ([feedback forward-attachments-ios-2026-10-27]: only the words used to travel).
     private func beginForward(_ row: Row) {
         guard let m = messageById[row.messageId] else { return }
-        let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        // "Forwarded from <name>" names me by my display name, not "You".
-        let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
-            ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
-            : MediaAlbum.senderName(m) { model.project($0)?.name }
-        pendingForward = PendingForward(text: text, from: from)
+        guard m.body != nil else {
+            if m.hasUploadingAttachment {
+                model.notice = Notice(text: "Still uploading — try again in a moment")
+            }
+            return
+        }
+        // "Forwarded from <name>" names me by my display name, not "You"; forwarding a
+        // forwarded message keeps the original author (Telegram), not the last forwarder.
+        let original = (m.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+        let from = original
+            ?? (m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
+                ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
+                : MediaAlbum.senderName(m) { model.project($0)?.name })
+        let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+        pendingForward = PendingForward(message: m, from: from, slot: slot)
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
@@ -2234,22 +2348,18 @@ struct ChatSession: View {
     @ViewBuilder private var linkPill: some View {
         let _ = model.linkPillRepaint
         if let state = model.linkPill(for: chatId, channel: isChannel), let label = state.label {
-            let dot: Color = {
+            // The capsule's mark (Jacob, 2026-10-27: never a coloured dot): the braille
+            // spinner while the link is being brought back, the fault glyph when the
+            // relay is down, nothing for Offline — the words say it.
+            let mark: StatusMark? = {
                 switch state {
-                case .offline: return theme.muted.opacity(0.6)
-                case .relayDown: return theme.danger
-                case .reconnecting, .restartSoon: return theme.warn
-                case .syncing: return theme.accent
-                case .live: return .clear
+                case .reconnecting, .restartSoon, .syncing: return .working
+                case .relayDown: return .fault
+                case .offline, .live: return nil
                 }
             }()
-            let pulsing = state == .reconnecting || state == .syncing || state == .restartSoon
             HStack(spacing: 6) {
-                Circle()
-                    .fill(dot)
-                    .frame(width: 6, height: 6)
-                    .opacity(pulsing ? (pulsePhase ? 1 : 0.5) : 1)
-                    .animation(pulsing ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true) : .default, value: pulsePhase)
+                if let mark { StatusMarkView(mark: mark, size: 9) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
@@ -2260,8 +2370,6 @@ struct ChatSession: View {
             .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("link-pill")
-            .onAppear { pulsePhase = true }
-            .onDisappear { pulsePhase = false }
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
@@ -2504,27 +2612,46 @@ struct ChatSession: View {
                         ForEach(pending) { a in
                             // Images show a real thumbnail (same 28 pt chip as Mac);
                             // other files keep the SF Symbol + name pill.
+                            // Tap the chip (not ×) to open a picture/video while the
+                            // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
                             let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
+                            let canPreview = Self.isCaptionablePending(a)
                             HStack(spacing: 6) {
-                                if let thumb {
-                                    Image(uiImage: thumb)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 28, height: 28)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                } else {
-                                    Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
-                                        .font(theme.font(12))
-                                }
-                                Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
-                                Button { pending.removeAll { $0.id == a.id } } label: {
-                                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                                Button {
+                                    openPendingPreview(a)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if let thumb {
+                                            Image(uiImage: thumb)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 28, height: 28)
+                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        } else {
+                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : (a.mime.hasPrefix("video/") ? "film" : "doc")))
+                                                .font(theme.font(12))
+                                        }
+                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                    }
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(!canPreview)
+                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
+                                // The remove ✕: always drawn, a full-size hit target
+                                // (not the 10 pt glyph alone), named for VoiceOver
+                                // ([feedback composer-attachment-removal-ios-2026-10-27]).
+                                Button { removePending(a.id) } label: {
+                                    Image(systemName: "xmark").font(.system(size: Theme.pendingRemoveGlyph, weight: .bold))
+                                        .frame(width: Theme.pendingRemoveHit, height: Theme.pendingRemoveHit)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Remove attachment")
+                                .accessibilityIdentifier("composer-remove-attachment")
                             }
                             .foregroundStyle(theme.text)
                             .padding(.leading, thumb != nil ? 4 : 10)
-                            .padding(.trailing, 10)
+                            .padding(.trailing, Theme.pendingChipTrailing)
                             .padding(.vertical, thumb != nil ? 3 : 6)
                             .background(Capsule().fill(theme.bubbleAssistant))
                         }
@@ -2540,6 +2667,27 @@ struct ChatSession: View {
                 textField
             }
         }
+        .quickLookPreview($pendingPreviewURL)
+    }
+
+    /// The chip's ✕: that one goes, the others and the draft stay.
+    private func removePending(_ id: UUID) {
+        pending = Self.removingPending(id, from: pending)
+    }
+
+    /// ⌫ on an empty draft (`MentionTextView.onDeleteBackwardEmpty`): the last
+    /// pending attachment goes; with text in the draft the key edits text only.
+    private func removeLastPending() {
+        pending = Self.removingLastPending(from: pending, draftEmpty: composerDraft.text.isEmpty)
+    }
+
+    static func removingPending(_ id: UUID, from list: [AppModel.PendingAttachment]) -> [AppModel.PendingAttachment] {
+        list.filter { $0.id != id }
+    }
+
+    static func removingLastPending(from list: [AppModel.PendingAttachment], draftEmpty: Bool) -> [AppModel.PendingAttachment] {
+        guard draftEmpty, !list.isEmpty else { return list }
+        return Array(list.dropLast())
     }
 
     /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
@@ -2602,6 +2750,18 @@ struct ChatSession: View {
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
     }
 
+    /// Open a staged picture/video in Quick Look so the description can still be written after.
+    private func openPendingPreview(_ a: AppModel.PendingAttachment) {
+        guard Self.isCaptionablePending(a), let file = MediaFetch.tempFile(a.data, name: a.name) else { return }
+        // `.quickLookPreview` only presents when the binding becomes non-nil.
+        if pendingPreviewURL == file {
+            pendingPreviewURL = nil
+            Task { @MainActor in pendingPreviewURL = file }
+            return
+        }
+        pendingPreviewURL = file
+    }
+
 
     /// Composer field: type normally, or hold the mic to dictate. The mic stays
     /// mounted while recording so release can finish and send without a second tap.
@@ -2620,6 +2780,9 @@ struct ChatSession: View {
             memoDragX: memoDragX,
             cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
+            onDeleteBackwardEmpty: removeLastPending,
+            // Pasted pictures / files arrive through `onPasteMedia` below (every item,
+            // native type kept — GIF/WebP bytes included); no second handler here.
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
                 if !memoHoldActive {
@@ -2689,6 +2852,12 @@ struct ChatSession: View {
                 } else if !isChannel {
                     requestCall(.voice)
                 }
+            },
+            onPasteMedia: { media in
+                // A copied picture / file pastes back as an attachment chip
+                // ([feedback copy-image-messages-ios-2026-10-27]).
+                pending.append(contentsOf: media)
+                composerFocused = true
             }
         )
         // Hold released before permission returned: finish once recording starts.
@@ -2968,6 +3137,7 @@ struct ChatSession: View {
         #endif
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
+        jumpBackTo = nil
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
@@ -3260,68 +3430,37 @@ struct ModelPickerView: View {
 /// The visible transcript rows. Equatable so a composer keystroke (ChatView's
 /// composer draft) or an AppModel presence tick that re-evaluates ChatView
 /// does not rebuild every bubble when the row list is unchanged.
-private struct TranscriptRows: View, Equatable {
-    let model: AppModel
-    let theme: Theme
-    let composerInset: CGFloat
-    /// People chat: the wider bubble caps (`Theme.peopleBubbleInset`).
-    let people: Bool
-    let mentions: MentionTable
-    let shown: [Row]
-    /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
-    let shownStamp: Int
-    let chatId: Id
-    let width: CGFloat
-    let timeReveal: CGFloat
-    let highlightedMessage: Id?
-    let rowsCount: Int
-    let messagesCount: Int
-    let canReply: (Row) -> Bool
-    let onQuoteTap: (Quote) -> Void
-    /// Swipe right on a message bubble (`BubbleSwipe`) → the composer's reply quote.
-    let onReply: (Row) -> Void
-    let onMenu: (MessageMenuItem, Row) -> Void
-    /// The bubble whose long-press actions are open (it alone reports its frame).
-    let actionsRowId: String?
-    let onLongPress: (Row) -> Void
-
-    static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
-        let same = lhs.shownStamp == rhs.shownStamp
-            && lhs.actionsRowId == rhs.actionsRowId
-            && lhs.composerInset == rhs.composerInset
-            && lhs.people == rhs.people
-            && lhs.theme == rhs.theme
-            && lhs.chatId == rhs.chatId
-            && lhs.width == rhs.width
-            && lhs.timeReveal == rhs.timeReveal
-            && lhs.highlightedMessage == rhs.highlightedMessage
-            && lhs.mentions.stamp == rhs.mentions.stamp
-        #if DEBUG
-        PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
-        if !same {
-            PerfCounters.bump("rowsEq.\(lhs.shownStamp == rhs.shownStamp ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
-        }
-        #endif
-        return same
-    }
-
-    var body: some View {
-        #if DEBUG
-        let _ = PerfCounters.bump("transcriptRowsBody")
-        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
-        #endif
-        // Rows keyed by id, never by position: a grow step prepends older rows and
-        // must not touch the ones already laid out (arbonites-chat-lag).
+extension ChatSession {
+    /// The transcript's rows, keyed by id, never by position: a grow step prepends older
+    /// rows and must not touch the ones already laid out (arbonites-chat-lag).
+    @ViewBuilder
+    fileprivate func transcriptRows(shown: [Row], mentions: MentionTable, width: CGFloat) -> some View {
+        let people = isPeople || isChannel
+        let composerInset = composerSideInset
+        let actionsRowId = actionsRow?.id
         let firstId = shown.first?.id
+        // Lazy rows: the oldest row of the window sits above the viewport and may never
+        // appear; the newest one is on screen at open, so it marks the open.
+        let lastId = shown.last?.id
         ForEach(shown) { row in
-            let reply = canReply(row)
+            let reply = isMessageRow(row)
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: onQuoteTap,
+                    onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
-                    onReply: reply ? { onReply(row) } : nil,
+                    searchHit: searchHitsActive && Self.isMessageBubble(row),
+                    canReply: reply,
+                    replyDrag: replySwipe.rowId == row.id ? replySwipe.reveal : 0,
+                    replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
                     mentions: mentions)
                 .equatable()
+                // Where this row is, for the swipe recognizer's row-by-location lookup. The
+                // transcript space scrolls with the content, so this fires on layout, not per
+                // scroll frame; the index is a plain class, so no view is invalidated.
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TranscriptSpace.name)) } action: { frame in
+                    rowFrames.set(row.id, frame: frame, canReply: reply)
+                }
+                .onDisappear { rowFrames.remove(row.id) }
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
@@ -3330,9 +3469,11 @@ private struct TranscriptRows: View, Equatable {
                         SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
                     }
                     #endif
-                    // Once per open — not on every row (group chats fire this dozens of times).
-                    if row.id == firstId {
-                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                    // Once per open — not on every row, and not again when the newest row is
+                    // realised a second time after a trip into history.
+                    if row.id == lastId, !firstRowMarked {
+                        firstRowMarked = true
+                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
                         #if DEBUG
                         PerfLog.shared.armScrollable()
                         #endif
@@ -3343,8 +3484,18 @@ private struct TranscriptRows: View, Equatable {
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
-                .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
-                                    onCopyMenu: { onMenu($0, row) })
+                .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
+                                    onCopyMenu: { runMessageMenu($0, row: row) })
+        }
+    }
+
+    /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
+    private static func isMessageBubble(_ row: Row) -> Bool {
+        switch row.kind {
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+            return false
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+            return true
         }
     }
 }
@@ -3358,12 +3509,17 @@ private struct NearTopReporter: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                // About a screen ahead of the top edge, so the next slice is in place
-                // before the reader reaches it.
-                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 900
-            } action: { _, near in
-                if near { onNear() }
+            content.onScrollGeometryChange(for: CGFloat.self) { g in
+                g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity
+            } action: { old, new in
+                // About a screen ahead of the top edge, so the next slice is in place before
+                // the reader reaches it. Fires on every sample inside the band while the offset
+                // is still falling: with lazy rows (#2149) the rows a grow step prepends have
+                // no height until they are measured, so the offset can stay inside the band
+                // across the step — a one-shot "near" flag never re-armed and the window
+                // stopped at its cap (rig: 90 flicks into history stuck after ~90 s). The
+                // caller rate-limits the steps.
+                if new < 900, new < old || old == .infinity { onNear() }
             }
         } else if enabled {
             content
@@ -3429,6 +3585,11 @@ private struct AwayFromBottomReporter: ViewModifier {
                     }
                     return
                 }
+                // Lazy rows: the content height is an estimate that is corrected as rows are
+                // measured, down as well as up. A sample where the height changed says nothing
+                // about where the reader is; only an unchanged height may re-pin (a re-pin on a
+                // shrink would send the next growth's `onStick` to the bottom mid-history).
+                if abs(new.height - old.height) > 0.5 { return }
                 let isAway = new.distance > 120
                 away = isAway
                 if isAway {
@@ -3483,10 +3644,16 @@ private struct ComposerField: View {
     let memoDragX: CGFloat
     let cancelDistance: CGFloat
     let prompt: (String) -> String
+    /// ⌫ on an empty field: the chat screen drops its last pending attachment.
+    let onDeleteBackwardEmpty: () -> Void
+    /// Paste menu → image / GIF into pending attachments (mime kept).
+    var onPasteImage: ((Data, String, String) -> Void)? = nil
     let onCancelRecording: () -> Void
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
     let onPrimary: () -> Void
+    /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
@@ -3567,7 +3734,8 @@ private struct ComposerField: View {
                         .opacity(min(1, -memoDragX / cancelDistance))
                 } else {
                     HStack(spacing: 8) {
-                        Circle().fill(theme.danger).frame(width: 8, height: 8)
+                        // The braille spinner, not a red dot (Jacob, 2026-10-27).
+                        WorkingSpinner(size: 8, glyphSize: 11)
                         // Level bars drawn into whatever width is left (newest on the right),
                         // so the recorder row never pushes the composer past the screen edge.
                         Canvas { ctx, size in
@@ -3593,7 +3761,10 @@ private struct ComposerField: View {
                 // chips as attachments; `draft.text` stays the plain `@handle` text.
                 MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                                 placeholder: prompt(draft.text), theme: theme,
-                                agentProject: { model.agent(member: $0, chatId: chatId) })
+                                agentProject: { model.agent(member: $0, chatId: chatId) },
+                                onPasteMedia: onPasteMedia,
+                                onDeleteBackwardEmpty: onDeleteBackwardEmpty,
+                                onPasteImage: onPasteImage)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
