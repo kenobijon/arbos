@@ -5424,12 +5424,22 @@ impl AppState {
     }
 
     /// Fill a person's channel row from the roster: the display name (when the roster has
-    /// one) and the picture (when the row carries none). Returns whether anything changed.
+    /// one), the picture (when the row carries none) and the relay's spelling of the user id
+    /// (the Matrix localpart is lower-case; the disc's gradient is seeded by the id, so a
+    /// bubble and the Members row would otherwise draw two colours for one person). Returns
+    /// whether anything changed.
     fn fill_channel_sender(&self, m: &mut Message) -> bool {
         let Some(p) = self.channel_sender(&m.sender, m.sender_handle.as_deref()) else {
             return false;
         };
         let mut changed = false;
+        if !p.id.is_empty() {
+            let member = format!("user:{}", p.id);
+            if m.sender != member && m.sender.eq_ignore_ascii_case(&member) {
+                m.sender = member;
+                changed = true;
+            }
+        }
         if m.sender_name.as_deref().is_none_or(str::is_empty) {
             if let Some(name) = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
                 m.sender_name = Some(name.to_owned());
@@ -12542,10 +12552,19 @@ mod channel_sender_tests {
             ],
             "Scout by display name, picture from the roster; mine untouched"
         );
-        let mine = state.read_with(cx, |s, _| s.channel_rows[ROOM][1].sender.clone());
+        let senders: Vec<String> = state.read_with(cx, |s, _| {
+            s.channel_rows[ROOM]
+                .iter()
+                .map(|m| m.sender.clone())
+                .collect()
+        });
         assert_eq!(
-            mine, "user:test_01ME",
-            "my member string keeps the relay's case"
+            senders,
+            vec![
+                "user:test_01SCOUT".to_string(),
+                "user:test_01ME".to_string()
+            ],
+            "member strings take the relay's spelling of the id (one disc colour per person)"
         );
         // The bubble's name label comes from `Person::display_name()` of the row's sender.
         let shown = state.read_with(cx, |s, _| {
