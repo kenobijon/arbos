@@ -96,6 +96,9 @@ Register the MCP server (stdio): command `arbos-sidecar`, args `["mcp"]`.
   Claude Code:  claude mcp add arbos -- arbos-sidecar mcp
   Cursor:       .cursor/mcp.json → {"mcpServers":{"arbos":{"command":"arbos-sidecar","args":["mcp"]}}}
   Codex:        codex mcp add arbos -- arbos-sidecar mcp
+                then in ~/.codex/config.toml under [mcp_servers.arbos] add
+                default_tools_approval_mode = "approve"  (codex exec refuses
+                tool calls otherwise: "approval policy is never")
 
 Tools (same verbs exist as `arbos-sidecar <verb>` on the command line):
   arbos_chats {}                                  → your chats
