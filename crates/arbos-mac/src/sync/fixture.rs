@@ -392,7 +392,7 @@ fn emit_link_hook(shared: &Arc<Shared>) {
 }
 
 /// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
-/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// `ARBOS_RIG_FAILURE=toast|toast-repeat|toast-many|composer|delivery|machine|secrets|people` raises that surface's
 /// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
 /// download that timed out, with Try again); `composer` = the opened chat's last own message
 /// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
@@ -430,6 +430,40 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                 .collect()
         };
         match spec.as_str() {
+            // [feedback toast-stack-mac-2026-10-27]: Jacob's shape — the secrets poll failing
+            // with the resolver's words eight times in a row — and five distinct failures for
+            // the "N more" fold.
+            "toast-repeat" | "toast-many" => {
+                let offline = |path: &str| {
+                    anyhow::anyhow!(
+                        "error sending request for url (https://relay.arbos.life{path}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+                    )
+                    .context(format!("GET {path}"))
+                };
+                if spec == "toast-repeat" {
+                    for _ in 0..8 {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify("load your secrets", &offline("/secrets")),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                } else {
+                    for (verb, path) in [
+                        ("load your secrets", "/secrets"),
+                        ("load the voices", "/voices"),
+                        ("download report-q3.pdf", "/blobs/x/report-q3.pdf"),
+                        ("save the secret", "/secrets"),
+                        ("load the devices", "/devices"),
+                    ] {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify(verb, &offline(path)),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
             "toast" => {
                 let raw = anyhow::anyhow!(
                     "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
@@ -1086,7 +1120,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::StartDm { .. }
         | ClientCommand::CreatePeopleGroup { .. }
         | ClientCommand::SetTyping { .. }
-        | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
         | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
@@ -1299,18 +1332,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
             text,
+            attachments,
+            charts,
             forwarded_from,
+            ..
         } => {
+            // No blob store to copy between: the row lands with the same keys,
+            // so its pictures are already cached. A chart travels as its
+            // fallback picture here (the fixture doc writer has no chart parts).
+            let mut attachments = attachments;
+            attachments.extend(charts.into_iter().filter_map(|c| c.fallback));
             send_user(
                 shared,
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                attachments,
                 None,
                 Some(forwarded_from),
                 None,
@@ -1896,6 +1937,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_version: 0,
                 message_grants: Vec::new(),
                 blocked_senders: Vec::new(),
+                my_role: None,
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -3746,7 +3788,21 @@ const LIMA_REPLY: &[&str] = &[
 
 /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
 /// screenshot): seven linked headlines as bullets, then one line of prose.
+/// Jacob's 2026-10-27 bubble (Mac v0.6.296): the URL wrapped as `https:/` | `/treatment-…`
+/// and would not open ([feedback link-click-mac-2026-10-27]).
+const LINK_REPLY: &str = "https://treatment-perfume-marble-tournaments.trycloudflare.com/jacob/competitors.html\n\nI checked it from outside and it loads. No zip or file card needed.";
+
 const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+/// The chat-formatting sample sheet, my own bubble: one line per format, labelled
+/// ([feedback chat-markdown-mac-2026-10-27]). `ARBOS_FIXTURE_REPLY=markdown`.
+pub const MARKDOWN_SAMPLE_USER: &str = "> quote: a line that starts with \"> \"\n> second quoted line\n>> nested quote inside it\n\nbold: **bold text** · italic: *italic* and _italic_ · strike: ~~gone~~\ninline code: `cargo test -p arbos-core` · spoiler (click): ||the butler did it||\nlink: [Arbos docs](https://docs.arbos.life/formatting) · bare: https://arbos.life/x_y · mention: @sam · emoji: 🎉 👍🏽\n\n# Heading 1\n## Heading 2\n### Heading 3\n\n- bullet one\n- bullet **two**\n* star bullet\n\n1. first\n2. second\n\n```python\ndef hello(name):\n    return f\"hi {name}\"  # fenced, copyable\n```\n\nescapes: \\*not italic\\* \\> not a quote \\`not code\\`";
+
+/// The agent's answer on the sample sheet: the same grammar in a grey bubble.
+pub const MARKDOWN_SAMPLE_REPLY: &str = "> quote: what you sent, quoted back\n> with a second line\n\nEvery format renders the same on both sides: **bold**, *italic*, ~~strike~~, `code`, ||spoiler||, [a named link](https://docs.arbos.life/formatting) and https://arbos.life/x_y.\n\n## Heading 2 in a reply\n\n- list item with `code`\n- and a [link](https://arbos.life)\n\n1. numbered\n2. list\n\n```rust\nlet quoted = parse_blocks(\"> hello\");\n```\n\nMath stays math: $O(n^2)$, and prices stay prices: $5 and $10.";
+
+/// The must-not-mangle lines: plain text the grammar must leave exactly as typed.
+pub const MARKDOWN_SAMPLE_PLAIN: &str = "plain, must not change:\nsnake_case_word __init__ some_var_name\n2*3*4 = 24 and 5 * 3 = 15\nhttps://example.com/some_path_with_underscores\njacob_s@example.com\n>5 means more than five · a > b · lone > here\n<b>html</b> stays <i>text</i>\n#hashtag #1 fan C++ C# 100%\n** not bold ** · a*b · trailing* · *leading";
 
 /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
 /// byte for byte: a Python code card, then prose whose `$O(n^2)$` showed its dollars and
@@ -5041,6 +5097,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -5078,6 +5135,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -5115,6 +5173,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -5747,6 +5806,36 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(NYPOST_REPLY)],
+                );
+            }
+            // `ARBOS_FIXTURE_REPLY=link`: Jacob's competitors-page turn — a bare URL
+            // long enough to wrap, then a line of prose ([feedback link-click-mac-2026-10-27]).
+            Ok("link") => {
+                s.user("Where is the competitors page?");
+                s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(LINK_REPLY)]);
+            }
+            // `ARBOS_FIXTURE_REPLY=markdown`: the chat-formatting sample sheet — every
+            // format in my own bubble, the agent's answer with the same, then the
+            // must-not-mangle lines ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("markdown") => {
+                s.user(MARKDOWN_SAMPLE_USER);
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(MARKDOWN_SAMPLE_REPLY)],
+                );
+                s.user(MARKDOWN_SAMPLE_PLAIN);
+            }
+            // `ARBOS_FIXTURE_REPLY=quote`: Jacob's report — "> hello" typed in the
+            // composer, and the agent quoting it back ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("quote") => {
+                s.user("> hello\nthat is what the quote looks like now");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(
+                        "> hello\n\nYes — a `> ` line is a quote: inset, muted, with the bar. **Bold**, *italic*, ~~strike~~ and ||spoilers|| work too.",
+                    )],
                 );
             }
             // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
@@ -6408,6 +6497,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_version: 0,
         message_grants: Vec::new(),
         blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -6473,6 +6563,20 @@ fn launch_week() -> Project {
     space.icon = "L".into();
     space.people = members;
     space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
+    // `ARBOS_FIXTURE_GROUP_ROLE=member|admin` (screenshot rig, [feedback
+    // group-settings-mac-2026-10-27]): I am that in "Launch week" and Sam owns it, so the
+    // pane can be shot as a plain member (no crayon, no name field) without a second account.
+    if let Ok(role) = std::env::var("ARBOS_FIXTURE_GROUP_ROLE") {
+        let role = role.trim().to_lowercase();
+        if role == "member" || role == "admin" {
+            if let Some(sam) = space.people.first_mut() {
+                sam.role = "owner".into();
+                space.owner_handle = Some(sam.handle.clone());
+            }
+            space.my_role = Some(role);
+        }
+    }
     space
 }
 
@@ -6518,6 +6622,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -6876,6 +6981,25 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     }
     insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
+    // Scout's photo (Jacob, 2026-10-27, [feedback forward-attachments-mac-2026-10-27]): an
+    // agent's picture-only message in a group right before its words — it must carry the
+    // same disc and name as the bubble under it.
+    let mut agent_picture = human_message(GROUP_LAUNCH, &sam(), "", base + 358_000);
+    agent_picture.role = Role::Assistant;
+    agent_picture.sender = format!("agent:{PROJECT_ARBOS}");
+    agent_picture.sender_name = Some("Arbos".into());
+    agent_picture.sender_handle = Some("arbos".into());
+    agent_picture.sender_avatar = None;
+    agent_picture.asked_by_handle = Some("sam".into());
+    agent_picture.owner_handle = Some(ME_HANDLE.into());
+    agent_picture.parts = vec![attachment(
+        "slide-04-signups.png",
+        "image/png",
+        AttachmentKind::Image,
+        "Slide 4 · signups",
+        212_000,
+    )];
+    insert_message_via_core(&group, &agent_picture);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -7434,6 +7558,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
+            space.my_role = Some("owner".into());
             shared.projects.lock().unwrap().push(space);
             shared.chats.lock().unwrap().push(Chat {
                 id: id.clone(),
@@ -7458,51 +7583,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::SetTyping { .. } => true,
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let agent = {
-                let projects = shared.projects.lock().unwrap();
-                projects
-                    .iter()
-                    .find(|p| p.id == *project_id && !p.is_people())
-                    .map(|p| AgentMember {
-                        project_id: p.id.clone(),
-                        name: p.name.clone(),
-                        icon: p.icon.clone(),
-                        color: p.color.clone(),
-                        handle: Project::mention_slug(&p.name),
-                        owner_id: ME_ID.into(),
-                        owner_handle: ME_HANDLE.into(),
-                        reply_policy: ReplyPolicy::Mention,
-                        avatar: p.avatar.clone(),
-                        avatar_color: p.avatar_color.clone(),
-                        avatar_color_index: p.avatar_color_index,
-                        avatar_leaf: p.avatar_leaf,
-                        avatar_leaf_color: p.avatar_leaf_color,
-                        image_url: None,
-                        avatar_version: 0,
-                        description: None,
-                        model: None,
-                        owner: None,
-                    })
-            };
-            if let Some(agent) = agent {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    if !space
-                        .agents
-                        .iter()
-                        .any(|a| a.project_id == agent.project_id)
-                    {
-                        space.agents.push(agent);
-                    }
-                }
-            }
-            emit_projects(shared);
-            true
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
@@ -8292,6 +8372,7 @@ mod seed_parity_tests {
         ("01J9GROUPLAUNCH00000000000", &[
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image] hidden=[] text=0 r=0 dt=58000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=112 r=0 dt=90000 ct=Some(0)",

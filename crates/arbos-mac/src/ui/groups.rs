@@ -3,7 +3,7 @@
 //! header with its picker. Everything here is pure rendering over `AppState`; the shell owns
 //! the open/closed state of the picker.
 
-use gpui::{div, prelude::*, px, Div, Hsla};
+use gpui::{div, prelude::*, px, Div};
 
 use crate::app::AppState;
 use crate::model::{Chat, ChatKind, Project};
@@ -30,18 +30,6 @@ pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> D
                     .object_fit(gpui::ObjectFit::Cover),
             ),
         None => crate::ui::avatars::project(space, size, theme), // avatar-lint: allow (group picture)
-    }
-}
-
-/// `#rrggbb` → colour; anything else falls back.
-pub fn project_color(hex: &str, fallback: Hsla) -> Hsla {
-    let h = hex.trim().trim_start_matches('#');
-    if h.len() != 6 {
-        return fallback;
-    }
-    match u32::from_str_radix(h, 16) {
-        Ok(v) => gpui::rgb(v).into(),
-        Err(_) => fallback,
     }
 }
 
