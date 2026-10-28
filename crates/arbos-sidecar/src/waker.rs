@@ -18,6 +18,38 @@ use crate::config::{expand_home, read_secret_line, WakerConfig, WakerKind};
 use crate::mirror::{now_ms, Mirror, WakeCandidate};
 use crate::redact;
 
+/// Why a delivery failed, and whether trying again makes sense. A timeout is not retried: the
+/// agent process may have done the work already (Buzz #2175, L20) — the next event re-arms.
+#[derive(Debug)]
+pub struct DeliverError {
+    pub message: String,
+    pub retry: bool,
+}
+
+impl std::fmt::Display for DeliverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DeliverError {}
+
+/// Marker inside an `anyhow::Error` for failures that must not be retried.
+#[derive(Debug)]
+struct NoRetry(String);
+
+impl std::fmt::Display for NoRetry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoRetry {}
+
+fn no_retry(message: String) -> anyhow::Error {
+    anyhow::Error::new(NoRetry(message))
+}
+
 /// How the nudge leaves the sidecar.
 #[derive(Clone)]
 pub enum Plugin {
@@ -85,8 +117,24 @@ impl Plugin {
         }
     }
 
-    /// Deliver one nudge. `Ok(status)` = delivered; `Err` = not delivered.
-    pub async fn deliver(&self, nudge: &Value) -> Result<String> {
+    /// Deliver one nudge. `Ok(status)` = delivered; `Err` = not delivered (with a retry flag).
+    pub async fn deliver(&self, nudge: &Value) -> std::result::Result<String, DeliverError> {
+        match self.deliver_inner(nudge).await {
+            Ok(s) => Ok(s),
+            Err(e) => match e.downcast_ref::<NoRetry>() {
+                Some(n) => Err(DeliverError {
+                    message: n.0.clone(),
+                    retry: false,
+                }),
+                None => Err(DeliverError {
+                    message: format!("{e:#}"),
+                    retry: true,
+                }),
+            },
+        }
+    }
+
+    async fn deliver_inner(&self, nudge: &Value) -> Result<String> {
         match self {
             Self::Webhook {
                 url_file,
@@ -127,6 +175,10 @@ impl Plugin {
                 let status = resp.status();
                 if status.is_success() {
                     Ok(status.as_u16().to_string())
+                } else if status.is_client_error() && status.as_u16() != 429 {
+                    // A 4xx other than 429 is deterministic (bad URL, bad auth): retrying is spend
+                    // with no hope (Buzz #2422, L22).
+                    Err(no_retry(format!("webhook answered {status}")))
                 } else {
                     Err(anyhow!("webhook answered {status}"))
                 }
@@ -206,7 +258,10 @@ impl Plugin {
                                 nix::sys::signal::Signal::SIGKILL,
                             );
                         }
-                        Err(anyhow!("command timed out after {} s", timeout.as_secs()))
+                        Err(no_retry(format!(
+                            "command timed out after {} s (killed with its process group; not retried — the agent may have answered already)",
+                            timeout.as_secs()
+                        )))
                     }
                 }
             }
@@ -226,7 +281,7 @@ impl Plugin {
             Self::Channel(tx) => {
                 if let Some(tx) = tx {
                     tx.send(nudge.clone())
-                        .map_err(|_| anyhow!("channel closed"))?;
+                        .map_err(|_| no_retry("channel closed".into()))?;
                 }
                 Ok("noop".into())
             }
@@ -295,6 +350,14 @@ pub enum Skip {
     AgentCooldown,
 }
 
+/// What the daemon tells the engine.
+pub enum Signal {
+    /// A row (or membership change) that asks the agent to act.
+    Event(WakeCandidate),
+    /// The agent signalled "done": it posted, replied, reacted or marked a chat answered.
+    Done,
+}
+
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(5)];
 const RETRY_LAST: Duration = Duration::from_secs(30);
 const BREAKER_WINDOW: Duration = Duration::from_secs(60);
@@ -303,13 +366,32 @@ const BREAKER_THRESHOLD: usize = 3;
 const AGENT_COOLDOWN: Duration = Duration::from_secs(600);
 const SLOW_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Result of one delivery task: the nudge it carried, the outcome, and the attempt count.
+type DeliveryOutcome = (Value, std::result::Result<String, DeliverError>, u32);
+
+/// The nudge scheduler (spec §4, Jacob 16:32 UTC "sub-second first response, no flurry"):
+///
+/// - **Leading edge.** The first event with nothing in flight and no turn open fires at once.
+/// - **Mid-turn.** While a nudge is being delivered, or the agent is in the turn it started
+///   (no `Done` yet, less than `max_wait` since the nudge), new events only mark `dirty`.
+/// - **Trailing.** When the agent says `Done` — or `max_wait` (5 s) passes without it — one
+///   trailing nudge goes out if `dirty`, never sooner than `floor` (2 s) after the last one.
+///
+/// A burst of N messages therefore costs at most two wakes; `arbos_pending` carries the batch.
 pub struct Engine {
     cfg: WakerConfig,
     plugin: Plugin,
     mirror: Mirror,
     agent: Value,
     pending: BTreeMap<String, PendingChat>,
-    window_deadline: Option<Instant>,
+    /// Events arrived since the last nudge went out.
+    dirty: bool,
+    last_sent: Option<Instant>,
+    /// The agent finished the turn the last nudge started.
+    done: bool,
+    delivery: Option<tokio::task::JoinHandle<DeliveryOutcome>>,
+    /// When to look again (floor, max wait, slow interval or breaker).
+    deadline: Option<Instant>,
     sent: VecDeque<Instant>,
     failures: VecDeque<Instant>,
     open_until: Option<Instant>,
@@ -325,13 +407,25 @@ impl Engine {
             mirror,
             agent,
             pending: BTreeMap::new(),
-            window_deadline: None,
+            dirty: false,
+            last_sent: None,
+            done: true,
+            delivery: None,
+            deadline: None,
             sent: VecDeque::new(),
             failures: VecDeque::new(),
             open_until: None,
             half_open: false,
             agent_sender_last: HashMap::new(),
         }
+    }
+
+    fn floor(&self) -> Duration {
+        Duration::from_secs(self.cfg.floor_s)
+    }
+
+    fn max_wait(&self) -> Duration {
+        Duration::from_secs(self.cfg.debounce_s.max(self.cfg.floor_s))
     }
 
     /// Queue a candidate for the next nudge, or say why not.
@@ -369,14 +463,12 @@ impl Engine {
         p.last_at = c.ts;
         p.events.push(c.event_id);
         p.reason = c.reason;
-        if self.window_deadline.is_none() {
-            self.window_deadline = Some(now + Duration::from_secs(self.cfg.debounce_s));
-        }
+        self.dirty = true;
         Ok(())
     }
 
-    fn build_nudge(&self) -> Value {
-        let mut chats: Vec<(&String, &PendingChat)> = self.pending.iter().collect();
+    fn build_nudge(pending: &BTreeMap<String, PendingChat>, agent: &Value) -> Value {
+        let mut chats: Vec<(&String, &PendingChat)> = pending.iter().collect();
         chats.sort_by_key(|a| std::cmp::Reverse(a.1.last_at));
         let events: Vec<i64> = chats.iter().flat_map(|(_, p)| p.events.clone()).collect();
         let first = chats.first().map(|(id, _)| id.as_str()).unwrap_or("");
@@ -384,7 +476,7 @@ impl Engine {
             "type": "wake",
             "v": 1,
             "at": now_ms(),
-            "agent": self.agent,
+            "agent": agent,
             "chats": chats.iter().map(|(id, p)| json!({
                 "id": id, "kind": p.kind, "title": p.title, "pending": p.count,
                 "last_from": p.last_from, "last_at": p.last_at, "reason": p.reason,
@@ -454,83 +546,159 @@ impl Engine {
         }
     }
 
-    /// The window closed: send one nudge for everything pending, with retries.
-    async fn fire(&mut self) {
-        let now = Instant::now();
-        self.window_deadline = None;
-        if self.pending.is_empty() {
-            return;
-        }
-        // Rate cap (Buzz L16): past the hourly cap, one nudge per 5 min.
-        let n = self.sent_last_hour(now);
-        if n as u32 >= self.cfg.max_nudges_per_hour {
-            if let Some(last) = self.sent.back() {
-                let since = now.duration_since(*last);
-                if since < SLOW_INTERVAL {
-                    tracing::warn!(sent_last_hour = n, "nudge rate cap reached — slowing down");
-                    self.window_deadline = Some(*last + SLOW_INTERVAL);
-                    return;
-                }
-            }
-        }
-        let nudge = self.build_nudge();
-        if !self.breaker_allows(now) {
-            self.record(&nudge, false, "skipped", Some("circuit_open"), 0);
-            // Keep pending; try again when the circuit half-opens.
-            self.window_deadline = self.open_until;
-            return;
-        }
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
-            match self.plugin.deliver(&nudge).await {
-                Ok(status) => {
-                    self.record(&nudge, true, &status, None, attempt);
-                    self.sent.push_back(Instant::now());
-                    self.half_open = false;
-                    self.failures.clear();
-                    self.pending.clear();
-                    tracing::info!(attempt, status = %status, "nudge delivered");
-                    return;
-                }
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    tracing::warn!(attempt, error = %redact::redact(&msg), "nudge not delivered");
-                    if attempt <= RETRY_DELAYS.len() as u32 {
-                        tokio::time::sleep(RETRY_DELAYS[attempt as usize - 1]).await;
-                        continue;
-                    }
-                    if attempt == RETRY_DELAYS.len() as u32 + 1 {
-                        tokio::time::sleep(RETRY_LAST).await;
-                        continue;
-                    }
-                    self.record(&nudge, false, "failed", Some(&msg), attempt);
-                    self.record_failure(Instant::now());
-                    // Pending stays; the next event re-arms the window.
-                    return;
-                }
-            }
-        }
+    fn arm(&mut self, at: Instant) {
+        self.deadline = Some(match self.deadline {
+            Some(d) if d <= at => d,
+            _ => at,
+        });
     }
 
-    /// Drive the engine until the candidate channel closes.
-    pub async fn run(mut self, mut rx: mpsc::UnboundedReceiver<WakeCandidate>) {
-        loop {
-            let deadline = self.window_deadline;
-            tokio::select! {
-                c = rx.recv() => match c {
-                    Some(c) => {
-                        if let Err(skip) = self.offer(c) {
-                            tracing::debug!(?skip, "wake candidate skipped");
+    /// Fire now if the rules allow; otherwise arm the deadline for the earliest moment they may.
+    fn try_fire(&mut self) {
+        self.deadline = None;
+        if self.pending.is_empty() || self.delivery.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = self.last_sent {
+            let since = now.duration_since(last);
+            // Floor between nudges.
+            if since < self.floor() {
+                self.arm(last + self.floor());
+                return;
+            }
+            // The agent is still in the turn the last nudge started.
+            if !self.done && since < self.max_wait() {
+                self.arm(last + self.max_wait());
+                return;
+            }
+            // Rate cap (Buzz L16): past the hourly cap, one nudge per 5 min.
+            let n = self.sent_last_hour(now);
+            if n as u32 >= self.cfg.max_nudges_per_hour && since < SLOW_INTERVAL {
+                tracing::warn!(sent_last_hour = n, "nudge rate cap reached — slowing down");
+                self.arm(last + SLOW_INTERVAL);
+                return;
+            }
+        }
+        if !self.breaker_allows(now) {
+            let nudge = Self::build_nudge(&self.pending, &self.agent);
+            self.record(&nudge, false, "skipped", Some("circuit_open"), 0);
+            if let Some(until) = self.open_until {
+                self.arm(until);
+            }
+            return;
+        }
+        let batch = std::mem::take(&mut self.pending);
+        let nudge = Self::build_nudge(&batch, &self.agent);
+        self.dirty = false;
+        self.done = false;
+        self.last_sent = Some(now);
+        let plugin = self.plugin.clone();
+        self.delivery = Some(tokio::spawn(async move {
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                match plugin.deliver(&nudge).await {
+                    Ok(status) => return (nudge, Ok(status), attempt),
+                    Err(e) if !e.retry => return (nudge, Err(e), attempt),
+                    Err(e) => {
+                        tracing::warn!(attempt, error = %redact::redact(&e.message), "nudge not delivered");
+                        if attempt <= RETRY_DELAYS.len() as u32 {
+                            tokio::time::sleep(RETRY_DELAYS[attempt as usize - 1]).await;
+                        } else if attempt == RETRY_DELAYS.len() as u32 + 1 {
+                            tokio::time::sleep(RETRY_LAST).await;
+                        } else {
+                            return (nudge, Err(e), attempt);
                         }
                     }
+                }
+            }
+        }));
+        // Whatever happens, look again when the turn window closes.
+        self.arm(now + self.max_wait());
+    }
+
+    fn on_delivered(&mut self, outcome: DeliveryOutcome) {
+        let (nudge, result, attempt) = outcome;
+        self.delivery = None;
+        match result {
+            Ok(status) => {
+                self.record(&nudge, true, &status, None, attempt);
+                self.sent.push_back(Instant::now());
+                self.half_open = false;
+                self.failures.clear();
+                tracing::info!(attempt, status = %status, "nudge delivered");
+                // A command waker's exit *is* the end of the agent's turn.
+                if matches!(self.plugin, Plugin::Command { .. }) {
+                    self.done = true;
+                }
+            }
+            Err(e) => {
+                self.record(&nudge, false, "failed", Some(&e.message), attempt);
+                self.record_failure(Instant::now());
+                // Put the batch back so the next event (or the next look) carries it.
+                for c in nudge["chats"].as_array().into_iter().flatten() {
+                    let id = c["id"].as_str().unwrap_or("").to_owned();
+                    let p = self.pending.entry(id).or_default();
+                    p.title = c["title"].as_str().unwrap_or("").to_owned();
+                    p.kind = c["kind"].as_str().unwrap_or("").to_owned();
+                    p.count += c["pending"].as_i64().unwrap_or(1);
+                    p.last_from = c["last_from"].clone();
+                    p.last_at = c["last_at"].as_i64().unwrap_or(0);
+                    p.reason = if c["reason"] == "member.added" {
+                        "member.added"
+                    } else {
+                        "message"
+                    };
+                }
+                for e in nudge["events"].as_array().into_iter().flatten() {
+                    if let (Some(id), Some((_, p))) = (e.as_i64(), self.pending.iter_mut().next()) {
+                        p.events.push(id);
+                    }
+                }
+                self.dirty = true;
+                self.done = true;
+            }
+        }
+        self.try_fire();
+    }
+
+    /// Drive the engine until the signal channel closes.
+    pub async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Signal>) {
+        loop {
+            let deadline = self.deadline;
+            tokio::select! {
+                sig = rx.recv() => match sig {
+                    Some(Signal::Event(c)) => {
+                        match self.offer(c) {
+                            Ok(()) => self.try_fire(),
+                            Err(skip) => tracing::debug!(?skip, "wake candidate skipped"),
+                        }
+                    }
+                    Some(Signal::Done) => {
+                        self.done = true;
+                        self.try_fire();
+                    }
                     None => {
-                        if !self.pending.is_empty() { self.fire().await; }
+                        if let Some(h) = self.delivery.take() {
+                            if let Ok(o) = h.await { self.on_delivered(o); }
+                        }
                         return;
                     }
                 },
+                outcome = async { match self.delivery.as_mut() { Some(h) => h.await, None => std::future::pending().await } } => {
+                    match outcome {
+                        Ok(o) => self.on_delivered(o),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "delivery task failed");
+                            self.delivery = None;
+                            self.done = true;
+                            self.try_fire();
+                        }
+                    }
+                }
                 _ = async { match deadline { Some(d) => tokio::time::sleep_until(d).await, None => std::future::pending().await } } => {
-                    self.fire().await;
+                    self.try_fire();
                 }
             }
         }
@@ -546,9 +714,9 @@ impl Engine {
         let r = self.plugin.deliver(&nudge).await;
         match &r {
             Ok(s) => self.record(&nudge, true, s, None, 1),
-            Err(e) => self.record(&nudge, false, "failed", Some(&format!("{e:#}")), 1),
+            Err(e) => self.record(&nudge, false, "failed", Some(&e.message), 1),
         }
-        r
+        r.map_err(|e| anyhow!("{}", e.message))
     }
 }
 
@@ -586,23 +754,169 @@ mod tests {
         (dir, e, rx)
     }
 
-    /// Buzz L4/L5: many events in one window → one nudge listing every chat and count.
+    fn drain(out: &mut mpsc::UnboundedReceiver<Value>) -> Vec<Value> {
+        let mut v = Vec::new();
+        while let Ok(n) = out.try_recv() {
+            v.push(n);
+        }
+        v
+    }
+
+    /// Jacob 16:32: an isolated mention reaches the webhook in well under a second (real clock,
+    /// real HTTP, in-process catcher).
+    #[tokio::test]
+    async fn isolated_mention_reaches_webhook_under_one_second() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (hit_tx, mut hit_rx) = mpsc::unbounded_channel::<std::time::Instant>();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let at = std::time::Instant::now();
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+                let _ = hit_tx.send(at);
+            }
+        });
+        let (_d, m) = temp_mirror();
+        let e = Engine::new(
+            WakerConfig::default(),
+            Plugin::Webhook {
+                url_file: None,
+                auth_file: None,
+                url: Some(format!("http://127.0.0.1:{port}/hook")),
+            },
+            m,
+            json!({ "id": "a1" }),
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let h = tokio::spawn(e.run(rx));
+        let t0 = std::time::Instant::now();
+        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        let at = tokio::time::timeout(Duration::from_secs(1), hit_rx.recv())
+            .await
+            .expect("webhook hit within 1 s")
+            .unwrap();
+        let latency = at.duration_since(t0);
+        eprintln!("event → webhook latency: {latency:?}");
+        assert!(latency < Duration::from_millis(1000), "{latency:?}");
+        drop(tx);
+        h.await.unwrap();
+    }
+
+    /// Jacob 16:32: a 20-message burst gives exactly two nudges — the first at once, one
+    /// trailing nudge carrying the other 19 once the turn window closes.
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_twenty_gives_exactly_two_nudges() {
+        let (_d, e, mut out) = engine(WakerConfig::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let h = tokio::spawn(e.run(rx));
+        for i in 0..20 {
+            tx.send(Signal::Event(cand("c1", i, false))).unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let first = drain(&mut out);
+        assert_eq!(first.len(), 1, "leading nudge only");
+        assert_eq!(first[0]["chats"][0]["pending"], 1);
+        // No done signal: the trailing nudge waits for the 5 s window, not a second longer.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let trailing = drain(&mut out);
+        assert_eq!(trailing.len(), 1, "one trailing nudge");
+        assert_eq!(trailing[0]["chats"][0]["pending"], 19);
+        assert_eq!(trailing[0]["events"].as_array().unwrap().len(), 19);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert!(drain(&mut out).is_empty(), "nothing else");
+        drop(tx);
+        h.await.unwrap();
+    }
+
+    /// Jacob 16:32: messages that arrive while the agent is mid-turn only mark dirty; when the
+    /// agent says done (after the 2 s floor) exactly one trailing nudge follows.
+    #[tokio::test(start_paused = true)]
+    async fn burst_during_turn_gives_one_trailing_nudge_after_done() {
+        let (_d, e, mut out) = engine(WakerConfig::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let h = tokio::spawn(e.run(rx));
+        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(drain(&mut out).len(), 1, "leading");
+        // Mid-turn burst across two chats.
+        for i in 2..12 {
+            tx.send(Signal::Event(cand(
+                if i % 2 == 0 { "c1" } else { "c2" },
+                i,
+                false,
+            )))
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(drain(&mut out).is_empty(), "no per-message nudges mid-turn");
+        // The agent finishes at ~3 s (past the 2 s floor): one trailing nudge, at once.
+        tokio::time::sleep(Duration::from_millis(1900)).await;
+        tx.send(Signal::Done).unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let trailing = drain(&mut out);
+        assert_eq!(trailing.len(), 1);
+        assert_eq!(trailing[0]["chats"].as_array().unwrap().len(), 2);
+        assert_eq!(trailing[0]["events"].as_array().unwrap().len(), 10);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(drain(&mut out).is_empty());
+        drop(tx);
+        h.await.unwrap();
+    }
+
+    /// Done before the floor: the trailing nudge waits until 2 s after the last one.
+    #[tokio::test(start_paused = true)]
+    async fn done_inside_floor_waits_for_the_floor() {
+        let (_d, e, mut out) = engine(WakerConfig::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let h = tokio::spawn(e.run(rx));
+        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(drain(&mut out).len(), 1);
+        tx.send(Signal::Event(cand("c1", 2, false))).unwrap();
+        tx.send(Signal::Done).unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(drain(&mut out).is_empty(), "inside the floor");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(drain(&mut out).len(), 1, "at the floor");
+        drop(tx);
+        h.await.unwrap();
+    }
+
+    /// Buzz L4/L5: an offline catch-up of 1 000 events still costs at most two nudges.
     #[tokio::test(start_paused = true)]
     async fn catch_up_after_offline_is_one_nudge() {
         let (_d, e, mut out) = engine(WakerConfig::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
         for i in 0..1000 {
-            tx.send(cand(if i % 2 == 0 { "c1" } else { "c2" }, i, false))
-                .unwrap();
+            tx.send(Signal::Event(cand(
+                if i % 2 == 0 { "c1" } else { "c2" },
+                i,
+                false,
+            )))
+            .unwrap();
         }
         tokio::time::sleep(Duration::from_secs(6)).await;
-        let n = out.recv().await.unwrap();
-        assert_eq!(n["chats"].as_array().unwrap().len(), 2);
-        assert_eq!(n["chats"][0]["pending"], 500);
-        assert_eq!(n["events"].as_array().unwrap().len(), 1000);
-        assert!(n["read"].as_str().unwrap().contains("arbos_read_chat"));
-        assert!(out.try_recv().is_err());
+        let nudges = drain(&mut out);
+        assert!(nudges.len() <= 2, "{}", nudges.len());
+        let total: usize = nudges
+            .iter()
+            .map(|n| n["events"].as_array().unwrap().len())
+            .sum();
+        assert_eq!(total, 1000);
+        assert!(nudges[0]["read"]
+            .as_str()
+            .unwrap()
+            .contains("arbos_read_chat"));
         drop(tx);
         h.await.unwrap();
     }
@@ -621,7 +935,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_sidecar_sends_no_nudge() {
         let (_d, e, mut out) = engine(WakerConfig::default());
-        let (tx, rx) = mpsc::unbounded_channel::<WakeCandidate>();
+        let (tx, rx) = mpsc::unbounded_channel::<Signal>();
         let h = tokio::spawn(e.run(rx));
         tokio::time::sleep(Duration::from_secs(600)).await;
         assert!(out.try_recv().is_err());
@@ -637,42 +951,16 @@ mod tests {
         assert_eq!(e.offer(cand("c1", 2, true)), Err(Skip::AgentCooldown));
         tokio::time::sleep(Duration::from_secs(601)).await;
         assert!(e.offer(cand("c1", 3, true)).is_ok());
-        // Three agent rows in a row in the mirror → no nudge even after the cooldown.
         for i in 0..3 {
             let mut ev = received(10 + i, "c2", &format!("m{i}"), "ping", true);
             ev["message"]["from"] = json!({ "kind": "agent", "id": "other", "name": "Other bot" });
             e.mirror.apply_event(&ev).unwrap();
         }
         assert_eq!(e.offer(cand("c2", 20, true)), Err(Skip::AgentLoop));
-        // A human breaks the run.
         e.mirror
             .apply_event(&received(30, "c2", "m30", "hey bot", true))
             .unwrap();
         assert!(e.offer(cand("c2", 30, true)).is_ok());
-    }
-
-    /// Buzz L5: events arriving while a nudge is being delivered are not lost; they ride the
-    /// next window.
-    #[tokio::test(start_paused = true)]
-    async fn events_during_in_flight_nudge_join_next_window() {
-        let (_d, e, mut out) = engine(WakerConfig {
-            debounce_s: 5,
-            ..Default::default()
-        });
-        let (tx, rx) = mpsc::unbounded_channel();
-        let h = tokio::spawn(e.run(rx));
-        tx.send(cand("c1", 1, false)).unwrap();
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        let first = out.recv().await.unwrap();
-        assert_eq!(first["chats"][0]["pending"], 1);
-        tx.send(cand("c1", 2, false)).unwrap();
-        tx.send(cand("c3", 3, false)).unwrap();
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        let second = out.recv().await.unwrap();
-        assert_eq!(second["chats"].as_array().unwrap().len(), 2);
-        assert_eq!(second["events"].as_array().unwrap().len(), 2);
-        drop(tx);
-        h.await.unwrap();
     }
 
     /// Buzz L16: past the hourly cap, nudges coalesce to one per 5 min; nothing is lost.
@@ -680,49 +968,47 @@ mod tests {
     async fn nudge_rate_cap_coalesces() {
         let (_d, e, mut out) = engine(WakerConfig {
             max_nudges_per_hour: 2,
-            debounce_s: 1,
             ..Default::default()
         });
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
         for i in 0..2 {
-            tx.send(cand("c1", i, false)).unwrap();
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            out.recv().await.unwrap();
+            tx.send(Signal::Event(cand("c1", i, false))).unwrap();
+            tx.send(Signal::Done).unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert_eq!(drain(&mut out).len(), 1);
         }
-        tx.send(cand("c1", 10, false)).unwrap();
+        tx.send(Signal::Event(cand("c1", 10, false))).unwrap();
         tokio::time::sleep(Duration::from_secs(60)).await;
-        assert!(out.try_recv().is_err(), "capped");
-        tx.send(cand("c1", 11, false)).unwrap();
+        assert!(drain(&mut out).is_empty(), "capped");
+        tx.send(Signal::Event(cand("c1", 11, false))).unwrap();
         tokio::time::sleep(Duration::from_secs(300)).await;
-        let n = out.recv().await.unwrap();
-        assert_eq!(n["events"].as_array().unwrap().len(), 2);
+        let n = drain(&mut out);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0]["events"].as_array().unwrap().len(), 2);
         drop(tx);
         h.await.unwrap();
     }
 
-    /// Buzz L7: three attempts (1 s, 5 s, 30 s) then the failure is recorded and the next event
-    /// re-arms the window.
+    /// Buzz L7: three attempts (1 s, 5 s, 30 s) then the failure is recorded and the batch is
+    /// kept for the next event.
     #[tokio::test(start_paused = true)]
     async fn waker_retries_three_times_then_rearms() {
-        let (dir, m) = temp_mirror();
+        let (_d, m) = temp_mirror();
         let bad = Plugin::Webhook {
             url_file: None,
             auth_file: None,
             url: Some("http://127.0.0.1:9/never".into()),
         };
         let e = Engine::new(
-            WakerConfig {
-                debounce_s: 1,
-                ..Default::default()
-            },
+            WakerConfig::default(),
             bad,
             m.clone(),
             json!({ "id": "a1" }),
         );
         let (tx, rx) = mpsc::unbounded_channel();
         let h = tokio::spawn(e.run(rx));
-        tx.send(cand("c1", 1, false)).unwrap();
+        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
         tokio::time::sleep(Duration::from_secs(60)).await;
         let last = m.last_wake().unwrap();
         assert_eq!(last["ok"], false);
@@ -730,7 +1016,6 @@ mod tests {
         assert_eq!(last["status"], "failed");
         drop(tx);
         h.await.unwrap();
-        drop(dir);
     }
 
     /// Buzz L17: three failed nudges in a minute open the circuit for five minutes; one probe
@@ -756,8 +1041,8 @@ mod tests {
         assert!(!e.breaker_allows(now + BREAKER_OPEN + Duration::from_secs(3)));
     }
 
-    /// Buzz L6: a hung command waker is killed after `timeout_s` with its process group and the
-    /// next event nudges again.
+    /// Buzz L6/L20: a hung command waker is killed after `timeout_s` with its process group; a
+    /// timeout is never retried.
     #[tokio::test]
     async fn stuck_command_waker_is_killed_and_rearmed() {
         let p = Plugin::Command {
@@ -770,7 +1055,48 @@ mod tests {
         let r = p.deliver(&json!({ "chats": [], "agent": {} })).await;
         assert!(r.is_err());
         assert!(t.elapsed() < Duration::from_secs(5));
-        assert!(format!("{:#}", r.unwrap_err()).contains("timed out"));
+        let err = r.unwrap_err();
+        assert!(err.message.contains("timed out"));
+        assert!(!err.retry, "a timeout is never retried");
+    }
+
+    /// Buzz #8033 / #8586 (L19): a nudge that fails for good is recorded, and the rows stay
+    /// visible in `pending` — nothing is silently discarded.
+    #[tokio::test(start_paused = true)]
+    async fn failed_nudge_keeps_pending_visible() {
+        let (_d, m) = temp_mirror();
+        m.apply_event(&received(1, "c1", "m1", "@bot hi", true))
+            .unwrap();
+        let (tx_dead, rx_dead) = mpsc::unbounded_channel::<Value>();
+        drop(rx_dead);
+        let e = Engine::new(
+            WakerConfig::default(),
+            Plugin::Channel(Some(tx_dead)),
+            m.clone(),
+            json!({ "id": "a1" }),
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let h = tokio::spawn(e.run(rx));
+        tx.send(Signal::Event(cand("c1", 1, false))).unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let last = m.last_wake().unwrap();
+        assert_eq!(last["ok"], false);
+        assert_eq!(last["attempt"], 1, "a non-retryable failure is not retried");
+        assert_eq!(m.pending(i64::MAX).len(), 1, "the row is still pending");
+        drop(tx);
+        h.await.unwrap();
+    }
+
+    /// Buzz #5327 (L25): event kinds the sidecar does not know never wake anyone.
+    #[test]
+    fn unknown_event_types_never_wake() {
+        let (_d, m) = temp_mirror();
+        for ty in ["typing", "presence.heartbeat", "reaction", "x.vendor.thing"] {
+            let ev = json!({ "id": 5, "type": ty, "ts": now_ms(),
+                "chat": { "id": "c1", "kind": "group", "title": "T" }, "wake": true });
+            assert!(m.apply_event(&ev).unwrap().is_none(), "{ty}");
+        }
+        assert!(m.rows("c1").is_empty());
     }
 
     /// Buzz L13: the key is never on argv and never in the child's environment.

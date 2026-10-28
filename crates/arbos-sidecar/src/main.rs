@@ -300,6 +300,7 @@ async fn status(paths: &Paths) -> Result<()> {
         "agent": me.as_ref().map(|v| v["agent"].clone()).unwrap_or(state.agent),
         "scopes": me.as_ref().map(|v| v["scopes"].clone()).unwrap_or(Value::Null),
         "cursor": state.cursor,
+        "last_event_at": if state.updated > 0 { Some(state.updated) } else { None },
         "chats": chats.len(),
         "rows": chats.iter().map(|c| m.rows(&c.id).len()).sum::<usize>(),
         "pending": m.pending(waker.stale_wake_s as i64 * 1000).len(),

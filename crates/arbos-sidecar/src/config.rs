@@ -139,8 +139,12 @@ pub struct WakerConfig {
     /// File: where nudges are appended (default `wakes.jsonl` in the data dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Longest the trailing nudge waits for the agent's "done" signal (the turn window).
     #[serde(default = "default_debounce_s")]
     pub debounce_s: u64,
+    /// Shortest gap between two nudges.
+    #[serde(default = "default_floor_s")]
+    pub floor_s: u64,
     #[serde(default = "default_max_nudges_per_hour")]
     pub max_nudges_per_hour: u32,
     #[serde(default = "default_stale_wake_s")]
@@ -148,7 +152,8 @@ pub struct WakerConfig {
 }
 
 fn default_timeout_s() -> u64 {
-    600
+    // A whole agent turn can run this long (Buzz raised its idle cap 300 → 1 500 s, L6).
+    1800
 }
 fn default_env_allow() -> Vec<String> {
     [
@@ -157,6 +162,9 @@ fn default_env_allow() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+fn default_floor_s() -> u64 {
+    2
 }
 fn default_debounce_s() -> u64 {
     5
@@ -181,6 +189,7 @@ impl Default for WakerConfig {
             env_allow: default_env_allow(),
             path: None,
             debounce_s: default_debounce_s(),
+            floor_s: default_floor_s(),
             max_nudges_per_hour: default_max_nudges_per_hour(),
             stale_wake_s: default_stale_wake_s(),
         }
@@ -436,9 +445,10 @@ mod tests {
         assert_eq!(back.relay, "https://relay.example");
         assert_eq!(back.waker.kind, WakerKind::Webhook);
         assert_eq!(back.waker.debounce_s, 5);
+        assert_eq!(back.waker.floor_s, 2);
         assert_eq!(back.waker.max_nudges_per_hour, 60);
         assert_eq!(back.waker.stale_wake_s, 21_600);
-        assert_eq!(back.waker.timeout_s, 600);
+        assert_eq!(back.waker.timeout_s, 1800);
         assert_eq!(back.mirror.backfill, 200);
         assert!(!back.waker.env_allow.iter().any(|e| e.starts_with("ARBOS")));
     }

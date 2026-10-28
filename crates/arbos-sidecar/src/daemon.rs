@@ -13,9 +13,9 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::config::{Config, Paths, EXIT_ALREADY_RUNNING, EXIT_KEY_REJECTED};
-use crate::mirror::{history_row, now_ms, Mirror, State, WakeCandidate};
+use crate::mirror::{history_row, now_ms, Mirror, State};
 use crate::relay::{Relay, RelayError};
-use crate::waker::{Engine, Plugin};
+use crate::waker::{Engine, Plugin, Signal};
 
 /// Backoff ladder after a failed relay call (Buzz L3: short ladder, reset after a stable minute).
 const BACKOFF: [u64; 6] = [1, 2, 4, 8, 16, 30];
@@ -57,7 +57,7 @@ pub fn apply_page(
     mirror: &Mirror,
     state: &mut State,
     page: &crate::relay::InboxPage,
-    wake_tx: &mpsc::UnboundedSender<WakeCandidate>,
+    wake_tx: &mpsc::UnboundedSender<Signal>,
 ) -> Result<usize> {
     let mut applied = 0;
     for e in &page.events {
@@ -67,7 +67,7 @@ pub fn apply_page(
         }
         match mirror.apply_event(e) {
             Ok(Some(c)) => {
-                let _ = wake_tx.send(c);
+                let _ = wake_tx.send(Signal::Event(c));
             }
             Ok(None) => {}
             Err(err) => tracing::warn!(event = id, error = %err, "event not mirrored"),
@@ -87,7 +87,7 @@ pub async fn poll_loop<S: Source>(
     source: &S,
     mirror: &Mirror,
     mut state: State,
-    wake_tx: mpsc::UnboundedSender<WakeCandidate>,
+    wake_tx: mpsc::UnboundedSender<Signal>,
     mut stop: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<State> {
     let mut step = 0usize;
@@ -198,7 +198,13 @@ async fn backfill(relay: &Relay, mirror: &Mirror, cfg: &Config, me: &Value) {
 // ---- control socket -------------------------------------------------------------------------------
 
 /// Answer one control request. Actions carry no key; this process holds it.
-pub async fn handle_control(relay: &Relay, mirror: &Mirror, cfg: &Config, req: &Value) -> Value {
+pub async fn handle_control(
+    relay: &Relay,
+    mirror: &Mirror,
+    cfg: &Config,
+    signal: Option<&mpsc::UnboundedSender<Signal>>,
+    req: &Value,
+) -> Value {
     let op = req["op"].as_str().unwrap_or("");
     let s = |k: &str| req[k].as_str().unwrap_or("").to_owned();
     let result: crate::relay::RelayResult<Value> = match op {
@@ -216,18 +222,27 @@ pub async fn handle_control(relay: &Relay, mirror: &Mirror, cfg: &Config, req: &
                     let head = mirror.state().cursor;
                     let _ = mirror.mark_answered(&chat, head);
                     let _ = mirror.refresh_brief(&chat);
+                    if let Some(tx) = signal {
+                        let _ = tx.send(Signal::Done);
+                    }
                     Ok(v)
                 }
                 Err(e) => Err(e),
             }
         }
         "react" => {
-            relay
+            let r = relay
                 .event(json!({
                     "type": "message.react", "chat": s("chat"), "message": s("message"),
                     "emoji": s("emoji"), "on": req["on"].as_bool().unwrap_or(true),
                 }))
-                .await
+                .await;
+            if r.is_ok() {
+                if let Some(tx) = signal {
+                    let _ = tx.send(Signal::Done);
+                }
+            }
+            r
         }
         "typing" => {
             relay
@@ -280,6 +295,9 @@ pub async fn handle_control(relay: &Relay, mirror: &Mirror, cfg: &Config, req: &
             let chat = s("chat");
             let head = mirror.state().cursor;
             let _ = mirror.mark_answered(&chat, head);
+            if let Some(tx) = signal {
+                let _ = tx.send(Signal::Done);
+            }
             Ok(json!({ "ok": true }))
         }
         _ => Err(RelayError::Other(anyhow::anyhow!("unknown op {op:?}"))),
@@ -302,12 +320,19 @@ pub async fn handle_control(relay: &Relay, mirror: &Mirror, cfg: &Config, req: &
     }
 }
 
-async fn serve_control(listener: UnixListener, relay: Relay, mirror: Mirror, cfg: Config) {
+async fn serve_control(
+    listener: UnixListener,
+    relay: Relay,
+    mirror: Mirror,
+    cfg: Config,
+    signal: mpsc::UnboundedSender<Signal>,
+) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
-        let (relay, mirror, cfg) = (relay.clone(), mirror.clone(), cfg.clone());
+        let (relay, mirror, cfg, signal) =
+            (relay.clone(), mirror.clone(), cfg.clone(), signal.clone());
         tokio::spawn(async move {
             let (r, mut w) = stream.into_split();
             let mut lines = BufReader::new(r).lines();
@@ -319,7 +344,7 @@ async fn serve_control(listener: UnixListener, relay: Relay, mirror: Mirror, cfg
                 let resp = if req["op"] == "bad" {
                     json!({ "ok": false, "error": "bad_json", "message": req["error"] })
                 } else {
-                    handle_control(&relay, &mirror, &cfg, &req).await
+                    handle_control(&relay, &mirror, &cfg, Some(&signal), &req).await
                 };
                 let mut out = resp.to_string();
                 out.push('\n');
@@ -385,6 +410,17 @@ pub async fn run(paths: Paths, cfg: Config) -> Result<i32> {
     backfill(&relay, &mirror, &cfg, &me).await;
 
     let plugin = Plugin::from_config(&cfg.waker, paths.wakes_file())?;
+    // The env contract for spawned agents is explicit and logged — names only (Buzz #8452, L24).
+    if let Plugin::Command {
+        env_allow, argv, ..
+    } = &plugin
+    {
+        tracing::info!(
+            command = %argv.first().cloned().unwrap_or_default(),
+            env_forwarded = %env_allow.join(","),
+            "command waker: ARBOS_* is never forwarded; the nudge arrives on stdin and in {{prompt}}/{{json}}"
+        );
+    }
     let engine = Engine::new(cfg.waker.clone(), plugin, mirror.clone(), agent.clone());
     let (wake_tx, wake_rx) = mpsc::unbounded_channel();
     tokio::spawn(engine.run(wake_rx));
@@ -393,6 +429,7 @@ pub async fn run(paths: Paths, cfg: Config) -> Result<i32> {
         relay.clone(),
         mirror.clone(),
         cfg.clone(),
+        wake_tx.clone(),
     ));
     let hb_relay = relay.clone();
     tokio::spawn(async move {
