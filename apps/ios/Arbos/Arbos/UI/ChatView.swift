@@ -3575,6 +3575,8 @@ private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     var onStick: () -> Void
+    /// The finger (or its deceleration) is moving the scroll view right now.
+    @State private var userDriven = false
 
     private struct Sample: Equatable {
         var height: CGFloat
@@ -3583,44 +3585,51 @@ private struct AwayFromBottomReporter: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: Sample.self) { g in
-                Sample(
-                    height: g.contentSize.height,
-                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
-                )
-            } action: { old, new in
-                let grew = new.height > old.height + 0.5
-                #if DEBUG
-                PerfDriveProbe.lastScrollGeometry = Date()
-                if SendTrace.recent {
-                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
-                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
-                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
-                }
-                #endif
-                if grew {
-                    if pinned {
-                        away = false
-                        onStick()
-                    } else {
-                        // Keep history put; distance may dip from layout / bottom anchor.
-                        away = true
+            content
+                // Only the reader's own scrolling decides whether they are at the bottom. Lazy
+                // rows (#2149) change the content height as rows are measured — up and down,
+                // during a flick and after it as pictures arrive — and a geometry sample alone
+                // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
+                // was pulled back down by the next growth, every time).
+                .onScrollPhaseChange { _, phase in
+                    switch phase {
+                    case .tracking, .interacting, .decelerating: userDriven = true
+                    case .idle, .animating: userDriven = false
+                    @unknown default: userDriven = false
                     }
-                    return
                 }
-                // Lazy rows: the content height is an estimate that is corrected as rows are
-                // measured, down as well as up. A sample where the height changed says nothing
-                // about where the reader is; only an unchanged height may re-pin (a re-pin on a
-                // shrink would send the next growth's `onStick` to the bottom mid-history).
-                if abs(new.height - old.height) > 0.5 { return }
-                let isAway = new.distance > 120
-                away = isAway
-                if isAway {
-                    pinned = false
-                } else {
-                    pinned = true
+                .onScrollGeometryChange(for: Sample.self) { g in
+                    Sample(
+                        height: g.contentSize.height,
+                        distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                    )
+                } action: { old, new in
+                    let grew = new.height > old.height + 0.5
+                    #if DEBUG
+                    PerfDriveProbe.lastScrollGeometry = Date()
+                    if SendTrace.recent {
+                        SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
+                        // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                        if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
+                    }
+                    #endif
+                    if userDriven {
+                        let isAway = new.distance > 120
+                        away = isAway
+                        pinned = !isAway
+                        return
+                    }
+                    // Content or layout moved, not the reader: a growth while pinned (a new or
+                    // streaming row) re-sticks to the end; while away it stays put.
+                    if grew {
+                        if pinned {
+                            away = false
+                            onStick()
+                        } else {
+                            away = true
+                        }
+                    }
                 }
-            }
         } else {
             content
         }
