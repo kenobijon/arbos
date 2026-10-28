@@ -45,6 +45,7 @@ mod migrate;
 mod moderation;
 mod notices;
 mod notify;
+mod outside;
 mod people;
 mod proxy;
 mod push;
@@ -333,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
+        decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
@@ -406,6 +408,7 @@ async fn main() -> anyhow::Result<()> {
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
+    outside::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     images::spawn_health_probe(state.clone());
     matrix::worker::spawn(state.clone());
@@ -580,6 +583,19 @@ async fn main() -> anyhow::Result<()> {
             post(notify::register_push).delete(notify::unregister_push),
         )
         .route("/chats/{id}/notify", post(notify::notify_people_chat))
+        // Outside agents (#2140): owner side …
+        .route("/outside-agents", get(outside::list).post(outside::create))
+        .route(
+            "/outside-agents/{id}",
+            get(outside::get).delete(outside::revoke),
+        )
+        .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        // … and the agent side (bearer arbk_ key).
+        .route("/asp/me", get(outside::me))
+        .route("/asp/inbox", get(outside::inbox))
+        .route("/asp/events", post(outside::events))
+        .route("/asp/socket", get(outside::socket))
+        .route("/asp/connect/{id}", get(outside::connect_page))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
@@ -639,6 +655,14 @@ async fn main() -> anyhow::Result<()> {
             post(people::member_unban),
         )
         .route("/box/people/{id}", get(people::box_people_chat))
+        .route(
+            "/box/people/{id}/gate",
+            post(room_health::post_gate_decision),
+        )
+        .route(
+            "/admin/room-health/{id}",
+            get(room_health::admin_room_health),
+        )
         .route(
             "/projects/{id}/members",
             get(people::project_members_list).post(people::project_member_add),
@@ -1007,7 +1031,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
         .with_state(state.clone());
