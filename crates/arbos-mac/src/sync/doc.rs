@@ -206,6 +206,7 @@ mod core_writer_tests {
                         mime: "image/jpeg".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-42".into()),
+                        url: None,
                         source: None,
                     }],
                     reply_to: Some("original".into()),
