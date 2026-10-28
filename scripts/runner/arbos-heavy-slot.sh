@@ -247,7 +247,11 @@ acquire() {
     # Rigs: queue order first (P0 rigs ahead, then FIFO by wait start), then the gate / fair-share rules.
     local my_turn=1
     if ! is_exempt_name "$name" && rig_ahead_of_me "$$" "$t0" "$name"; then my_turn=0; fi
-    if (( n < limit )) && (( my_turn )) && { (( self_due )) || { ! release_due && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; }; }; then
+    # P0 rigs (04:13 Oct 28, coordinator: outside-agents shots for Jacob's 14:00 deadline gave up after 1200 s
+    # behind queued gate halves) do not yield to a QUEUED gate half — the P0 class means "first in line", not
+    # "first among rigs"; a running half is never preempted, and a due release still goes first.
+    local p0=0; ! is_exempt_name "$name" && is_p0_rig "$name" && p0=1
+    if (( n < limit )) && (( my_turn )) && { (( self_due )) || { ! release_due && { is_gate_name "$name" || (( p0 )) || ! gate_waiting || (( fair )); }; }; }; then
       slot="$SLOTS_DIR/$(date +%s)-$$-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then
         echo "$owner" > "$slot/pid"; echo "$name" > "$slot/name"; date -u +%s > "$slot/since"
@@ -269,7 +273,9 @@ acquire() {
         fi
       fi
     fi
-    if [[ -n "$runner_cmd" ]] && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
+    # A P0 rig is not requeued either: the requeue copy only puts the same series at the back of the runner
+    # (and the author's script runs on uncapped when the acquire exits 75 — cmd-outside-agents-02, 04:07).
+    if [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
       local again orig; orig="${runner_cmd%.running}"; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${orig%.sh}").sh"
       if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
         echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
