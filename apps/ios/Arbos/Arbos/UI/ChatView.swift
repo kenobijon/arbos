@@ -973,7 +973,10 @@ struct ChatSession: View {
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
                                                 hasReplies: row.replyCount > 0,
-                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil),
+                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil,
+                                                // Reply in DM only in people groups — not in a
+                                                // DM or 1:1 agent chat you're already in (#1871).
+                                                inPrivateChat: people?.isGroup != true),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
