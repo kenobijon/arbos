@@ -960,15 +960,16 @@ keyboard open.
 | Item | Rule (pt / alpha) | Code |
 | --- | --- | --- |
 | Layer | one layer at the canvas's bottom, over the content, under the controls — the page colour masked by a ramp; the bar has no background of its own | `BottomBarFadeView`, the canvas `.overlay(alignment: .bottom)` in `ChatView` / `HomeView` |
-| Ramp | clear **28** above the bar's top edge → **0.3** at that edge → **0.5** at the controls' bottom edge → **0.8** at the screen's (or keyboard's) edge; never 1 — no band, no hard edge; readable over every control (≤ **0.6**) | `BottomBarFade.fade / edgeWash / controlsWash / bottomWash / readableMax`, `.chat` / `.home` |
-| Controls | glass pills on Glass (Liquid Glass on iOS 26, frost before; the Search-in-chat bar's light `field` tint so a placeholder reads), the field colour on Matte; sizes are the control family's | `ControlSurface`, `HeaderGlassBackground`, `GlassCircle` |
+| Ramp | clear **28** above the bar's top edge → **0.25** at that edge → **0.4** at the controls' bottom edge → **0.75** at the screen's (or keyboard's) edge (0.3 / 0.5 / 0.8 until the pills became clear glass); never 1 — no band, no hard edge; readable over every control (≤ **0.6**) | `BottomBarFade.fade / edgeWash / controlsWash / bottomWash / readableMax`, `.chat` / `.home` |
+| Controls | **real, clear glass on Glass** (Jacob 2026-10-28, [feedback iphone-composer-glass-2026-10-28]: "Grok chat is actual transparent glass. Ours isn't."): Liquid Glass `.clear` on iOS 26, plain `.ultraThinMaterial` before — no fill, no `field` tint, no wash of ours on the pill, so the text reads through it with only the system's frost; the `+` disc and the field in the chat, the search capsule on Home; Home's `+` takes the chat header's glass. Matte: the field colour. Sizes are the control family's | `ChatHeaderGlass.pillGlass`, `ControlSurface`, `HeaderGlassBackground(clear:)` |
 | Lists | the last row / result at rest sits above the fade: transcript tail = Home's trailing clear row = the fade | `Theme.transcriptTail`, `HomeChrome.listBottom` |
 | Keyboard | the keyboard is the bar's safe area: the layer ends on it and moves with it | `BottomBarFadeView` (GeometryReader reads the inset) |
 | System edge effect | none under the bar on iOS 26+ (`scrollEdgeEffectHidden(for: .bottom)`): one fade, ours | `NoBottomScrollEdgeEffect` |
 
-Pinned by `ArbosTests/BottomBarFadeTests`. Record: project store
-`internal/feedback-loop/iphone-composer-see-through-2026-10-28.md`, shots in
-`media/feedback/iphone-composer-fade/`.
+Pinned by `ArbosTests/BottomBarFadeTests` and `PillGlassTests`. Records: project store
+`internal/feedback-loop/iphone-composer-see-through-2026-10-28.md` and
+`iphone-composer-glass-2026-10-28.md`, shots in `media/feedback/iphone-composer-fade/` and
+`media/feedback/iphone-composer-glass/`.
 
 ### iPhone Home: the bars float over the list, rows fade out under them (Jacob 2026-10-28, [feedback iphone-home-bar-fades-2026-10-28])
 
