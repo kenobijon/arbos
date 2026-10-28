@@ -35,11 +35,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, Bounds, Context, Div, ElementId, Focusable as _, Pixels, SharedString,
+    div, prelude::*, px, App, Bounds, Context, Div, ElementId, Focusable as _, Pixels, SharedString,
 };
 
 use crate::model::Id;
-use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
@@ -97,13 +96,9 @@ pub(crate) mod metrics {
     /// The hover tip: 28 tall, 8 right of the rail's edge.
     pub const TIP_HEIGHT: f32 = 28.0;
     pub const TIP_GAP: f32 = 8.0;
-    /// Badge discs at the picture's bottom-right corner (`ui::badge`): the
-    /// unread dot in a 2 pt ring of the tile's colour, the typing dot at the
-    /// footer dot's size.
-    pub const UNREAD_DOT: f32 = 8.0;
-    #[cfg(test)]
-    pub const UNREAD_RING: f32 = UNREAD_DOT + 2.0 * crate::ui::badge::RING_WIDTH;
-    pub const TYPING_DOT: f32 = 9.0;
+    // Badges at the picture's bottom-right corner (`tile_badge` through
+    // `ui::marks::corner`): the working spinner in a ring of the tile's colour,
+    // or the unread count pill (`ui::marks`) — never a coloured dot.
 }
 
 /// Whether the chat header draws the sidebar toggle this frame: only for the
@@ -120,17 +115,17 @@ pub(crate) fn header_toggle_shown(sidebar_hidden: bool, sidebar_visible: f32) ->
 /// The one badge spot at a rail picture's bottom-right corner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RailBadge {
-    /// Someone is typing in the chat: the green presence dot (pulsing).
-    Typing,
-    /// Unread messages: Grok's blue dot. Never on the selected row.
+    /// The space's agent is working: the braille spinner in a ring.
+    Working,
+    /// Unread messages: the count pill. Never on the selected row.
     Unread,
 }
 
 /// Typing wins over unread — the rows' own rule (`!typing && unread` for the
 /// accent dot); the selected chat shows no unread dot.
-pub(crate) fn badge(typing: bool, unread: bool, selected: bool) -> Option<RailBadge> {
-    if typing {
-        Some(RailBadge::Typing)
+pub(crate) fn badge(working: bool, unread: bool, selected: bool) -> Option<RailBadge> {
+    if working {
+        Some(RailBadge::Working)
     } else if unread && !selected {
         Some(RailBadge::Unread)
     } else {
@@ -226,17 +221,26 @@ pub(crate) fn lights_frame() -> Bounds<Pixels> {
     )
 }
 
-/// A tile's badge for `ui::badge::badged`: the typing pulse at the footer
-/// dot's size, the smaller unread dot; `ring` is the tile's fill.
-fn tile_badge(badge: RailBadge, ring: gpui::Hsla, theme: &Theme, phase: f32) -> badge::Badge {
-    let (dot, color) = match badge {
-        RailBadge::Typing => (
-            metrics::TYPING_DOT,
-            Theme::with_alpha(theme.online, 0.35 + 0.65 * phase),
-        ),
-        RailBadge::Unread => (metrics::UNREAD_DOT, theme.accent),
-    };
-    badge::Badge::new(color, ring).dot_size(dot)
+/// A tile's badge for `ui::marks::corner` (Jacob, 2026-10-27: never a coloured
+/// dot): the braille spinner in a ring of the tile's colour while the space's
+/// agent works, the unread count pill otherwise. `ring` is the tile's fill.
+fn tile_badge(
+    badge: RailBadge,
+    unread_count: usize,
+    ring: gpui::Hsla,
+    theme: &Theme,
+    cx: &mut App,
+) -> Div {
+    match badge {
+        RailBadge::Working => crate::ui::marks::ring_disc(
+            crate::ui::marks::corner_metrics(metrics::AVATAR).ring,
+            ring,
+        )
+        .child(crate::ui::working::glyph(theme, cx)),
+        RailBadge::Unread => crate::ui::marks::unread_pill(unread_count, theme)
+            .border_2()
+            .border_color(ring),
+    }
 }
 
 /// One of the rail's three discs with the strip's own handlers.
@@ -285,10 +289,6 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
     let theme = Theme::of(cx).clone();
     let entries = sidebar::list_entries(shell, cx);
     let machine = shell.state.read(cx).machine.shown_state();
-    let phase = crate::ui::motion::PulseClock::phase(cx, 900);
-    if entries.iter().any(ListEntry::typing) {
-        crate::ui::motion::PulseClock::request(cx);
-    }
 
     let mut column = div()
         .id("sidebar-rail")
@@ -332,7 +332,8 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         let id = entry.id().clone();
         let selected = entry.selected();
         let is_hover = hovered.as_ref() == Some(&id);
-        let badge = badge(entry.typing(), entry.unread(), selected);
+        let badge = badge(entry.working(), entry.unread(), selected);
+        let unread_count = entry.unread_count();
         // The highlight token's selected / hover steps (`ui::highlight`); the
         // tile is its own pill (Grok's 54 pt, radius 12), hover tracked here
         // because the name tip beside the rail follows it.
@@ -365,11 +366,17 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
                 el.debug_selector(|| "rail-first-tile".into())
             })
             .child(
-                badge::badged(
-                    metrics::AVATAR,
-                    picture,
-                    badge.map(|b| tile_badge(b, ring, &theme, phase)),
-                )
+                match badge {
+                    // The badge in front of the picture, in its own paint layer
+                    // (`ui::marks::corner`); the bare picture keeps the same box.
+                    Some(b) => crate::ui::marks::corner(
+                        metrics::AVATAR,
+                        picture,
+                        tile_badge(b, unread_count, ring, &theme, cx),
+                        crate::ui::marks::CORNER_OVERHANG,
+                    ),
+                    None => crate::ui::marks::plain(metrics::AVATAR, picture),
+                }
                 .when(index == 0, |el| {
                     el.debug_selector(|| "rail-first-picture".into())
                 }),
@@ -684,7 +691,6 @@ mod tests {
         pub const TILE: f32 = 54.0;
         pub const PITCH: f32 = 58.0;
         pub const USER_CENTRE_FROM_BOTTOM: f32 = 31.0;
-        pub const UNREAD_DOT: f32 = 8.0;
     }
 
     /// The measurement table: rail 84 (Grok 83.5 + the hairline), pictures
@@ -725,10 +731,6 @@ mod tests {
         assert_eq!(centre_from_bottom, CONTROL_LINE);
         assert!((centre_from_bottom - grok::USER_CENTRE_FROM_BOTTOM).abs() <= 1.0);
         assert_eq!(FOOTER_HEIGHT, HEADER_HEIGHT);
-        assert_eq!(UNREAD_DOT, grok::UNREAD_DOT);
-        assert_eq!(UNREAD_RING, 12.0);
-        assert_eq!(TYPING_DOT, super::super::sidebar::FOOTER_DOT);
-        assert_eq!(TYPING_DOT, crate::ui::badge::metrics(AVATAR).dot);
     }
 
     /// Jacob's 1720 × 1079 window (Grok's rail-2 shot) holds 14 pictures
@@ -860,12 +862,12 @@ mod tests {
         assert!(!header_toggle_shown(true, 200.0), "still leaving the band");
     }
 
-    /// One badge spot: typing (green) beats unread (blue); the selected chat
-    /// shows no unread dot.
+    /// One badge spot: the working spinner beats the unread pill; the selected
+    /// chat shows no unread pill. No typing badge (never a coloured dot).
     #[test]
-    fn typing_beats_unread_on_the_one_badge_spot() {
-        assert_eq!(badge(true, true, false), Some(RailBadge::Typing));
-        assert_eq!(badge(true, false, true), Some(RailBadge::Typing));
+    fn working_beats_unread_on_the_one_badge_spot() {
+        assert_eq!(badge(true, true, false), Some(RailBadge::Working));
+        assert_eq!(badge(true, false, true), Some(RailBadge::Working));
         assert_eq!(badge(false, true, false), Some(RailBadge::Unread));
         assert_eq!(badge(false, true, true), None);
         assert_eq!(badge(false, false, false), None);

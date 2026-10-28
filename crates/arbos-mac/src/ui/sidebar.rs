@@ -32,7 +32,6 @@ use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
-use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
@@ -177,8 +176,9 @@ pub(crate) const FOOTER_ROW_HEIGHT: f32 = 44.0;
 pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FOOTER_AVATAR) / 2.0;
 /// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
 /// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
-/// bottom-right edge — drawn by `ui::badge` from the avatar's size; the
-/// numbers stay here as the measured pins.
+/// bottom-right edge.
+/// Measured pins; the mark's ring is drawn from `marks::corner_metrics(FOOTER_AVATAR)`
+/// (the same 9 / 13 / 2) — the numbers stay here for the footer tests.
 #[cfg(test)]
 pub(crate) const FOOTER_DOT: f32 = 9.0;
 #[cfg(test)]
@@ -238,7 +238,6 @@ pub(crate) fn footer_frame(row: impl IntoElement, disc: Option<impl IntoElement>
 pub(crate) fn footer_row_frame() -> gpui::Stateful<Div> {
     div()
         .id("sidebar-account")
-        .group(FOOTER_GROUP)
         .flex_1()
         .min_w_0()
         .h(px(FOOTER_ROW_HEIGHT))
@@ -533,22 +532,13 @@ pub fn stamp_label(ms: u64) -> String {
     }
 }
 
-pub fn machine_dot(state: MachineState, theme: &Theme) -> gpui::Hsla {
-    match state {
-        MachineState::Awake => theme.online,
-        MachineState::Waking => theme.warn,
-        MachineState::Error => theme.danger,
-        MachineState::Asleep | MachineState::Stopped | MachineState::Unknown => theme.text_faint,
-    }
-}
-
 /// My picture with the machine dot — the footer's 36 pt disc, drawn the same
 /// at the foot of the expanded list and of the collapsed rail.
 pub(crate) fn account_avatar(
     shell: &Shell,
     machine: MachineState,
     theme: &Theme,
-    cx: &Context<Shell>,
+    cx: &mut Context<Shell>,
 ) -> Div {
     let state = shell.state.read(cx);
     let picture = match state.account.as_ref() {
@@ -579,32 +569,29 @@ pub(crate) fn account_avatar(
             .justify_center()
             .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
     };
-    // The dot in front of the picture, ringed in the footer's colour — the
-    // sidebar at rest, the card fill while the footer row is under the
-    // pointer (`ui::badge`; the footer row is the hover group).
-    let dot = Theme::with_alpha(
-        machine_dot(machine, theme),
-        if machine == MachineState::Waking {
-            0.4 + 0.6 * PulseClock::phase(cx, 1100)
-        } else {
-            1.0
-        },
-    );
-    let badge = badge::Badge::new(dot, badge::ring::sidebar(theme))
-        .hover(FOOTER_GROUP, badge::ring::hovered(theme));
-    badge::badged(FOOTER_AVATAR, picture, Some(badge))
-        .debug_selector(|| "sidebar-account-avatar".into())
+    // The machine mark in front of the picture (`ui::marks::machine_corner`, its
+    // own paint layer), ringed in the sidebar colour. Never a coloured dot
+    // (Jacob, 2026-10-27): the spinner while the machine wakes, the red `!` on a
+    // fault, nothing at rest — then the bare picture in the same box.
+    crate::ui::marks::machine_corner(
+        FOOTER_AVATAR,
+        picture,
+        machine,
+        theme.sidebar,
+        |ring| ring.debug_selector(|| "dot-ring".into()),
+        theme,
+        cx,
+    )
+    .debug_selector(|| "sidebar-account-avatar".into())
 }
-
-/// The footer row's hover group: the ring under my machine dot follows the
-/// row's hover fill.
-pub(crate) const FOOTER_GROUP: &str = "sidebar-footer";
 
 pub(crate) struct RowView {
     pub(crate) space: Project,
     pub(crate) selected: bool,
     pub(crate) streaming: bool,
     pub(crate) unread: bool,
+    /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
+    pub(crate) unread_count: usize,
     pub(crate) typing: bool,
     pub(crate) preview: String,
     pub(crate) time: String,
@@ -618,6 +605,7 @@ pub(crate) struct ServerRowView {
     pub(crate) server: ServerInfo,
     pub(crate) selected: bool,
     pub(crate) unread: bool,
+    pub(crate) unread_count: usize,
     pub(crate) preview: String,
     pub(crate) time: String,
 }
@@ -651,9 +639,17 @@ impl ListEntry {
         }
     }
 
-    pub(crate) fn typing(&self) -> bool {
+    pub(crate) fn unread_count(&self) -> usize {
         match self {
-            ListEntry::Chat(r) => r.typing,
+            ListEntry::Chat(r) => r.unread_count,
+            ListEntry::Server(r) => r.unread_count,
+        }
+    }
+
+    /// The space's agent is working (the rail's spinner badge).
+    pub(crate) fn working(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.streaming,
             ListEntry::Server(_) => false,
         }
     }
@@ -715,6 +711,7 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
+                unread_count: state.space_row(s).map_or(0, |r| r.unread as usize),
                 preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
@@ -745,6 +742,11 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             selected: selected.as_deref() == Some(p.id.as_str()),
             streaming,
             unread: state.project_unread(&p.id) > 0,
+            unread_count: state
+                .visible_tabs(&p.id)
+                .iter()
+                .map(|c| c.missed_count())
+                .sum(),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -793,52 +795,54 @@ fn chat_picture(
     cx: &Context<Shell>,
 ) -> Div {
     let space = &row.space;
-    // Corner badges go through `ui::badge` so they paint in front of the
-    // picture inside the frosted sidebar, ringed in the row's own colour (the
-    // selected card, else the sidebar; the row's hover tint while hovered).
-    let ring = if row.selected {
-        badge::ring::selected(theme)
-    } else {
-        badge::ring::sidebar(theme)
-    };
-    let group = SharedString::from(format!("row-{}", space.id));
-    let hover_ring = if row.selected {
-        badge::ring::selected(theme)
-    } else {
-        badge::ring::hovered(theme)
-    };
     if let Some(person) = space
         .person()
         .filter(|_| space.is_people() && !space.is_people_group())
     {
-        let picture = people::avatar(row.person_image.clone(), person, size, theme);
-        let Some(agent) = space.agents.first() else {
-            return badge::badged(size, picture, None);
-        };
-        // The agent's picture through the shared identity (#1592): the one its bubbles,
-        // the presence row and the member list show — uploaded picture included.
-        let state = shell.state.read(cx);
-        let a = avatars::member_identity(Some(space), &state.projects, agent);
-        let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-        let mini = div()
-            .p(px(badge::RING_WIDTH))
-            .rounded_full()
-            .bg(ring)
-            // hover-fill: exception badge-ring
-            .group_hover(group, move |s| s.bg(hover_ring))
-            .child(avatars::agent_picture(&a, image, size / 2.0, theme));
-        return badge::corner(size, picture, mini, 3.0);
+        let mut pic = div()
+            .relative()
+            .size(px(size))
+            .flex_shrink_0()
+            .child(people::avatar(
+                row.person_image.clone(),
+                person,
+                size,
+                theme,
+            ));
+        if let Some(agent) = space.agents.first() {
+            // The agent's picture through the shared identity (#1592): the one its bubbles,
+            // the presence row and the member list show — uploaded picture included.
+            let state = shell.state.read(cx);
+            let a = avatars::member_identity(Some(space), &state.projects, agent);
+            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
+            pic = pic.child(
+                div()
+                    .absolute()
+                    .right(px(-3.0))
+                    .bottom(px(-3.0))
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(theme.bg)
+                    .child(avatars::agent_picture(&a, image, size / 2.0, theme)),
+            );
+        }
+        return pic;
     }
-    let picture = groups::picture(space, shell.state.read(cx), size, theme);
-    if row.guests.is_empty() {
-        return badge::badged(size, picture, None);
+    let mut pic = div()
+        .relative()
+        .size(px(size))
+        .flex_shrink_0()
+        .child(groups::picture(space, shell.state.read(cx), size, theme));
+    if !row.guests.is_empty() {
+        pic = pic.child(
+            div()
+                .absolute()
+                .right(px(-4.0))
+                .bottom(px(-2.0))
+                .child(people::avatar_stack(&row.guests, 16.0, 2, theme)),
+        );
     }
-    badge::corner(
-        size,
-        picture,
-        people::avatar_stack(&row.guests, 16.0, 2, ring, Some((group, hover_ring)), theme),
-        3.0,
-    )
+    pic
 }
 
 /// "#general · Sam: hi" for a server row: its newest channel's last line.
@@ -1457,6 +1461,7 @@ fn render_server_row(
             server: row.server.clone(),
             selected: row.selected,
             unread: row.unread,
+            unread_count: row.unread_count,
             preview: String::new(),
             time: String::new(),
         }))
@@ -1466,6 +1471,7 @@ fn render_server_row(
         server,
         selected,
         unread,
+        unread_count,
         preview,
         time,
     } = row;
@@ -1568,8 +1574,9 @@ fn render_server_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
+                        // Unread = the count pill, never a dot (Jacob, 2026-10-27).
                         .when(unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                            el.child(crate::ui::marks::unread_pill(unread_count, theme))
                         }),
                 ),
         )
@@ -1752,7 +1759,10 @@ fn server_channels(
                                         .child(preview),
                                 )
                                 .when(unread, |el| {
-                                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                                    el.child(crate::ui::marks::unread_pill(
+                                        room.as_ref().map_or(1, |r| r.unread as usize),
+                                        theme,
+                                    ))
                                 }),
                         ),
                 )
@@ -1876,7 +1886,11 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let mut body = div().flex().flex_col().gap(px(1.0)).child(
         glass::menu_row(
             "channel-menu-archive",
-            if archived { "tray-up" } else { "archive" },
+            if archived {
+                "tray.and.arrow.up"
+            } else {
+                "archivebox"
+            },
             if archived { "Unarchive" } else { "Archive" },
             false,
             &theme,
@@ -1964,6 +1978,7 @@ fn render_row(
         selected,
         streaming,
         unread,
+        unread_count,
         typing,
         preview,
         time,
@@ -1980,15 +1995,10 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    // The typing pulse rides the 30 fps pulse clock as before. A *working* row
-    // asks for nothing here any more: nothing in the row read `avatar_state`
-    // (the tree animation is retired, D79), and that request made every working
-    // row redraw the window at 30 fps for nothing — the spinner has its own
-    // shared 11 fps ticker (`ui::working`).
-    if typing {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 900);
+    // No pulse-clock request from a row any more: the typing pulse is gone
+    // (never a coloured dot — Jacob, 2026-10-27; "typing…" is the preview), and
+    // the old working-row request made the window redraw at 30 fps for nothing.
+    // The spinner has its own shared 11 fps ticker (`ui::working`).
 
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
@@ -2014,8 +2024,6 @@ fn render_row(
             "row-{}",
             space.id
         ))))
-        // The row is a hover group: its corner badge's ring follows the fill.
-        .group(SharedString::from(format!("row-{}", space.id)))
         .flex()
         .items_center()
         .gap(px(identity::ROW_GAP))
@@ -2156,14 +2164,15 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // The status cell under the time (Jacob, 2026-10-27): a
-                        // person typing keeps the green pulse; the braille spinner
-                        // while the chat's agent works (one shared ticker); else the
-                        // unread accent dot; else nothing.
+                        // The status cell under the time (Jacob, 2026-10-27): the
+                        // braille spinner while the chat's agent works (one shared
+                        // ticker); the unread count pill; nothing for a person typing
+                        // (the preview says "typing…") or a quiet read chat. Never a
+                        // coloured dot.
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
+                            unread_count,
                             &id,
-                            phase,
                             theme,
                             cx,
                         )),
@@ -2172,18 +2181,19 @@ fn render_row(
 }
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
-/// [feedback working-braille-spinner-mac-2026-10-27]). One cell, one glyph:
-/// a person typing keeps today's green pulse (the spinner is the *agent's*
-/// working sign, never a human's — coordinator veto 2026-10-27); the spinner
-/// while the chat's agent works; the unread dot otherwise; a quiet read chat
-/// shows nothing.
+/// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
+/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
+/// person typing shows nothing in the cell (the spinner is the *agent's*
+/// working sign, never a human's; the preview reads "typing…"); the spinner
+/// while the chat's agent works; the unread **count pill** otherwise; a quiet
+/// read chat shows nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
-    /// A person is typing: the 7 pt `online` pulse, as before.
+    /// A person is typing: no mark in the cell (the preview carries it).
     Typing,
     /// The chat's agent is working: the braille spinner.
     Working,
-    /// Unread messages: the accent dot.
+    /// Unread messages: the count pill.
     Unread,
     /// Nothing.
     Quiet,
@@ -2191,54 +2201,38 @@ pub enum RowStatus {
 
 impl RowStatus {
     pub fn of(streaming: bool, typing: bool, unread: bool) -> Self {
-        if typing {
-            RowStatus::Typing
-        } else if streaming {
+        // Typing draws nothing, so it never hides the spinner or the pill.
+        if streaming {
             RowStatus::Working
         } else if unread {
             RowStatus::Unread
+        } else if typing {
+            RowStatus::Typing
         } else {
             RowStatus::Quiet
         }
     }
 }
 
-/// The unread dot's diameter — and the spinner cell's width, so both end
-/// flush under the time.
-pub const UNREAD_DOT: f32 = 8.0;
-/// The typing pulse's diameter (unchanged from before the spinner).
-pub const TYPING_DOT: f32 = 7.0;
-
 fn row_status_cell(
     status: RowStatus,
+    unread_count: usize,
     id: &Id,
-    phase: f32,
     theme: &Theme,
     cx: &mut App,
 ) -> Option<AnyElement> {
     match status {
-        RowStatus::Typing => Some(
-            div()
-                .size(px(TYPING_DOT))
-                .rounded_full()
-                .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase))
-                .debug_selector(|| format!("row-status-typing-{id}"))
-                .into_any_element(),
-        ),
+        RowStatus::Typing | RowStatus::Quiet => None,
         RowStatus::Working => Some(
             crate::ui::working::glyph(theme, cx)
                 .debug_selector(|| format!("row-status-working-{id}"))
                 .into_any_element(),
         ),
         RowStatus::Unread => Some(
-            div()
-                .size(px(UNREAD_DOT))
-                .rounded_full()
-                .bg(theme.accent)
+            crate::ui::marks::unread_pill(unread_count, theme)
                 .debug_selector(|| format!("row-status-unread-{id}"))
                 .into_any_element(),
         ),
-        RowStatus::Quiet => None,
     }
 }
 
@@ -2291,7 +2285,11 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         let id = space_id.clone();
         glass::menu_row(
             "row-menu-archive",
-            if archived { "tray-up" } else { "archive" },
+            if archived {
+                "tray.and.arrow.up"
+            } else {
+                "archivebox"
+            },
             if archived { "Unarchive" } else { "Archive" },
             false,
             theme,
@@ -2389,22 +2387,27 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     // on the agent pane. A people row keeps Profile.
     if is_people {
         body = body.child(
-            glass::menu_row("row-menu-profile", "person", "Profile", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let (page, id) = (profile_page.clone(), profile_id.clone());
-                    this.state.update(cx, |s, cx| {
-                        s.select_project(id, cx);
-                        s.open_profile(page, cx);
-                    });
-                }),
-            ),
+            glass::menu_row(
+                "row-menu-profile",
+                "person.crop.circle",
+                "Profile",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let (page, id) = (profile_page.clone(), profile_id.clone());
+                this.state.update(cx, |s, cx| {
+                    s.select_project(id, cx);
+                    s.open_profile(page, cx);
+                });
+            })),
         );
     }
     body = body.child(
         glass::menu_row(
             "row-menu-mute",
-            if muted { "bell" } else { "bell-slash" },
+            if muted { "bell" } else { "bell.slash" },
             if muted { "Unmute" } else { "Mute" },
             false,
             &theme,
@@ -2417,13 +2420,18 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     );
     if can_fork {
         body = body.child(
-            glass::menu_row("row-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
-                }),
-            ),
+            glass::menu_row(
+                "row-menu-fork",
+                "arrow.triangle.branch",
+                "Fork",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let id = fork_id.clone();
+                this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+            })),
         );
     }
     body = body.child(archive_row(&theme, cx));
@@ -2590,7 +2598,7 @@ pub fn chat_menu(
         let rename_id = chat.id.clone();
         let rename_label = title.clone();
         body = body.child(
-            glass::menu_row("chat-menu-rename", "square-pencil", "Rename", false, &theme).on_click(
+            glass::menu_row("chat-menu-rename", "pencil", "Rename", false, &theme).on_click(
                 cx.listener(move |this, _, window, cx| {
                     this.chat_menu = None;
                     this.tab_menu_open = true;
@@ -2601,15 +2609,20 @@ pub fn chat_menu(
     }
     if can_fork {
         body = body.child(
-            glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, window, cx| {
-                    this.chat_menu = None;
-                    this.tab_menu_open = false;
-                    let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.fork_chat(id, cx));
-                    Composer::focus(&this.composer, window, cx);
-                }),
-            ),
+            glass::menu_row(
+                "chat-menu-fork",
+                "arrow.triangle.branch",
+                "Fork",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.chat_menu = None;
+                this.tab_menu_open = false;
+                let id = fork_id.clone();
+                this.state.update(cx, |s, cx| s.fork_chat(id, cx));
+                Composer::focus(&this.composer, window, cx);
+            })),
         );
     }
     if can_delete {
@@ -3020,7 +3033,6 @@ mod footer_tests {
         FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET,
         FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
     };
-    use crate::ui::badge;
     use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
     /// Grok Bot's footer, measured on Jacob's Oct-2026 refs
@@ -3074,14 +3086,14 @@ mod footer_tests {
         );
         assert_eq!(FOOTER_DOT_RING - FOOTER_DOT, 4.0, "2 pt ring");
         assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
-        // The shared badge draws them at exactly these sizes.
-        let m = badge::metrics(FOOTER_AVATAR);
-        assert_eq!(
-            (m.dot, m.ring, m.overhang),
-            (FOOTER_DOT, FOOTER_DOT_RING, FOOTER_DOT_OVERHANG)
-        );
         // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
         assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
+        // The mark's ring is drawn from `marks::corner_metrics`: the same numbers.
+        let m = crate::ui::marks::corner_metrics(FOOTER_AVATAR);
+        assert_eq!(
+            (m.glyph, m.ring, m.overhang),
+            (FOOTER_DOT, FOOTER_DOT_RING, FOOTER_DOT_OVERHANG)
+        );
     }
 
     /// The footer as `render` frames it, laid out for real at the bottom of a
@@ -3097,13 +3109,19 @@ mod footer_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            // The real badge (`ui::badge`), as `account_avatar` draws it.
-            let avatar = badge::badged(
-                FOOTER_AVATAR,
-                div().size(px(FOOTER_AVATAR)).rounded_full(),
-                Some(badge::Badge::new(gpui::green(), gpui::black())),
-            )
-            .debug_selector(|| "avatar".into());
+            let avatar = div()
+                .relative()
+                .size(px(FOOTER_AVATAR))
+                .flex_shrink_0()
+                .debug_selector(|| "avatar".into())
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(-FOOTER_DOT_OVERHANG))
+                        .bottom(px(-FOOTER_DOT_OVERHANG))
+                        .size(px(FOOTER_DOT_RING))
+                        .debug_selector(|| "dot-ring".into()),
+                );
             let row = footer_row_frame()
                 .child(avatar)
                 .child(div().flex_1().min_w_0().child("Jacob Steeves"));
@@ -3143,9 +3161,7 @@ mod footer_tests {
             grok::AVATAR_LINE,
             "avatar centre line"
         );
-        let ring = vcx
-            .debug_bounds(badge::RING_SELECTOR)
-            .expect("dot ring drawn");
+        let ring = vcx.debug_bounds("dot-ring").expect("dot ring drawn");
         let ring_right: f32 = ring.right().into();
         let ring_bottom: f32 = ring.bottom().into();
         assert_eq!(
@@ -3432,10 +3448,11 @@ mod status_cell_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::{RowStatus, UNREAD_DOT};
+    use super::RowStatus;
     use crate::app::AppState;
     use crate::model::{Chat, Message, Person, Project, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::marks::UNREAD_PILL_H;
     use crate::ui::motion::PulseClock;
     use crate::ui::shell::Shell;
     use crate::ui::theme::{Surface, Theme};
@@ -3457,17 +3474,22 @@ mod status_cell_tests {
         }
     }
 
-    /// The rule as code: a person typing keeps the green pulse (the spinner
-    /// is never a human's sign), the agent's spinner beats unread, unread
-    /// beats quiet.
+    /// The rule as code: the agent's spinner beats unread, unread beats a
+    /// person typing (which draws nothing — the spinner is never a human's
+    /// sign), typing beats quiet.
     #[test]
     fn the_cell_shows_one_thing_in_this_order() {
-        assert_eq!(RowStatus::of(false, true, true), RowStatus::Typing);
-        assert_eq!(RowStatus::of(true, true, false), RowStatus::Typing);
+        assert_eq!(RowStatus::of(false, true, false), RowStatus::Typing);
+        assert_eq!(
+            RowStatus::of(false, true, true),
+            RowStatus::Unread,
+            "typing draws nothing, so it hides nothing"
+        );
+        assert_eq!(RowStatus::of(true, true, false), RowStatus::Working);
         assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
         assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
         assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
-        assert_eq!(CELL_W, UNREAD_DOT, "the cell is the dot's width");
+        assert_eq!(CELL_W, 8.0, "the cell is the old dot's width");
     }
 
     fn message(id: &str, chat: &str, role: &str, status: &str, text: &str, at: u64) -> Message {
@@ -3629,20 +3651,24 @@ mod status_cell_tests {
             "under the time, not beside it"
         );
 
-        let dot = vcx
+        let pill = vcx
             .debug_bounds("row-status-unread-unread")
-            .expect("the unread agent's row keeps its dot");
-        assert_eq!(f32::from(dot.size.width), UNREAD_DOT);
+            .expect("the unread agent's row shows the count pill (never a dot)");
+        assert_eq!(f32::from(pill.size.height), UNREAD_PILL_H);
         assert!(
-            close(
-                right(dot),
-                right(vcx.debug_bounds("row-time-unread").expect("time"))
-            ),
-            "the dot ends under its time too"
+            f32::from(pill.size.width) >= UNREAD_PILL_H,
+            "at least as wide as tall"
         );
         assert!(
-            close(right(dot), right(spinner)),
-            "dot and spinner share the right edge under the time"
+            close(
+                right(pill),
+                right(vcx.debug_bounds("row-time-unread").expect("time"))
+            ),
+            "the pill ends under its time too"
+        );
+        assert!(
+            close(right(pill), right(spinner)),
+            "pill and spinner share the right edge under the time"
         );
         assert!(
             vcx.debug_bounds("row-status-working-unread").is_none(),
@@ -3656,10 +3682,10 @@ mod status_cell_tests {
             vcx.debug_bounds("row-status-working-dm").is_none(),
             "a person typing never shows the agent's spinner"
         );
-        let pulse = vcx
-            .debug_bounds("row-status-typing-dm")
-            .expect("a person typing keeps the green pulse");
-        assert_eq!(f32::from(pulse.size.width), super::TYPING_DOT);
+        assert!(
+            vcx.debug_bounds("row-status-unread-dm").is_none(),
+            "a person typing shows no mark in the cell (the preview says typing…)"
+        );
     }
 
     /// One spinning row (the typing DM pulses, it does not spin), one ticker;

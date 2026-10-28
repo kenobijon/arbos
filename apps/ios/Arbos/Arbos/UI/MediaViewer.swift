@@ -9,7 +9,7 @@ import UIKit
 // viewer for every chat kind, opened from an image / file bubble or a Library
 // tile. Black backdrop; the album (the chat's pictures and videos in order)
 // pages with a swipe; swipe down, ×, or the Close pill closes. Caption
-// top-centre (who, when), counter top-right, Close · Download · Forward pills
+// top-centre (who, when), counter top-right, Close · Copy · Download · Forward pills
 // at the bottom ([feedback ABUo19aGqPpSnnw4Ha6F6H0] — the top × was easy to
 // miss / not hittable over the paged image; Close matches Mac). Video plays
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
@@ -300,6 +300,11 @@ struct MediaViewer: View {
                 pill("Close", system: "xmark") { close() }
                 // A profile picture is not a chat attachment: Close only.
                 if item?.pictureURL == nil {
+                    // The picture itself, original bytes under its own type
+                    // ([feedback copy-image-messages-ios-2026-10-27]).
+                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
                     pill("Download", system: "arrow.down.to.line") { Task { await download() } }
                         .disabled(!canAct || busy)
                         .opacity(canAct ? 1 : 0.5)
@@ -332,6 +337,21 @@ struct MediaViewer: View {
         Task {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             if toast == text { toast = nil }
+        }
+    }
+
+    // ----- Copy ---------------------------------------------------------------
+
+    /// The open picture or file on the pasteboard (`AppModel.copyAttachment`).
+    @MainActor
+    private func copy() async {
+        guard let item, canAct else { return }
+        busy = true
+        defer { busy = false }
+        let attachment = Attachment(name: item.name, mime: item.mime, blobRef: item.blobRef,
+                                    kind: item.kind == .image ? "image" : item.kind == .video ? "video" : nil)
+        if await model.copyAttachment(attachment, slot: item.slot) {
+            flash(item.kind == .image ? "Copied the picture" : "Copied \(item.name)")
         }
     }
 
@@ -819,7 +839,8 @@ struct ForwardSheet: View {
             AgentAvatar(project: p, theme: theme, size: 44, still: true)
         case .people(let c):
             if c.isGroup {
-                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick, neutralName: c.isNeutralAvatar ? c.title : nil)
+                // The group's own picture first; the member stack only when it has none.
+                GroupAvatar(chat: c, model: model, size: 44, members: c.humans)
             } else {
                 let other = c.counterpart(me: model.user?.id)
                 PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 44, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
