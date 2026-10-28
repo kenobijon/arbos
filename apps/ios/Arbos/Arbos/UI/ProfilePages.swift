@@ -1117,6 +1117,13 @@ struct GroupProfileView: View {
         return people?.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
     }
 
+    /// May I change the group's name, picture and description? Owner and admins only —
+    /// the relay refuses everyone else (`PATCH /chats/{id}` 403 since 2026-10-27, after
+    /// members renamed Arbonites), so Edit group hides for plain members.
+    private var canEditGroupSettings: Bool {
+        projectId == nil && people?.isGroup == true && canManageMembers
+    }
+
     /// My human row in this people group (for mute/ban rights).
     private var myMember: ChatMember? {
         people?.humans.first(where: { $0.id == model.user?.id })
@@ -1485,11 +1492,17 @@ struct GroupProfileView: View {
     }
 
     /// The hero picture: the agent's leaf for a shared project; the group's
-    /// cluster or picked image (tap → the edit sheet) for a people group.
+    /// cluster or picked image for a people group — tap → the edit sheet for the
+    /// owner and admins, full-size view (when there is a picture) for everyone else.
     @ViewBuilder private var heroPicture: some View {
         if let project {
             ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            }
+        } else if !canEditGroupSettings {
+            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
         } else {
             Button { showEdit = true } label: {
@@ -1513,19 +1526,27 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
-        // People groups: description lives in Edit group (same sheet as name + picture).
+        // People groups: description lives in Edit group (same sheet as name + picture) for
+        // the owner and admins; plain members read it (no row while it is empty).
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
-            list.append(AnyView(Button { showEdit = true } label: {
-                PaneRow(
-                    leading: .glyph("text.alignleft"),
-                    title: "Description",
-                    value: desc.isEmpty ? "Add a description" : desc,
-                    chevron: true
-                )
+            if canEditGroupSettings {
+                list.append(AnyView(Button { showEdit = true } label: {
+                    PaneRow(
+                        leading: .glyph("text.alignleft"),
+                        title: "Description",
+                        value: desc.isEmpty ? "Add a description" : desc,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+            } else if !desc.isEmpty {
+                list.append(AnyView(
+                    PaneRow(leading: .glyph("text.alignleft"), title: "Description", value: desc)
+                        .accessibilityLabel("Description: \(desc)")
+                ))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
         }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
