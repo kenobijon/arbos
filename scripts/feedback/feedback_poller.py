@@ -154,6 +154,10 @@ def iso(t: dt.datetime | None = None) -> str:
 IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
 
 
+def head_or(st: dict) -> str:
+    return st.get("branch_head") or st.get("gated_head") or ""
+
+
 def touches_ios(files: list[str] | None) -> bool:
     return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
@@ -2364,6 +2368,42 @@ class Loop:
         self.store.save_state(fid, st)
         return ok
 
+    POOL_BATCH_MAX = 20  # one red on 57 items costs an hour of bisect; 20s cost less on average on the single runner
+
+    def pool_batches(self, candidates: list, cur: dict, plan: list) -> dict[str, str]:
+        """The pool batch to run now, with the rest of the pool queued as tagged pool batches right behind it
+        (coordinator 2026-10-27 22:41). Grouped by footprint so a red stays in its lane: Mac-only (crates/arbos-mac
+        without iOS or server crates), then server (relay / agentd / core / ctl, no iOS), then iOS-touching; each
+        group chunked to POOL_BATCH_MAX. Chunks after the first go to the front of the plan, tagged `pool_plan`, so
+        under pool-first they run one after another without ending pool-first."""
+        def group(st: dict) -> int:
+            files = st.get("files") or []
+            if touches_ios(files) or st.get("expects_ios"):
+                return 2
+            if files and all(f.startswith(("crates/arbos-mac/", "crates/arbos-update/", "docs/", "scripts/runner/")) for f in files):
+                return 0
+            return 1
+        ordered = sorted(candidates, key=lambda fs: (group(fs[1]), fs[1].get("created") or ""))
+        chunks: list[dict] = []
+        for g in (0, 1, 2):
+            items = [fs for fs in ordered if group(fs[1]) == g]
+            while items:
+                batch = self.compatible_batch(items[: self.POOL_BATCH_MAX])
+                items = [fs for fs in items if fs[0] not in batch]
+                if not batch:
+                    break
+                chunks.append(batch)
+        if not chunks:
+            return {}
+        if len(chunks) > 1:
+            tags = cur.get("pool_plan_batches") or []
+            for c in chunks:   # the first one too: pool-first stays armed until the chain is done
+                tags.append(sorted(c))
+            cur["pool_plan_batches"] = tags
+            plan[0:0] = chunks[1:]
+            log(f"Gate: pool batch split by footprint into {len(chunks)} batches of {', '.join(str(len(c)) for c in chunks)} (≤ {self.POOL_BATCH_MAX}); the rest follow as pool batches")
+        return chunks[0]
+
     def rust_gate_tick(self) -> None:
         """Batch mode for the Rust gate, split in two halves that run at the same time:
         every ready branch is merged with current main into one integration branch `gate/<run>` on GitHub
@@ -2467,6 +2507,13 @@ class Loop:
                     if st.get("issue"):
                         self.gh.comment(st["issue"], f"Gate pin cleared: `gate-next` is the operator's call (pinned by {st.get('pinned_by') or 'a worker'}); a worker's pin stands only for a `[hotfix]` commit on a P0-labelled issue. The item keeps its normal place in the pool.")
         members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
+        if members and plan and set(plan[0]) <= set(members):
+            # A red pinned batch bisects like any other: its halves sit at the front of the plan and run one at a time
+            # (22:32 Oct 27, coordinator: the 8-item owner batch must bisect on its own). Without this every pinned
+            # item re-formed the same batch and the same red repeated.
+            half = plan.pop(0)
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+            log(f"Gate: pinned batch bisect — half of {len(half)} runs: " + ", ".join(members))
         if not members:
             bounced = self.release_bounced_pins()
             if bounced:
@@ -2542,18 +2589,36 @@ class Loop:
             if own:
                 pool_first = False
                 log("Gate: pool-first stands aside — the next plan half is the pool's own bisect")
+        # Jacob's items keep priority over tester items (Jacob 22:28 Oct 27, "fix them all" opened the gate to 20–30
+        # outside items): a pool batch is built from the owner-tier items first when there are any; tester items form
+        # the following pool batch. Smaller owner batches also mean fewer reds on his side.
+        def pool_candidates() -> list:
+            own = [(f, st) for f, st in ready if st.get("tier") == "priority" and not st.get("awaiting")]
+            rest = [(f, st) for f, st in ready if (f, st) not in own]
+            # alternate: after an owner-only pool batch, the testers' batch runs before the next owner one
+            if own and rest and cur.get("last_pool_tier") == "priority":
+                cur["last_pool_tier"] = "tester"
+                return rest
+            cur["last_pool_tier"] = "priority" if own else "tester"
+            return own or list(ready)
         if not members and pool_first:
-            # Pool-first: the whole pool (plan-half members included — they are pool items too) runs now.
-            members = self.compatible_batch(list(ready))
+            # Pool-first: the pool (plan-half members included — they are pool items too) runs now.
+            members = self.pool_batches(pool_candidates(), cur, plan)
             pool_batch = bool(members)
+            if members and sorted(members) in (cur.get("pool_plan_batches") or []):
+                pool_plan = True
+                cur["pool_plan_batches"] = [b for b in cur["pool_plan_batches"] if b != sorted(members)]
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
-            members = self.compatible_batch(list(ready))
+            members = self.pool_batches(pool_candidates(), cur, plan)
             pool_batch = bool(members)
+            if members and sorted(members) in (cur.get("pool_plan_batches") or []):
+                pool_plan = True
+                cur["pool_plan_batches"] = [b for b in cur["pool_plan_batches"] if b != sorted(members)]
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
@@ -2604,6 +2669,61 @@ class Loop:
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
+
+    def carried_probe(self, fid: str, head: str) -> bool:
+        """A gating branch whose tagged fix commits are already ancestors of main has nothing left to gate: its
+        work reached main inside another item's merge (#2086's bd499bee1 rode #2117's 0a4848d67 — same owner,
+        shared lineage — and the item sat `gating` for 5 h while Mac v0.6.310 already carried it). Checked once
+        per head. True → the item is marked landed on its carrier and tracked to the builds like any merge;
+        the caller leaves it out of the integration tree."""
+        st = self.store.state(fid)
+        if st.get("carried_checked") == head:
+            return False
+        st["carried_checked"] = head
+        self.store.save_state(fid, st)
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return False
+        tag = f"[feedback {fid}]"
+        ahead = cmp.get("commits") or []
+        if any(tag in c["commit"]["message"] for c in ahead):
+            return False  # the fix itself is still ahead of main — gate as usual
+        if cmp.get("status") in ("ahead", "diverged") and any(len(c.get("parents") or []) < 2 for c in ahead):
+            return False  # untagged non-merge work ahead of main: a real change, let the gate judge it
+        # Every commit ahead of main (if any) is a merge of main: find the branch's tagged fix on main.
+        try:
+            own = self.gh.repo_api("GET", f"/commits?sha={head}&per_page=50")
+        except HttpError:
+            return False
+        fix = next((c for c in own if tag in c["commit"]["message"] and len(c.get("parents") or []) < 2), None)
+        if not fix:
+            return False
+        try:
+            if self.gh.compare("main", fix["sha"]).get("status") not in ("behind", "identical"):
+                return False
+        except HttpError:
+            return False
+        files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+        carrier = next((c for c in self.gh.commits_since((utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                        if any(p["sha"] == fix["sha"] for p in c.get("parents", []))), None)
+        st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
+                  pushed_at=iso(), files=files, commit_date=fix["commit"]["committer"]["date"],
+                  expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files))
+        for k in ("gated_head", "rust_gate", "gate_pinned", "solo_next", "sibling_conflicts"):
+            st.pop(k, None)
+        self.store.save_state(fid, st)
+        via = f"carried to main by {carrier['sha'][:9]}" if carrier else "already an ancestor of main"
+        self.store.event(fid, "handoff_landed", commit=fix["sha"], files=files, via=via)
+        log(f"[{fid}] fix {fix['sha'][:8]} is already on main ({via}); landed, not gated")
+        if st.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"Already on `main`: the fix {fix['html_url']} — `{st['commit_message']}` — reached main "
+                                f"{'inside ' + carrier['html_url'] if carrier else 'earlier'}; the branch only carries a merge of main on top. "
+                                "Nothing left to gate; the loop now tracks it to the builds.")
+                self.gh.set_labels(st["issue"], [], ["in-progress"])
+                self.note_fixed_on_main(st)
+        return True
 
     def merge_revert_probe(self, fid: str, head: str) -> list[str]:
         """Cheap pre-integration check (2026-10-23 23:3x, #1532's be8ab46): the branch's diff against main must
@@ -2719,6 +2839,8 @@ class Loop:
         merged: list[str] = []
         conflicts: dict[str, str] = {}
         for n, (fid, head) in enumerate(members.items()):
+            if self.carried_probe(fid, head):
+                continue  # landed on its carrier; nothing to integrate
             stray = self.merge_revert_probe(fid, head)
             if stray:
                 conflicts[fid] = "merge-revert"
@@ -3360,6 +3482,16 @@ class Loop:
         return r.returncode == 0, out
 
     def merge_branch(self, fid: str, st: dict) -> None:
+        if st.get("do_not_merge"):
+            # Operator hold above approval (coordinator 2026-10-27 22:28: #2047 conflicts with Jacob's hour-stamp rule and
+            # must not land even if `approve` is run by mistake). Green stays green; nothing merges until the flag is
+            # removed by hand.
+            if st.get("do_not_merge_noted") != head_or(st):
+                st["do_not_merge_noted"] = head_or(st)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "merge_refused", reason=str(st["do_not_merge"])[:200])
+                log(f"[{fid}] green but do_not_merge is set ({st['do_not_merge']}); holding")
+            return
         if self.needs_approval(fid, st):
             self.hold_for_approval(fid, st)
             return
@@ -3741,9 +3873,24 @@ class Loop:
             last = st.get("ship_carrier")
             if last and st.get("ship_pause_started"):
                 conclusion = None
+                run_path = ""
                 if last.get("id"):
                     with contextlib.suppress(HttpError):
-                        conclusion = self.gh.repo_api("GET", f"/actions/runs/{last['id']}").get("conclusion")
+                        run = self.gh.repo_api("GET", f"/actions/runs/{last['id']}")
+                        conclusion = run.get("conclusion")
+                        run_path = run.get("path") or ""
+                if conclusion == "failure" and run_path.endswith("release.yml") and st.get("expects_ci") and not st.get("release_done"):
+                    # The Release lane itself is red (its Mac smoke, signing, notarization…) while the item's own CI is
+                    # green: that is an infra/lane failure, not this fix's — four items were failed "nothing shipped"
+                    # at 07:52 Oct 28 because two Release runs died in the composer paste smoke. The item stays
+                    # `pushed` with the clock paused; the lane failure is logged once and the next Release run (a
+                    # newer main, or the lane fixed) picks it up.
+                    if st.get("release_lane_red") != last.get("url"):
+                        st["release_lane_red"] = last.get("url")
+                        self.store.event(fid, "release_lane_red", run=last.get("url"))
+                        log(f"[{fid}] the Release run {last.get('url')} FAILED while this fix's CI is green: lane failure, ship clock stays paused")
+                    self.store.save_state(fid, st)
+                    return
                 if conclusion != "failure" and minutes_between(last.get("seen") or iso(), iso()) < self.SHIP_CARRIER_GAP_MIN:
                     # cancelled / superseded / just finished: its replacement (or the adoption) is seconds away
                     self.store.save_state(fid, st)
@@ -4596,7 +4743,7 @@ class Loop:
         main_moved = main_head != cur.get("handoff_main_head")
         main_commits: list[dict] | None = None
         pending = [(fid, self.store.state(fid)) for fid in self.store.items()]
-        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and st.get("track_commit")]
+        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and (st.get("track_commit") or st.get("follow_pushes"))]
         if main_moved and pending:
             oldest = min(max(st.get("created") or "", st.get("handed_off_at") or "") or iso() for _, st in pending)
             since = (parse_iso(oldest) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -4636,7 +4783,7 @@ class Loop:
                               expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
-                              agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
+                              agent_summary=f"handed-off fix by {st.get('handed_off_to') or st.get('agent_id') or 'owner'}")
                     self.store.save_state(fid, st)
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
@@ -5468,7 +5615,13 @@ def main(argv: list[str]) -> int:
         # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
         # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
         # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
-        # push already made re-gates on the next tick; a pin is released.
+        # push already made re-gates on the next tick; a pin is released. The follower only walks items with
+        # `track_commit` or `follow_pushes`: a parked loop-agent item (app-…, owner = `agent_id`, never handed off) has
+        # neither, so its owner's push went unseen (#2049). `follow_pushes` is the right flag: `track_commit` also
+        # means "coordinator-registered" to the approval gate (`freeze_allows`), and setting it on a tester item let
+        # #2049 (class-b, awaiting Jacob) merge from an operator batch at 06:17 Oct 28 without his per-item approve.
+        # The push itself went unseen on 2026-10-27 (#2049: pushed 21:27, found by hand 23:36). `handed_off_to` stays
+        # unset on purpose — that is what keeps the Cursor follow-up channel to the agent on a conflict.
         if len(argv) < 4:
             print("park <id> <note…>")
             return 2
@@ -5479,7 +5632,7 @@ def main(argv: list[str]) -> int:
             return 2
         rg = st.get("rust_gate") or {}
         red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
-        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False)
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False, follow_pushes=True)
         loop.store.save_state(fid, st)
         loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
         later = st.get("branch_head") != red
