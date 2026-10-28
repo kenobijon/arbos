@@ -45,6 +45,9 @@ const NOTIFY_TICK_MS: u64 = 5_000;
 /// → `activity.jobs[]`) while a job row is live or the drawer lists one —
 /// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
 pub const JOBS_POLL_MS: u64 = 1_000;
+/// Sidebar pins the relay allows until `GET /me/pins` says otherwise (Jacob 2026-10-28:
+/// 5, no tiers; [feedback sidebar-pinning-mac-2026-10-28]).
+pub const PIN_CAP_DEFAULT: usize = 5;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -799,6 +802,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// My sidebar pins, top first — row keys `agent:<project>` / `chat:<people chat>` /
+    /// `server:<server>`, one list for every device through the relay (`/me/pins`;
+    /// [feedback sidebar-pinning-mac-2026-10-28]). The Pinned section draws them in this
+    /// order; `pin_cap` is the relay's limit (Jacob 2026-10-28: 5, no tiers).
+    pub pins: Vec<String>,
+    pub pin_cap: usize,
     /// Chat a home-search hit opened; kept visible while single-chat would hide it.
     search_chat: Option<Id>,
     /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
@@ -1298,6 +1307,8 @@ impl AppState {
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            pins: Vec::new(),
+            pin_cap: PIN_CAP_DEFAULT,
             search_chat: None,
             reveal_message: None,
             reveal_nonce: 0,
@@ -2703,6 +2714,11 @@ impl AppState {
                 for p in projects {
                     self.enforce_tab(&p);
                 }
+                cx.notify();
+            }
+            SyncEvent::Pins { pins, cap } => {
+                self.pins = pins;
+                self.pin_cap = cap.max(1);
                 cx.notify();
             }
             SyncEvent::StoreUsage { bytes, chats } => {
@@ -7687,11 +7703,129 @@ impl AppState {
                 .count()
     }
 
+    // ---- Sidebar pins ([feedback sidebar-pinning-mac-2026-10-28]) ------------------------
+
+    /// The relay's row key for a sidebar space, or `None` for something the list does not
+    /// show: `agent:` for an agent (own or shared), `chat:` for a DM or a people group
+    /// (their space id is the chat id), `server:` for a server.
+    pub fn pin_key(&self, space_id: &str) -> Option<String> {
+        if let Some(p) = self.projects.iter().find(|p| p.id == space_id) {
+            return Some(if p.is_people() {
+                format!("chat:{space_id}")
+            } else {
+                format!("agent:{space_id}")
+            });
+        }
+        self.servers
+            .iter()
+            .any(|s| s.id == space_id)
+            .then(|| format!("server:{space_id}"))
+    }
+
+    /// The space a pin names, if it is in my list today.
+    pub fn pinned_space_id(key: &str) -> Option<&str> {
+        key.split_once(':')
+            .filter(|(kind, id)| matches!(*kind, "agent" | "chat" | "server") && !id.is_empty())
+            .map(|(_, id)| id)
+    }
+
+    pub fn is_pinned(&self, space_id: &str) -> bool {
+        self.pin_index(space_id).is_some()
+    }
+
+    /// Position in the Pinned section (0 = top), or `None` when not pinned.
+    pub fn pin_index(&self, space_id: &str) -> Option<usize> {
+        let key = self.pin_key(space_id)?;
+        self.pins.iter().position(|k| *k == key)
+    }
+
+    /// Pin (a new pin lands at the top, the iPhone's rule) or unpin a sidebar row, on
+    /// every device. At the cap the pin is refused with one sentence; archived rows come
+    /// back first (a pin is a row you see).
+    pub fn set_pinned(&mut self, space_id: Id, pinned: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.pin_key(&space_id) else {
+            return;
+        };
+        let mut pins = self.pins.clone();
+        pins.retain(|k| *k != key);
+        if pinned {
+            if pins.len() >= self.pin_cap {
+                self.push_failure(
+                    UserError::of(
+                        "pin the chat",
+                        ErrorClass::Refused {
+                            message: Some(format!("You can pin up to {} chats.", self.pin_cap)),
+                        },
+                        "",
+                    ),
+                    None,
+                );
+                cx.notify();
+                return;
+            }
+            if self.is_space_archived(&space_id) {
+                self.set_space_archived(space_id.clone(), false, cx);
+            }
+            pins.insert(0, key);
+        }
+        self.store_pins(pins, cx);
+    }
+
+    /// Drop of a pin drag: `shown` is the Pinned section as the list drew it (the pinned
+    /// rows the filter admits, in their new order). Those pins take that order among
+    /// themselves; pins the filter hid keep their places.
+    pub fn reorder_pins(&mut self, shown: &[Id], cx: &mut Context<Self>) {
+        let shown_keys: Vec<String> = shown
+            .iter()
+            .filter_map(|id| self.pin_key(id))
+            .filter(|k| self.pins.contains(k))
+            .collect();
+        let mut next = shown_keys.iter().cloned();
+        let pins: Vec<String> = self
+            .pins
+            .iter()
+            .map(|k| {
+                if shown_keys.contains(k) {
+                    next.next().unwrap_or_else(|| k.clone())
+                } else {
+                    k.clone()
+                }
+            })
+            .collect();
+        self.store_pins(pins, cx);
+    }
+
+    fn unpin_if_pinned(&mut self, space_id: &str) {
+        let Some(key) = self.pin_key(space_id) else {
+            return;
+        };
+        if self.pins.contains(&key) {
+            self.pins.retain(|k| *k != key);
+            self.command(ClientCommand::SetPins {
+                pins: self.pins.clone(),
+            });
+        }
+    }
+
+    /// The new list, shown at once and sent to the relay (its answer is the truth).
+    fn store_pins(&mut self, pins: Vec<String>, cx: &mut Context<Self>) {
+        if pins == self.pins {
+            return;
+        }
+        self.pins = pins.clone();
+        self.command(ClientCommand::SetPins { pins });
+        cx.notify();
+    }
+
     /// Archive (hide) or unarchive a sidebar space for me, on every device.
     /// Nothing is deleted; an archived agent keeps running its routines. A
     /// people chat goes through the chat archive the relay already has.
     pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
         let at = archived.then(now_ms);
+        if archived {
+            // A hidden row is not a pinned row (the iPhone's rule).
+            self.unpin_if_pinned(&space_id);
+        }
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
             p.archived_at = at;
             let people = p.is_people();
@@ -10152,6 +10286,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::LeaveChat { chat_id });
@@ -10565,6 +10700,7 @@ impl AppState {
         }
         self.active_tab.remove(&project_id);
         self.last_chats.remove(&project_id);
+        self.unpin_if_pinned(&project_id);
         self.projects.retain(|p| p.id != project_id);
         self.muted.remove(&project_id);
         self.command(ClientCommand::DeleteProject { project_id });
@@ -10584,6 +10720,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::DeletePeopleChat { chat_id });
@@ -12358,10 +12495,108 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Cap on GIF/WebP frames kept for a chat bubble (feedback
-/// app-01M5TGH18WV3QCK5KZT6XKG7FG). Past this, only the first frame is shown.
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+/// Past this, only the first frame is shown.
 pub const ANIM_MAX_FRAMES: usize = 300;
-/// Cap on decoded RGBA bytes across all frames. Past this, only the first frame.
-pub const ANIM_MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
+/// Cap on decoded RGBA bytes across all animation frames. Past this at the
+/// side floor, only the first frame is shown.
+pub const ANIM_MAX_DECODED_BYTES: usize = 48 * 1024 * 1024;
+/// Starting longer side for animation frames (never upscale past the canvas).
+pub const ANIM_SIDE_START: u32 = 480;
+/// Smallest longer side tried before falling back to the first frame.
+pub const ANIM_SIDE_FLOOR: u32 = 200;
+
+/// Target longer side for animation frames, or `None` → show the first frame
+/// only. Starts at [`ANIM_SIDE_START`] (capped to the canvas, never upscaled);
+/// shrinks until `frame_count × scaled_w × scaled_h × 4` fits in
+/// [`ANIM_MAX_DECODED_BYTES`]; floor [`ANIM_SIDE_FLOOR`]. More than
+/// [`ANIM_MAX_FRAMES`], or not fitting at the floor, means first-frame-only.
+/// At 200 px, 300 square frames always fit (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
+pub fn animation_frame_side(frame_count: usize, width: u32, height: u32) -> Option<u32> {
+    if frame_count == 0 || frame_count > ANIM_MAX_FRAMES {
+        return None;
+    }
+    let width = width.max(1);
+    let height = height.max(1);
+    let long = width.max(height);
+    let start = ANIM_SIDE_START.min(long);
+    if anim_decoded_bytes(frame_count, width, height, ANIM_SIDE_FLOOR) > ANIM_MAX_DECODED_BYTES {
+        return None;
+    }
+    // Highest side in [FLOOR, start] that fits the budget.
+    let mut lo = ANIM_SIDE_FLOOR;
+    let mut hi = start;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if anim_decoded_bytes(frame_count, width, height, mid) <= ANIM_MAX_DECODED_BYTES {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(lo)
+}
+
+/// RGBA byte cost of `frame_count` frames scaled so the longer side is `side`.
+fn anim_decoded_bytes(frame_count: usize, width: u32, height: u32, side: u32) -> usize {
+    let long = width.max(height).max(1);
+    let scale = side as f64 / long as f64;
+    let sw = ((width as f64) * scale).round().max(1.0) as usize;
+    let sh = ((height as f64) * scale).round().max(1.0) as usize;
+    frame_count
+        .saturating_mul(sw)
+        .saturating_mul(sh)
+        .saturating_mul(4)
+}
+
+/// Shrink `img` so its longer side is at most `side` (never enlarged).
+fn downscale_to_side(img: image::RgbaImage, side: u32) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if side == 0 || long <= side {
+        return img;
+    }
+    let scale = side as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Re-scale already-decoded animation frames down to `side`.
+fn rescale_anim_frames(frames: Vec<image::Frame>, side: u32) -> Vec<image::Frame> {
+    frames
+        .into_iter()
+        .map(|frame| {
+            let delay = frame.delay();
+            let left = frame.left();
+            let top = frame.top();
+            image::Frame::from_parts(
+                downscale_to_side(frame.into_buffer(), side),
+                left,
+                top,
+                delay,
+            )
+        })
+        .collect()
+}
+
+fn frame_rgba_bytes(frame: &image::Frame) -> usize {
+    let (w, h) = frame.buffer().dimensions();
+    (w as usize).saturating_mul(h as usize).saturating_mul(4)
+}
+
+/// `page_url` is safe to open from a "via <provider>" caption: only `https`.
+pub fn is_https_page_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+}
 
 /// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
 enum DecodedPixels {
@@ -12396,9 +12631,13 @@ fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
     Some(DecodedPixels::Still(decode_rgba(bytes)?))
 }
 
-/// All frames of a GIF or WebP, each scaled to [`CHAT_IMAGE_MAX_SIDE`]. A still
-/// WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`]. Over the
-/// frame or memory cap → first frame only.
+/// All frames of a GIF or WebP, each scaled to the animation side helper.
+/// A still WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`].
+/// Frame count is unknown up front: decode one frame at a time at the current
+/// side; when the running total would pass the budget at frame `n`, ask the
+/// helper with `2n` frames, rescale held frames, and continue — or fall back
+/// to the first frame when the helper says so (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
 fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
     use image::AnimationDecoder;
     use std::io::Cursor;
@@ -12414,23 +12653,60 @@ fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
 
     let mut frames: Vec<image::Frame> = Vec::new();
     let mut decoded_bytes: usize = 0;
+    let mut side = ANIM_SIDE_START;
+    let mut canvas: Option<(u32, u32)> = None;
     for result in frames_iter {
         let frame = result.ok()?;
         let delay = frame.delay();
         let left = frame.left();
         let top = frame.top();
-        let scaled = downscale_for_chat(frame.into_buffer());
-        let (w, h) = scaled.dimensions();
-        let frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-        if frames.len() >= ANIM_MAX_FRAMES
-            || decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES
-        {
-            // Cap hit: keep only the first frame as a still.
+        let buffer = frame.into_buffer();
+        let (cw, ch) = buffer.dimensions();
+        if canvas.is_none() {
+            canvas = Some((cw.max(1), ch.max(1)));
+            side = ANIM_SIDE_START.min(cw.max(ch).max(1));
+        }
+        if frames.len() >= ANIM_MAX_FRAMES {
             return frames
                 .into_iter()
                 .next()
-                .map(|f| DecodedPixels::Still(f.into_buffer()))
-                .or(Some(DecodedPixels::Still(scaled)));
+                .map(|f| DecodedPixels::Still(f.into_buffer()));
+        }
+        let mut scaled = downscale_to_side(buffer, side);
+        let mut frame_bytes = {
+            let (w, h) = scaled.dimensions();
+            (w as usize).saturating_mul(h as usize).saturating_mul(4)
+        };
+        if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+            // Running total would pass the budget at frame n (1-based).
+            let n = frames.len() + 1;
+            let (cw, ch) = canvas.expect("canvas set on first frame");
+            match animation_frame_side(n.saturating_mul(2), cw, ch) {
+                None => {
+                    return frames
+                        .into_iter()
+                        .next()
+                        .map(|f| DecodedPixels::Still(f.into_buffer()))
+                        .or(Some(DecodedPixels::Still(scaled)));
+                }
+                Some(new_side) => {
+                    if new_side < side {
+                        frames = rescale_anim_frames(frames, new_side);
+                        decoded_bytes = frames.iter().map(frame_rgba_bytes).sum();
+                        side = new_side;
+                        scaled = downscale_to_side(scaled, side);
+                        let (w, h) = scaled.dimensions();
+                        frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                    }
+                    if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+                        return frames
+                            .into_iter()
+                            .next()
+                            .map(|f| DecodedPixels::Still(f.into_buffer()))
+                            .or(Some(DecodedPixels::Still(scaled)));
+                    }
+                }
+            }
         }
         decoded_bytes += frame_bytes;
         frames.push(image::Frame::from_parts(scaled, left, top, delay));
@@ -13376,8 +13652,11 @@ mod chat_image_scale_tests {
 #[cfg(test)]
 mod animated_image_tests {
     //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
-    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
-    use super::{decode_image, decode_image_pair, ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES};
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    use super::{
+        animation_frame_side, decode_image, decode_image_pair, is_https_page_url,
+        ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES, ANIM_SIDE_FLOOR, ANIM_SIDE_START,
+    };
     use image::{Delay, Frame, Rgba, RgbaImage};
     use std::io::Cursor;
 
@@ -13417,6 +13696,41 @@ mod animated_image_tests {
     }
 
     #[test]
+    fn animation_side_fits_common_reaction_gifs() {
+        assert_eq!(animation_frame_side(60, 480, 270), Some(480));
+        let side = animation_frame_side(150, 480, 480).expect("150 square frames animate");
+        assert!((ANIM_SIDE_FLOOR..=ANIM_SIDE_START).contains(&side));
+        let side = animation_frame_side(300, 1000, 1000).expect("300 large frames animate");
+        assert!(side >= ANIM_SIDE_FLOOR);
+        let (sw, sh) = {
+            let scale = side as f64 / 1000.0;
+            (
+                (1000.0 * scale).round().max(1.0) as usize,
+                (1000.0 * scale).round().max(1.0) as usize,
+            )
+        };
+        assert!(
+            300usize
+                .saturating_mul(sw)
+                .saturating_mul(sh)
+                .saturating_mul(4)
+                <= ANIM_MAX_DECODED_BYTES
+        );
+        assert_eq!(animation_frame_side(301, 480, 270), None);
+    }
+
+    #[test]
+    fn https_page_url_accepts_only_https() {
+        assert!(is_https_page_url("https://example.com/g/1"));
+        assert!(is_https_page_url("HTTPS://Example.COM/g"));
+        assert!(!is_https_page_url("http://example.com/g/1"));
+        assert!(!is_https_page_url("file:///tmp/x.gif"));
+        assert!(!is_https_page_url("javascript:alert(1)"));
+        assert!(!is_https_page_url("arbos://gif/1"));
+        assert!(!is_https_page_url("not a url"));
+    }
+
+    #[test]
     fn a_three_frame_gif_keeps_every_frame() {
         let bytes = encode_gif(three_color_frames());
         let image = decode_image(&bytes).expect("gif decodes");
@@ -13424,6 +13738,25 @@ mod animated_image_tests {
         let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
         assert_eq!(full.frame_count(), 3);
         assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn a_120_frame_reaction_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..120)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(480, 270, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 120);
     }
 
     #[test]

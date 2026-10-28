@@ -229,6 +229,9 @@ struct ChatSession: View {
     /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
     @State private var confirmUnblock = false
     @State private var showSearch = false
+    /// The result row whose tap just closed the bar (one run-loop turn), so the transcript's
+    /// own close-on-tap steps aside ([feedback iphone-search-close-2026-10-28]).
+    @State private var searchResultTapped: Id?
     @State private var searchText = ""
     /// Group chats: pick members to call, or call everyone.
     @State private var showGroupCallPicker = false
@@ -392,11 +395,38 @@ struct ChatSession: View {
         }
     }
 
-    /// Esc or the ✕: the bar goes, the filter with it.
-    private func closeSearch() {
-        showSearch = false
-        searchText = ""
+    /// Esc, the ✕, a tap on the transcript or a swipe: the bar goes, the filter with it, the
+    /// keyboard down — and the window is re-seeded at the tail so the unfiltered rows come
+    /// back where a fresh open would show them (a window that slid while the filter was on
+    /// was measured against the filtered list; [feedback iphone-search-close-2026-10-28]).
+    private func closeSearch(scrollToTail: Bool = true) {
+        guard showSearch || !searchText.isEmpty || searchFocused else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            showSearch = false
+            searchText = ""
+            windowSkipEnd = 0
+            windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
+        }
         searchFocused = false
+        guard scrollToTail else { return }
+        pinnedToBottom = true
+        // After a zero-hit filter the stack was empty; let the unfiltered rows lay out
+        // before the jump to the tail, or the view stays parked at the top of nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        }
+    }
+
+    /// A tap on a search result ([feedback iphone-search-close-2026-10-28]): the bar and
+    /// the filter go, then the full transcript scrolls to that message and highlights it
+    /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
+    private func openSearchResult(_ messageId: Id) {
+        guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
+        searchResultTapped = messageId
+        closeSearch(scrollToTail: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -407,7 +437,7 @@ struct ChatSession: View {
             Button(action: openSearchFromKeyboard) { EmptyView() }
                 .keyboardShortcut(ChatSearchShortcut.key, modifiers: ChatSearchShortcut.modifiers)
             if showSearch {
-                Button(action: closeSearch) { EmptyView() }
+                Button { closeSearch() } label: { EmptyView() }
                     .keyboardShortcut(.cancelAction)
             }
         }
@@ -870,14 +900,26 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
+                            .accessibilityIdentifier("chat-search-field")
+                        // The ✕ ([feedback iphone-search-close-2026-10-28], Jacob: "the x button
+                        // doesn't work"): the glyph alone was the hit target — 17 pt beside a
+                        // 48 pt field, so a near miss refocused the field instead. The whole
+                        // trailing cell (44 × the bar's height) now closes.
                         Button { closeSearch() } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: Controls.glyph))
+                                .foregroundStyle(theme.muted)
+                                .frame(width: ChatSearchClose.closeHitWidth, height: Controls.height)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Close search")
+                        .accessibilityIdentifier("chat-search-close")
                     }
                     // The family's field (48, capsule, text at 17) in the header's glass
-                    // (Jacob 2026-10-25 22:53; sized 2026-10-26).
-                    .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
+                    // (Jacob 2026-10-25 22:53; sized 2026-10-26). The ✕ cell carries its own
+                    // trailing inset.
+                    .padding(.leading, Controls.textInset).padding(.trailing, 4).frame(height: Controls.height)
                     .background {
                         HeaderGlassBackground(
                             shape: Capsule(),
@@ -1034,8 +1076,21 @@ struct ChatSession: View {
     }
 
     /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
+    /// Split so the Swift type-checker can finish (ChatView.swift:1030 on main).
     @ViewBuilder
     private var sessionRoot: some View {
+        sessionRootLifecycle
+    }
+
+    /// Sheets and the media viewer cover on top of the canvas.
+    @ViewBuilder
+    private var sessionRootSheets: some View {
+        sessionRootMoreSheets
+    }
+
+    /// First sheet cluster (picker / secrets / settings / call / unblock).
+    @ViewBuilder
+    private var sessionRootCoreSheets: some View {
         sessionCanvas
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
@@ -1070,6 +1125,12 @@ struct ChatSession: View {
         .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
             if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
         }
+    }
+
+    /// Remaining sheets (profile / forward / thread / tasks).
+    @ViewBuilder
+    private var sessionRootMoreSheets: some View {
+        sessionRootCoreSheets
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1106,6 +1167,33 @@ struct ChatSession: View {
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
+    }
+
+    /// Tasks / appear / onChange hooks hanging off the sheets.
+    @ViewBuilder
+    private var sessionRootLifecycle: some View {
+        sessionRootAppear
+    }
+
+    /// Async tasks hanging off the sheets (kept separate so the type-checker finishes).
+    @ViewBuilder
+    private var sessionRootTasks: some View {
+        sessionRootDemoTasks
+            .task(id: calls.activeByChat[chatId]?.callId) {
+                // While the Join bar is up, re-check the relay so an ended call does not stick.
+                guard !isChannel, calls.activeByChat[chatId] != nil else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
+                    await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
+                }
+            }
+    }
+
+    /// Jobs poll + live/fixture demo tasks.
+    @ViewBuilder
+    private var sessionRootDemoTasks: some View {
+        sessionRootSheets
         .task(id: chatId) {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it
@@ -1162,82 +1250,179 @@ struct ChatSession: View {
             try? await Task.sleep(nanoseconds: 7_500_000_000)
             dismiss()
         }
-        .task(id: calls.activeByChat[chatId]?.callId) {
-            // While the Join bar is up, re-check the relay so an ended call does not stick.
-            guard !isChannel, calls.activeByChat[chatId] != nil else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-                guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
-                await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
+    }
+
+    /// Appear / disappear hooks (bodies live in helpers so the type-checker finishes —
+    /// feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    @ViewBuilder
+    private var sessionRootAppear: some View {
+        sessionRootChanges
+            .onAppear { handleSessionAppear() }
+            .onDisappear { handleSessionDisappear() }
+    }
+
+    /// onChange hooks hanging off the tasks (kept separate from appear/disappear).
+    @ViewBuilder
+    private var sessionRootChanges: some View {
+        sessionRootRowChanges
+        // Profile "search" sets pendingSearchChat while this chat is already on screen
+        // (sheet over us), so onAppear alone never sees it — watch the published flag.
+        .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
+        .onChange(of: model.pendingDMReply?.chatId) { _, _ in takePendingDMReplyIfNeeded() }
+        .onChange(of: model.pendingForwardDraft?.chatId) { _, _ in takePendingForwardDraftIfNeeded() }
+        // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
+        .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
+        .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
+    }
+
+    /// Message / membership / catch-up onChange hooks.
+    @ViewBuilder
+    private var sessionRootRowChanges: some View {
+        sessionRootTasks
+        // The per-chat version, not the array: comparing 1 000+ messages on every
+        // body (each keystroke, presence tick, publish) was a measurable share of
+        // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
+        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in
+            handleMessagesVersionChange(new)
+        }
+        // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
+        // A member's rename re-words the membership lines that name them, so the key carries names.
+        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []) { _, _ in
+            refreshRows()
+        }
+        .onChange(of: model.user?.name) { _, _ in refreshRows() }
+        .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
+            handleCaughtUpAutoSend(ready)
+        }
+    }
+
+    /// Chat appear: mark-read, restore draft, open channel / refresh call, rig hooks.
+    private func handleSessionAppear() {
+        appearedAt = Date()
+        LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
+        #if DEBUG
+        PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
+        #endif
+        // Force: re-PUT even if the cursor is unchanged so the relay clears
+        // unread events recorded after the last PUT (other apps / badge).
+        model.markRead(chatId: chatId, force: true)
+        model.visibleChatId = chatId
+        // Restore unsent text left when the user backed out of this thread.
+        let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
+        composerDraft.onChange = { [chatId] d in
+            // Keep the draft while the view is still up so a process kill mid-type
+            // is not required — leaving the thread saves on disappear too.
+            model.setComposerDraft(d, for: chatId)
+            // People chats (DM + group): tell the room we are typing so peers
+            // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
+            if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                model.typedIn(chatId: chatId)
+            }
+            let everyone = AppModel.addressesEveryone(d)
+            if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
+            // `@handle` + a separator typed right after it: a chip, no picker (behaviour 5).
+            if isPeople, let m = MentionDraft.autoResolve(text: d, caret: composerDraft.caret, mentions: composerDraft.mentions,
+                                                          members: people?.members ?? [], me: model.user?.login) {
+                var next = composerDraft.mentions
+                next.append(m)
+                next.sort { $0.range.lowerBound < $1.range.lowerBound }
+                composerDraft.mentions = next
+            }
+            updateMentionQuery()
+        }
+        composerDraft.onCaretOrMentions = { updateMentionQuery() }
+        if composerDraft.text.isEmpty, !saved.isEmpty {
+            composerDraft.text = saved
+            composerDraft.caret = (saved as NSString).length
+            composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
+            if DebugHooks.composerDraft != nil { composerFocused = true }
+        }
+        if isPeople { model.markPeopleRead(chatId, force: true) }
+        if isChannel {
+            // The newest page now, live rows through the listener from here on.
+            model.openChannel(chatId)
+        } else {
+            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
+        }
+        openPendingSearchIfNeeded()
+        takePendingDMReplyIfNeeded()
+        takePendingForwardDraftIfNeeded()
+        revealPendingIfNeeded()
+        // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
+        if DebugHooks.show == "chatsearch" { showSearch = true }
+        if let link = DebugHooks.link {
+            model.setRoomLink(chatId, link)
+            if let ms = DebugHooks.linkClearsMs {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
             }
         }
-        .onAppear {
-            appearedAt = Date()
-            LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
-            #if DEBUG
-            PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
-            #endif
-            // Force: re-PUT even if the cursor is unchanged so the relay clears
-            // unread events recorded after the last PUT (other apps / badge).
-            model.markRead(chatId: chatId, force: true)
-            model.visibleChatId = chatId
-            // Restore unsent text left when the user backed out of this thread.
-            let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
-            composerDraft.onChange = { [chatId] d in
-                // Keep the draft while the view is still up so a process kill mid-type
-                // is not required — leaving the thread saves on disappear too.
-                model.setComposerDraft(d, for: chatId)
-                // People chats (DM + group): tell the room we are typing so peers
-                // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
-                if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    model.typedIn(chatId: chatId)
+        #if DEBUG
+        let drive = DebugHooks.perfDrive
+        if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
+        #endif
+        if let show = DebugHooks.show, !model.showHookDone {
+            model.showHookDone = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
+                self.handleDebugShowHook(show)
+            }
+        }
+    }
+
+    /// Chat disappear: keep draft, mark-read once more, clear visibleChatId.
+    private func handleSessionDisappear() {
+        // Keep the typed draft so coming back to this thread restores it.
+        model.setComposerDraft(composerDraft.text, for: chatId)
+        // Catch notifies that landed after the last onChange mark-read while we were still in the chat
+        // (including rows that arrived while the app was inactive on a call — isWatching was false).
+        if isPeople { model.markPeopleRead(chatId) }
+        else { model.markRead(chatId: chatId) }
+        if model.visibleChatId == chatId { model.visibleChatId = nil }
+    }
+
+    /// Refresh rows when `messagesVersion` moves; mark-read on a new last row.
+    private func handleMessagesVersionChange(_ new: Int) {
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
+        #endif
+        let old = rowsSource
+        let newMessages = messages
+        let initial = old.isEmpty && rows.isEmpty
+        rowsSource = newMessages
+        refreshRows()
+        // Streaming tokens reassign `messages` with the same last id — do not
+        // mark-read on every delta. Initial call (`old == new`) and a new last
+        // row still mark; AppModel also skips/throttles the PUT.
+        if old.last?.id != newMessages.last?.id || initial {
+            model.markRead(chatId: chatId)
+            if isPeople { model.markPeopleRead(chatId) }
+        }
+        // A channel's read marker moves when a new row lands while it is on screen.
+        if isChannel, old.last?.id != newMessages.last?.id { model.markChannelRead(chatId) }
+    }
+
+    /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
+    private func handleCaughtUpAutoSend(_ ready: Bool) {
+        guard ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId else { return }
+        // Several messages separated by " ||| " go out a few seconds apart
+        // (multitasking checks: the composer never waits for a reply).
+        let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
+        composerDraft.text = parts.first ?? text
+        send()
+        if parts.count > 1 {
+            Task {
+                for p in parts.dropFirst() {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    composerDraft.text = p
+                    send()
                 }
-                let everyone = AppModel.addressesEveryone(d)
-                if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
-                // `@handle` + a separator typed right after it: a chip, no picker (behaviour 5).
-                if isPeople, let m = MentionDraft.autoResolve(text: d, caret: composerDraft.caret, mentions: composerDraft.mentions,
-                                                              members: people?.members ?? [], me: model.user?.login) {
-                    var next = composerDraft.mentions
-                    next.append(m)
-                    next.sort { $0.range.lowerBound < $1.range.lowerBound }
-                    composerDraft.mentions = next
-                }
-                updateMentionQuery()
             }
-            composerDraft.onCaretOrMentions = { updateMentionQuery() }
-            if composerDraft.text.isEmpty, !saved.isEmpty {
-                composerDraft.text = saved
-                composerDraft.caret = (saved as NSString).length
-                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
-                if DebugHooks.composerDraft != nil { composerFocused = true }
-            }
-            if isPeople { model.markPeopleRead(chatId, force: true) }
-            if isChannel {
-                // The newest page now, live rows through the listener from here on.
-                model.openChannel(chatId)
-            } else {
-                Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
-            }
-            openPendingSearchIfNeeded()
-            takePendingDMReplyIfNeeded()
-            takePendingForwardDraftIfNeeded()
-            revealPendingIfNeeded()
-            // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
-            if DebugHooks.show == "chatsearch" { showSearch = true }
-            if let link = DebugHooks.link {
-                model.setRoomLink(chatId, link)
-                if let ms = DebugHooks.linkClearsMs {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
-                }
-            }
-            #if DEBUG
-            let drive = DebugHooks.perfDrive
-            if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
-            #endif
-            if let show = DebugHooks.show, !model.showHookDone {
-                model.showHookDone = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
-                    switch show {
+        }
+    }
+
+    /// Rig / DebugHooks `ARBOS_SHOW=…` cases for chat appear (kept out of the
+    /// view builder so the type-checker can finish).
+    private func handleDebugShowHook(_ show: String) {
+        switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
                     case "agentsecrets": showAgentSecrets = true
@@ -1428,73 +1613,8 @@ struct ChatSession: View {
                         #endif
                     default: break
                     }
-                }
-            }
-        }
-        .onDisappear {
-            // Keep the typed draft so coming back to this thread restores it.
-            model.setComposerDraft(composerDraft.text, for: chatId)
-            // Catch notifies that landed after the last onChange mark-read while we were still in the chat
-            // (including rows that arrived while the app was inactive on a call — isWatching was false).
-            if isPeople { model.markPeopleRead(chatId) }
-            else { model.markRead(chatId: chatId) }
-            if model.visibleChatId == chatId { model.visibleChatId = nil }
-        }
-        // Profile "search" sets pendingSearchChat while this chat is already on screen
-        // (sheet over us), so onAppear alone never sees it — watch the published flag.
-        .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
-        .onChange(of: model.pendingDMReply?.chatId) { _, _ in takePendingDMReplyIfNeeded() }
-        .onChange(of: model.pendingForwardDraft?.chatId) { _, _ in takePendingForwardDraftIfNeeded() }
-        // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
-        .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
-        .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
-        // The per-chat version, not the array: comparing 1 000+ messages on every
-        // body (each keystroke, presence tick, publish) was a measurable share of
-        // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
-        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in
-            #if DEBUG
-            if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
-            #endif
-            let old = rowsSource
-            let new = messages
-            let initial = old.isEmpty && rows.isEmpty
-            rowsSource = new
-            refreshRows()
-            // Streaming tokens reassign `messages` with the same last id — do not
-            // mark-read on every delta. Initial call (`old == new`) and a new last
-            // row still mark; AppModel also skips/throttles the PUT.
-            if old.last?.id != new.last?.id || initial {
-                model.markRead(chatId: chatId)
-                if isPeople { model.markPeopleRead(chatId) }
-            }
-            // A channel's read marker moves when a new row lands while it is on screen.
-            if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
-        }
-        // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
-        // A member's rename re-words the membership lines that name them, so the key carries names.
-        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []) { _, _ in
-            refreshRows()
-        }
-        .onChange(of: model.user?.name) { _, _ in refreshRows() }
-        .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
-            if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
-                // Several messages separated by " ||| " go out a few seconds apart
-                // (multitasking checks: the composer never waits for a reply).
-                let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
-                composerDraft.text = parts.first ?? text
-                send()
-                if parts.count > 1 {
-                    Task {
-                        for p in parts.dropFirst() {
-                            try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            composerDraft.text = p
-                            send()
-                        }
-                    }
-                }
-            }
-        }
     }
+
 
     /// Demo tour: present the next sheet; each one auto-dismisses and its
     /// onDismiss schedules the next, so presentations never overlap.
@@ -1874,6 +1994,16 @@ struct ChatSession: View {
                         // People chats and channels stay blank (iMessage-style); the agent
                         // empty copy would say "Ask @handle anything…" which is wrong here.
                         emptyHint
+                    } else if searchHitsActive, visibleRows.isEmpty {
+                        // A keyword with no hit never leaves the transcript blank
+                        // ([feedback iphone-search-close-2026-10-28]): say so, and that a
+                        // tap or the ✕ brings the messages back.
+                        Text("No messages match “\(searchText.trimmingCharacters(in: .whitespaces))”")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 60)
+                            .accessibilityIdentifier("chat-search-no-matches")
                     }
                     let shown = windowedRows
                     // One MentionTable for every bubble (Mac builds Mentions once per
@@ -1918,11 +2048,34 @@ struct ChatSession: View {
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
-            // Tap empty chat chrome to dismiss the keyboard and free the transcript.
+            // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
+            // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
+            // "clicking away from the search should close it"). A tap on a result row runs
+            // `openSearchResult` first (simultaneous gesture), so this only drops the bar.
             .onTapGesture {
                 composerFocused = false
                 searchFocused = false
             }
+            // Simultaneous, so a tap on a bubble (rows have gestures of their own) closes the
+            // bar too, not only a tap on empty chrome. Deferred one turn: a result row's own
+            // tap (`openSearchResult`) runs first and marks itself, and then this only
+            // closes when no result took the tap.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    guard ChatSearchClose.tapOutsideCloses(open: showSearch) else { return }
+                    DispatchQueue.main.async {
+                        if searchResultTapped == nil { closeSearch() }
+                        searchResultTapped = nil
+                    }
+                }
+            )
+            // A swipe on the list with the bar open and nothing typed closes it too; with a
+            // keyword the list IS the results, so scrolling them keeps the bar.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 12).onChanged { _ in
+                    if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
+                }
+            )
             .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
                 // Streaming / new-row growth while pinned: re-stick without animation so
                 // each delta glides with layout instead of fighting a scroll animation.
@@ -3565,6 +3718,10 @@ extension ChatSession {
                     replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
                     mentions: mentions)
                 .equatable()
+                // Search result rows take a tap (simultaneous, so links and chips still work).
+                .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
+                    openSearchResult(row.messageId)
+                })
                 // Where this row is, for the swipe recognizer's row-by-location lookup. The
                 // transcript space scrolls with the content, so this fires on layout, not per
                 // scroll frame; the index is a plain class, so no view is invalidated.
@@ -3953,6 +4110,22 @@ private struct ComposerField: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Allow the microphone in Settings to record a voice memo.")
+        }
+    }
+}
+
+/// A tap on a Search-in-chat result row ([feedback iphone-search-close-2026-10-28]). Only
+/// mounted while a keyword filters the list, so the long-chat transcript carries no extra
+/// recognizer at rest; simultaneous, so a link or mention chip inside the bubble still wins.
+private struct SearchResultTap: ViewModifier {
+    let active: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if active {
+            content.simultaneousGesture(TapGesture().onEnded { action() })
+        } else {
+            content
         }
     }
 }

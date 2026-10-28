@@ -160,7 +160,16 @@ struct PaneCard<Rows: View>: View {
                     .padding(.leading, PaneKit.inset)
             }
             _VariadicView.Tree(PaneCardLayout(separator: theme.separator, inset: separatorInset)) { rows() }
-                .background(RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous).fill(theme.bubbleAssistant))
+                // Glass: a translucent wash with a hairline rim; Matte: the solid grey as before
+                // ([feedback right-pane-glass-cards-ios-2026-10-28], the Mac's `kit::card`).
+                .background(
+                    RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                        .fill(theme.paneCardFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                                .strokeBorder(theme.paneCardRim, lineWidth: 1)
+                        )
+                )
             if let footer {
                 Text(footer)
                     .font(theme.font(Theme.tiny))
@@ -383,7 +392,10 @@ struct PaneTabs: View {
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
                         .padding(.top, hitAbove)
                         .padding(.bottom, hitBelow)
-                        .contentShape(Rectangle())
+                        // `.interaction` so the padded band is the real hit target, not only
+                        // the accessibility frame (UITests were missing the bottom corners of
+                        // Home's All tab — feedback app-01M61EZD0GJ2XGV1EW4SCVXENK / filter taps).
+                        .contentShape(.interaction, Rectangle())
                         .overlay { hitRectOverlay }
                 }
                 .buttonStyle(.plain)
