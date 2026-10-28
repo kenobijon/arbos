@@ -38,6 +38,10 @@ enum DebugHooks {
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
     /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
+    /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
+    static var fixtureGroupRole: String? {
+        value("ARBOS_FIXTURE_GROUP_ROLE").flatMap { ["member", "admin"].contains($0) ? $0 : nil }
+    }
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
@@ -65,9 +69,18 @@ enum DebugHooks {
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
+    /// `ARBOS_FIXTURE_BLOCKED=<handle,…>`: these fixture people are on my block list, as
+    /// `GET /blocks` would hand it over (the Mac fixture's hook of the same name; blocked-state
+    /// rig: the DM's bar and tag, the group's folded rows, the member list's tags).
+    static var fixtureBlocked: Set<String> {
+        Set((value("ARBOS_FIXTURE_BLOCKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
     /// `ARBOS_FIXTURE_REPLY_DM=1`: rows in the fixture DM that answer messages in other chats
     /// (Reply in DM rig, #1836).
     static var fixtureReplyDM: Bool { value("ARBOS_FIXTURE_REPLY_DM") == "1" }
+    /// `ARBOS_FIXTURE_LINKS=1`: four links from unconst in the fixture DM, for the Links tab's
+    /// tiles ([feedback link-icons-ios-tile-2026-10-27]).
+    static var fixtureLinks: Bool { value("ARBOS_FIXTURE_LINKS") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
@@ -129,6 +142,14 @@ enum DebugHooks {
     static var agentPickerPicked: [String] {
         (value("ARBOS_RIG_AGENT_PICKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
+    /// `ARBOS_RIG_PICK=<agent name>,@<handle>,…`: the Add members picker pre-picks these rows
+    /// once it is up; `ARBOS_RIG_AUTO_ADD=<ms>` then runs Add that long after
+    /// ([feedback iphone-add-members-2026-10-26] live proof on a scratch group).
+    static var rigPick: [String]? {
+        let list = (value("ARBOS_RIG_PICK") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return list.isEmpty ? nil : list
+    }
+    static var rigAutoAddMs: Int? { value("ARBOS_RIG_AUTO_ADD").flatMap(Int.init) }
     /// `ARBOS_RIG_AGENT_PICKER=<query>`: the picker's "Add agent" sheet starts open with that
     /// query typed (empty = open, nothing typed).
     static var agentPickerQuery: String? { value("ARBOS_RIG_AGENT_PICKER") }
@@ -162,6 +183,9 @@ enum DebugHooks {
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
+    /// Rig (chart bubbles): print every chart-plot gesture event (`[arbos chart] …`) so a
+    /// simulator run can tell a touch that never reached the plot from a readout that did not draw.
+    static let traceChart: Bool = value("ARBOS_TRACE_CHART") == "1"
     /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
     static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
     /// Live-path replay (iphone-open-scroll-block): `<checkpoint path>|<rows.hex path>`. The

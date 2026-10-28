@@ -110,7 +110,7 @@ struct AgentEditSheet: View {
 
     private func hero(_ project: Project) -> some View {
         VStack(spacing: 12) {
-            AgentAvatar(project: project, theme: theme, size: 116, dot: machineDotColor(model.machine.state, theme: theme), working: model.isStreaming(project: project.id), idle: true)
+            AgentAvatar(project: project, theme: theme, size: 116, mark: machineMark(model.machine.state), working: model.isStreaming(project: project.id), idle: true)
                 .padding(.top, 18)
                 .id("\(project.effectiveAvatarColorIndex.map(String.init) ?? "auto")")
                 .animation(.snappy, value: project.color)
@@ -237,8 +237,12 @@ struct AgentProfileView: View {
     @State private var showReasoning = false
     /// The call-voice picker (#1316's `VoicePickerView`) from the Settings card's Voice row.
     @State private var showVoice = false
+    /// Connect an agent (#2142): Rotate key… pushes the reveal screen with the fresh key.
+    @State private var rotated: ConnectReveal?
 
     private var project: Project? { model.project(projectId) ?? fallback }
+    /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
+    private var outside: OutsideAgentInfo? { model.outsideInfo[projectId] }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
     private var items: [ChatItem] {
         let msgs = model.chats(of: projectId).flatMap { model.messages(of: $0.id) }
@@ -257,7 +261,7 @@ struct AgentProfileView: View {
                             Color.clear.frame(height: PaneKit.pageTop)
                             ProfilePane(
                                 hero: hero(project),
-                                tabs: PaneKinds.agent,
+                                tabs: outside != nil ? PaneKinds.outsideAgent : PaneKinds.agent,
                                 selected: $tab,
                                 body: sections(project)
                             )
@@ -286,10 +290,21 @@ struct AgentProfileView: View {
             }
         }
         .task { await model.loadVoices() }
+        .task(id: projectId) {
+            // Outside agents (#2142): the connection for the Details pane; a native agent leaves no entry.
+            guard isMine else { return }
+            await model.refreshOutsideInfo(projectId)
+            if outside != nil, tab == "Computer" { tab = "Details" }
+        }
         .task(id: isMine) {
             guard isMine else { return }
             await model.refreshRoutines(projectId)
             await model.refreshBoxReport()
+        }
+        .navigationDestination(isPresented: Binding(get: { rotated != nil }, set: { if !$0 { rotated = nil } })) {
+            if let rotated {
+                ConnectRevealView(reveal: rotated, onDone: { self.rotated = nil })
+            }
         }
         .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
             // The Coding row's elapsed time and the Computer tab's jobs move: poll while
@@ -465,9 +480,52 @@ struct AgentProfileView: View {
     private func sections(_ project: Project) -> [PaneSection] {
         switch tab {
         case "Library": return librarySections(project)
-        case "Computer": return computerSections(project)
-        default: return detailsSections(project)
+        case "Computer" where outside == nil: return computerSections(project)
+        default:
+            if let outside { return outsideSections(project, outside) }
+            return detailsSections(project)
         }
+    }
+
+    // MARK: Details for a connected agent — Connection · Key (#2142)
+
+    private func outsideSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        var out: [PaneSection] = []
+        out.append(.title("Connection"))
+        let waiting = !info.connected && info.status == "never"
+        let statusTrailing: AnyView? = waiting
+            ? AnyView(ProgressView().controlSize(.small).tint(theme.accent))
+            : nil
+        out.append(.card([
+            AnyView(PaneRow(title: "Status", value: info.statusLine(), trailing: statusTrailing)
+                .accessibilityIdentifier("outside-status")),
+            AnyView(PaneRow(title: "Transport", value: info.transportLabel)),
+            AnyView(PaneRow(title: "Protocol", value: info.proto)),
+        ]))
+        out.append(.footnote("It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."))
+        out.append(.title("Key"))
+        let revoked = info.status == "revoked"
+        out.append(.card([
+            AnyView(
+                Button {
+                    Task { if let r = await model.rotateOutsideKey(project.id) { rotated = r } }
+                } label: {
+                    PaneRow(leading: .tile("key"), title: "Rotate key…", chevron: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("outside-rotate")
+            ),
+            AnyView(
+                PaneDangerRow(title: revoked ? "Access revoked" : "Revoke access") {
+                    guard !revoked else { return }
+                    Task { await model.revokeOutsideAgent(project.id) }
+                }
+                .disabled(revoked)
+                .accessibilityIdentifier("outside-revoke")
+            ),
+        ]))
+        out.append(.footnote("Revoke stops it at once. Its messages stay."))
+        return out
     }
 
     // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)
@@ -609,7 +667,7 @@ struct AgentProfileView: View {
             let m = model.machine
             var status = m.reported ? m.label : "Checking…"
             if m.state == .awake, let s = report?.awakeForS { status += " · \(AgentPane.durationS(s))" }
-            rows.append(AnyView(statusRow(status, dot: machineDotColor(m.state, theme: theme))))
+            rows.append(AnyView(statusRow(status, mark: machineMark(m.state))))
             rows.append(AnyView(PaneRow(title: "Where it runs", value: m.whereItRuns)))
             // The spec line names the provider first; "Where it runs" already did.
             var spec = m.spec
@@ -625,14 +683,16 @@ struct AgentProfileView: View {
             let raw = project.machineState ?? ""
             let state: BoxState = project.machineAlwaysOn && raw != "error" ? .awake : (BoxState.fromWire(raw) ?? project.state)
             let shown = Machine(state: state, since: nil, spec: "")
-            rows.append(AnyView(statusRow(shown.label, dot: machineDotColor(state, theme: theme))))
+            rows.append(AnyView(statusRow(shown.label, mark: machineMark(state))))
             if let klass = project.machineClass, !klass.isEmpty { rows.append(AnyView(PaneRow(title: "Machine", value: klass))) }
         }
         return rows
     }
 
-    private func statusRow(_ status: String, dot: Color) -> some View {
-        PaneRow(title: "Status", value: status, trailing: AnyView(Circle().fill(dot).frame(width: 9, height: 9)))
+    /// The Status row's trailing mark (Jacob, 2026-10-27: never a coloured dot): the
+    /// spinner while the machine wakes, the fault glyph on error, nothing at rest.
+    private func statusRow(_ status: String, mark: StatusMark?) -> some View {
+        PaneRow(title: "Status", value: status, trailing: mark.map { AnyView(StatusMarkView(mark: $0, size: 10)) })
     }
 
     /// Every workspace with a turn running (spinner, name, elapsed, tool calls), or why
