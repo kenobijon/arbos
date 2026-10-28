@@ -217,6 +217,9 @@ acquire() {
   # gate half holding its slot kept a due release waiting for the whole half (Release 858b354df sat 14 min
   # behind gate-ios 001406-12 on an idle box, load 6) — the preempt rule only decided who got the NEXT grant.
   { (( priority )) || is_release_name "$name"; } && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
+  # A P0 rig also counts against the priority cap: with gate batches back to back one half always holds the base
+  # slot, so a rig capped at MAX_SLOTS could only ever run between gate runs (outside-agents, 04:1x Oct 28).
+  ! is_exempt_name "$name" && is_p0_rig "$name" && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
   t0=$(date +%s)
   local mark=""
   if is_gate_name "$name"; then
