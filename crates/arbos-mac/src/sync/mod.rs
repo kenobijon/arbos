@@ -33,8 +33,8 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
-    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    Attachment, BoxReport, BoxState, ChannelsView, ChartBody, Chat, ConnectorsView, DeviceView,
+    Effort, Id, Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
     ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
@@ -581,11 +581,6 @@ pub enum ClientCommand {
         chat_id: Id,
         active: bool,
     },
-    /// `POST /chats/{id}/agents {project_id}` (own project only).
-    AddAgent {
-        chat_id: Id,
-        project_id: Id,
-    },
     /// `DELETE /chats/{id}/agents/{project_id}` (owner of that project).
     RemoveAgent {
         chat_id: Id,
@@ -991,13 +986,20 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
-    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
-    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
-    /// `message_id` is the optimistic row's id.
-    ForwardText {
+    /// Bubble menu → Forward: write the picked message again as a new user row
+    /// in `chat_id` — its text, every attachment (each blob copied from
+    /// `from_slot` into the destination's slot, so the target chat's members can
+    /// read it) and every chart part with its fallback picture — carrying
+    /// `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id
+    /// ([feedback forward-attachments-mac-2026-10-27]).
+    ForwardMessage {
         chat_id: Id,
         message_id: Id,
+        from_slot: Id,
         text: String,
+        attachments: Vec<Attachment>,
+        charts: Vec<ChartBody>,
         forwarded_from: String,
     },
     /// Settings → Connectors opened or asked for a refresh.

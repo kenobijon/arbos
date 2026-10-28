@@ -54,11 +54,14 @@ mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
+mod settings_audit;
 mod shell_grants;
 mod signin;
+mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod unfurl;
 mod upgrade;
 mod upgrade_carry;
 mod vault;
@@ -330,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
+        decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
@@ -637,6 +641,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/people/{id}", get(people::box_people_chat))
         .route(
+            "/box/people/{id}/gate",
+            post(room_health::post_gate_decision),
+        )
+        .route(
+            "/admin/room-health/{id}",
+            get(room_health::admin_room_health),
+        )
+        .route(
             "/projects/{id}/members",
             get(people::project_members_list).post(people::project_member_add),
         )
@@ -826,6 +838,10 @@ async fn main() -> anyhow::Result<()> {
             "/room/{project}/{chat}/messages/{message_id}",
             delete(moderation::delete_message),
         )
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}/preview",
+            delete(moderation::remove_preview),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
         .route("/feedback", post(feedback::submit))
@@ -840,6 +856,25 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/feedback/{id}/issue",
             post(feedback::admin_set_issue),
+        )
+        // Agent-hosted sites (#2060): box publish API, owner list/unpublish, admin takedown.
+        .route("/sites", get(sites::list).delete(sites::unpublish_all))
+        .route("/sites/{app}", delete(sites::unpublish))
+        .route("/sites/{app}/begin", post(sites::begin))
+        .route("/sites/{app}/blob/{sha}", put(sites::put_blob))
+        .route("/sites/{app}/commit", post(sites::commit))
+        .route("/admin/sites", get(sites::admin_list))
+        .route("/admin/sites/events", get(sites::admin_events))
+        .route("/admin/sites/move/{user}", post(sites::admin_move))
+        .route("/admin/sites/quota/{user}", put(sites::admin_set_quota))
+        .route("/admin/sites/{user}/{app}", delete(sites::admin_purge))
+        .route(
+            "/admin/sites/{user}/{app}/takedown",
+            post(sites::admin_takedown),
+        )
+        .route(
+            "/admin/sites/{user}/{app}/restore",
+            post(sites::admin_restore),
         )
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
@@ -981,7 +1016,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
         .with_state(state.clone());
