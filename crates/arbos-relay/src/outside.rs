@@ -425,6 +425,11 @@ fn open_streams() -> &'static StdMutex<OpenStreams> {
 }
 
 /// Store one event for the agent and wake whoever is parked on its inbox.
+#[cfg(test)]
+pub(crate) fn deliver_for_test(state: &AppState, project_id: &str, payload: Value) {
+    deliver(state, project_id, payload);
+}
+
 fn deliver(state: &AppState, project_id: &str, mut payload: Value) {
     payload["ts"] = json!(now_ms());
     match state.db.insert_asp_event(project_id, &payload) {
@@ -1284,7 +1289,14 @@ pub async fn inbox(
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let wait = q.wait.min(WAIT_MAX_S);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let n = waiter(&me.project.id);
     loop {
+        // Register interest *before* reading the table: `notify_waiters` wakes only waiters that
+        // already exist, so an event stored between the read and the wait would otherwise park
+        // this call until `wait` runs out (up to 25 s) instead of answering at once.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let mut events = state
             .db
             .asp_events_after(&me.project.id, q.since, limit)
@@ -1293,9 +1305,6 @@ pub async fn inbox(
             crate::outside_sidecar::attach_context(&state, &me.project, &mut events, q.context);
             return Json(events_json(events, q.since)).into_response();
         }
-        let n = waiter(&me.project.id);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = tokio::time::sleep_until(deadline) => {
@@ -1698,7 +1707,12 @@ async fn run_socket(
         return;
     }
     let mut lease = tokio::time::interval(std::time::Duration::from_secs(45));
+    let n = waiter(&pid);
     loop {
+        // Same ordering as the inbox: interest first, then the read, then the wait.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         // Drain what is queued first.
         let mut events = state
             .db
@@ -1732,9 +1746,6 @@ async fn run_socket(
                 .await;
             return;
         }
-        let n = waiter(&pid);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = lease.tick() => {

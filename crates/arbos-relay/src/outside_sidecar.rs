@@ -416,6 +416,65 @@ mod tests {
         assert!(bad.is_err());
     }
 
+    /// Jacob (16:32 UTC): the relay must add no delay. An inbox long-poll parked with nothing
+    /// queued answers within milliseconds of the event being stored — and an event stored in the
+    /// gap between the table read and the wait is not missed (the Notify is enabled first).
+    #[tokio::test]
+    async fn inbox_long_poll_returns_at_once_on_a_new_event() {
+        use crate::outside::{deliver_for_test, inbox, mint_key, AgentPrincipal, InboxQuery};
+        use crate::people::tests_support::{person, project_of};
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        use arbos_core::auth::hash;
+        use axum::body::to_bytes;
+        use axum::extract::{Query, State};
+
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 7301);
+        let pid = project_of(&state, &owner, "Fast Bot");
+        let key = mint_key();
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "custom", &hash(&key))
+            .unwrap();
+        let agent = state
+            .db
+            .outside_agent_by_key_hash(&hash(&key))
+            .unwrap()
+            .unwrap();
+        let project = state.db.project(&pid).unwrap().unwrap();
+        let me = AgentPrincipal { agent, project };
+        let q = InboxQuery {
+            since: 0,
+            wait: 25,
+            limit: None,
+            context: 0,
+        };
+        let s2 = state.clone();
+        let waiter = tokio::spawn(async move { inbox(State(s2), me, Query(q)).await });
+        // Let the call park, then store an event and time the answer.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let t = std::time::Instant::now();
+        deliver_for_test(
+            &state,
+            &pid,
+            json!({ "type": "message.received", "chat": { "id": "c1" }, "wake": true }),
+        );
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("the long-poll answered within 2 s")
+            .unwrap();
+        let took = t.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "took {took:?}"
+        );
+        let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["events"].as_array().unwrap().len(), 1);
+        assert_eq!(v["next"], 1);
+    }
+
     #[test]
     fn defaults_match_the_spec() {
         for on in [
