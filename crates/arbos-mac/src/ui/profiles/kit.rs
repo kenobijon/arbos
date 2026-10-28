@@ -17,7 +17,8 @@
 //! * danger row: centred red label, same height.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Stateful,
+    div, prelude::*, px, AnyElement, BoxShadow, Div, ElementId, FontWeight, Hsla, SharedString,
+    Stateful,
 };
 
 use crate::ui::glass;
@@ -97,7 +98,17 @@ pub fn card(theme: &Theme) -> Div {
         .mx(px(INSET))
         .mb(px(CARD_GAP))
         .rounded(px(CARD_RADIUS))
-        .bg(theme.pane_card)
+        .bg(theme.pane_card_fill())
+        // The Glass rim: an inset shadow, so it costs the rows no layout
+        // (a border would shrink the card's content box by 1 pt a side);
+        // transparent on Matte.
+        .shadow(vec![BoxShadow::new(
+            px(0.0),
+            px(0.0),
+            theme.pane_card_rim(),
+        )
+        .spread_radius(px(1.0))
+        .inset()])
         .overflow_hidden()
 }
 
@@ -182,11 +193,11 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
                 .size(px(AVATAR))
                 .flex_shrink_0()
                 .rounded(px(10.0))
-                .bg(theme.surface_2)
+                .bg(theme.control_fill())
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(sf_symbols::glyph(glyph, 18.0, theme.text_muted))
+                .child(sf_symbols::glyph(glyph, 18.0, theme.label_muted()))
                 .into_any_element(),
         ),
     }
@@ -273,7 +284,7 @@ pub fn row_state(
                     el.child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .truncate()
                             .child(s),
                     )
@@ -284,13 +295,17 @@ pub fn row_state(
                 div()
                     .flex_shrink_0()
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(d),
             )
         })
         .children(trailing)
         .when(chevron, |el| {
-            el.child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
+            el.child(sf_symbols::glyph(
+                "chevron.right",
+                13.0,
+                theme.label_faint(),
+            ))
         })
         .child(hairline_below(theme))
 }
@@ -395,7 +410,7 @@ pub fn pill_button(
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .cursor_pointer();
-    highlight::washed(frame, theme.surface_2, theme)
+    highlight::washed(frame, theme.control_fill(), theme)
         .child(sf_symbols::symbol(
             symbol,
             PILL_GLYPH,
@@ -414,7 +429,7 @@ pub fn footnote(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .mt(px(-8.0))
         .mb(px(14.0))
         .text_size(px(TEXT_TINY))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .child(text.into())
 }
 
@@ -429,7 +444,7 @@ pub fn section_title(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .pb(px(SECTION_TITLE_BOTTOM))
         .text_size(px(TEXT_SMALL))
         .line_height(px(SECTION_TITLE_LINE))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .debug_selector(|| "section-title".into())
         .child(text.into())
 }
@@ -443,7 +458,7 @@ pub fn empty(text: &str, theme: &Theme) -> Div {
         .flex()
         .justify_center()
         .text_size(px(TEXT_SMALL))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .child(text.to_string())
 }
 
@@ -474,7 +489,7 @@ pub fn confirm_button(
                 el.border_1()
                     .border_color(theme.field_border)
                     .text_color(theme.text),
-                theme.field,
+                theme.field_fill(),
                 theme,
             )
         })

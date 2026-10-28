@@ -563,7 +563,7 @@ pub(crate) fn account_avatar(
         None => div()
             .size(px(FOOTER_AVATAR))
             .rounded_full()
-            .bg(theme.surface_2)
+            .bg(theme.control_fill())
             .flex()
             .items_center()
             .justify_center()

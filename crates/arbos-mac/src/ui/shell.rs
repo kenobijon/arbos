@@ -4870,7 +4870,7 @@ impl Render for Shell {
         let project_space = state.selected().filter(|p| !p.is_people()).cloned();
         let selected = state.selected().cloned();
 
-        let mut root = div()
+        let root = div()
             .id("shell-root")
             .key_context("Shell")
             .track_focus(&self.focus_handle)
