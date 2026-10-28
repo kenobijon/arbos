@@ -533,6 +533,7 @@ mod tests {
         }
         for item in [
             crate::ui::profiles::library::MenuItem::Open,
+            crate::ui::profiles::library::MenuItem::Copy,
             crate::ui::profiles::library::MenuItem::Forward,
             crate::ui::profiles::library::MenuItem::Download,
             crate::ui::profiles::library::MenuItem::OpenLink,
