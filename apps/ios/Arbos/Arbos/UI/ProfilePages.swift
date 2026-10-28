@@ -940,6 +940,8 @@ struct UserProfileView: View {
             }
         } message: { Text(BlockedState.confirmNote) }
         .task {
+            // Rig: `ARBOS_PANEL_TAB=Groups` lands on that tab (screenshot rig, as the group page).
+            if let t = DebugHooks.panelTab, PaneKinds.person.contains(t) { tab = t }
             await model.refreshBlocks()
             await model.refreshPeople()
             let id = model.personId(handle: person.handle) ?? person.id
@@ -991,10 +993,17 @@ struct UserProfileView: View {
         if groups.isEmpty && sharedProjects.isEmpty {
             return [.empty("No groups in common yet.")]
         }
+        // The group's own picture through the resolver, like the home row and search —
+        // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
                 Button { dismiss(); model.open(peopleChat: g) } label: {
-                    PaneRow(leading: .glyph("person.2.fill"), title: g.title, subtitle: "\(g.humans.count) members", chevron: true)
+                    PaneRow(
+                        leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
+                        title: g.title,
+                        subtitle: "\(g.humans.count) members",
+                        chevron: true
+                    )
                 }
                 .buttonStyle(.plain)
             )
