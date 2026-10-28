@@ -30,15 +30,6 @@ const CANONICAL_RELAY: &str = "https://relay.arbos.life";
 /// Most rows a wake event may carry as context.
 pub const CONTEXT_MAX: usize = 20;
 
-/// Scope defaults (spec §4.3) until #2182's switches land on main; then this becomes
-/// `agent.allows(scope)` and the shim goes.
-pub fn allows(scope: &str) -> bool {
-    matches!(
-        scope,
-        "chat.read" | "chat.post" | "chat.react" | "presence" | "approval.request"
-    )
-}
-
 fn scope_refused(what: &str) -> Response {
     api_error(
         StatusCode::FORBIDDEN,
@@ -112,7 +103,7 @@ pub async fn members(
     me: AgentPrincipal,
     Path(chat_id): Path<String>,
 ) -> Response {
-    if !allows("chat.read") {
+    if !me.agent.allows("chat.read") {
         return scope_refused("reading");
     }
     let Some(chat) = crate::outside::chat_json_for(&state, &me.project, &chat_id) else {
@@ -212,9 +203,10 @@ pub fn context_for(
 }
 
 /// Decorate the wake events of an inbox page with `context` when the agent asked for `n > 0`
-/// rows (`chat.read` only). Other events pass through untouched.
+/// rows. The callers (`inbox`, `socket`) already refuse agents without `chat.read`. Other
+/// events pass through untouched.
 pub fn attach_context(state: &AppState, me: &Project, events: &mut [(i64, Value)], n: usize) {
-    if n == 0 || !allows("chat.read") {
+    if n == 0 {
         return;
     }
     for (_, e) in events.iter_mut() {
@@ -473,21 +465,5 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["events"].as_array().unwrap().len(), 1);
         assert_eq!(v["next"], 1);
-    }
-
-    #[test]
-    fn defaults_match_the_spec() {
-        for on in [
-            "chat.read",
-            "chat.post",
-            "chat.react",
-            "presence",
-            "approval.request",
-        ] {
-            assert!(allows(on), "{on}");
-        }
-        for off in ["secret.use", "members.manage", "files.read", "calls.join"] {
-            assert!(!allows(off), "{off}");
-        }
     }
 }
