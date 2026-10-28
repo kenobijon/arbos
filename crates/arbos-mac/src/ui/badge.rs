@@ -27,6 +27,7 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Window,
 };
 
+use crate::ui::highlight;
 use crate::ui::theme::Theme;
 
 /// How far the badge hangs past the picture's bottom-right edge (both axes).
@@ -148,6 +149,7 @@ fn dot_element(size: f32, badge: Badge) -> Div {
         .rounded_full()
         .bg(badge.ring)
         .when_some(badge.hover, |el, (group, color)| {
+            // hover-fill: exception badge-ring
             el.group_hover(group, move |s| s.bg(color))
         })
         .flex()
@@ -251,16 +253,16 @@ pub mod ring {
         theme.sidebar
     }
 
-    /// A selected sidebar row or rail tile, and the footer row under the
-    /// pointer: the card fill.
+    /// A selected sidebar row or rail tile: the highlight token's selected
+    /// step (`ui::highlight`) as painted over the sidebar.
     pub fn selected(theme: &Theme) -> Hsla {
-        theme.surface_2
+        highlight::over(theme.sidebar, highlight::fills(theme).selected)
     }
 
-    /// A sidebar row under the pointer: its hover tint (`surface_2` at 55 %)
-    /// over the sidebar.
+    /// A sidebar row, tile or the footer row under the pointer: the token's
+    /// hover step over the sidebar.
     pub fn hovered(theme: &Theme) -> Hsla {
-        Theme::composite(Theme::with_alpha(theme.surface_2, 0.55), theme.sidebar)
+        highlight::over(theme.sidebar, highlight::fills(theme).hover)
     }
 
     /// The chat header's pill: its glass fill over the page it floats on.
@@ -559,15 +561,22 @@ mod layout_tests {
                     ring::sidebar(&theme),
                     theme.wash_tint(crate::ui::theme::GlassRegion::Sidebar)
                 );
-                assert_eq!(ring::selected(&theme), theme.surface_2);
+                let fills = highlight::fills(&theme);
+                assert_eq!(
+                    ring::selected(&theme),
+                    highlight::over(theme.sidebar, fills.selected),
+                    "the selected step of the one highlight token, over the sidebar"
+                );
                 let hovered = ring::hovered(&theme);
                 assert_eq!(
                     hovered.a, 1.0,
                     "opaque: the ring must hide the picture under it"
                 );
-                assert_eq!(
+                assert_eq!(hovered, highlight::over(theme.sidebar, fills.hover));
+                assert_ne!(
                     hovered,
-                    Theme::composite(Theme::with_alpha(theme.surface_2, 0.55), theme.sidebar)
+                    ring::selected(&theme),
+                    "hover and selected are one step apart"
                 );
                 let pill = ring::header_pill(&theme);
                 assert_eq!(pill.a, 1.0);

@@ -591,7 +591,7 @@ pub(crate) fn account_avatar(
         },
     );
     let badge = badge::Badge::new(dot, badge::ring::sidebar(theme))
-        .hover(FOOTER_GROUP, badge::ring::selected(theme));
+        .hover(FOOTER_GROUP, badge::ring::hovered(theme));
     badge::badged(FOOTER_AVATAR, picture, Some(badge))
         .debug_selector(|| "sidebar-account-avatar".into())
 }
@@ -826,6 +826,7 @@ fn chat_picture(
             .p(px(badge::RING_WIDTH))
             .rounded_full()
             .bg(ring)
+            // hover-fill: exception badge-ring
             .group_hover(group, move |s| s.bg(hover_ring))
             .child(avatars::agent_picture(&a, image, size / 2.0, theme));
         return badge::corner(size, picture, mini, 3.0);
