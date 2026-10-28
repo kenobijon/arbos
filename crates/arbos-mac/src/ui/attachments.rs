@@ -114,11 +114,15 @@ fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful
 
 /// The card element for one attachment row. `forwarded_from` is the message's
 /// "Forwarded from …" line, shown as the card's hint instead of a bubble.
+/// `quote_header` is a reply's quote, drawn above the picture / card like a text
+/// bubble's ([feedback picture-reply-quote-mac-2026-10-28]).
+#[allow(clippy::too_many_arguments)]
 pub fn card(
     row_id: &str,
     attachment: &Attachment,
     preview: Preview,
     forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
     open: Option<OpenFn>,
     state: Entity<AppState>,
     theme: &Theme,
@@ -129,22 +133,33 @@ pub fn card(
             attachment,
             preview,
             forwarded_from,
+            quote_header,
             open,
             state,
             theme,
         )
     } else {
-        file_card(row_id, attachment, forwarded_from, open, state, theme)
+        file_card(
+            row_id,
+            attachment,
+            forwarded_from,
+            quote_header,
+            open,
+            state,
+            theme,
+        )
     }
 }
 
 /// A picture: aspect-fit at its own ratio, bubble radius, slim outline. Hover
 /// shows the ↓ disc top-right; the whole bubble opens the viewer.
+#[allow(clippy::too_many_arguments)]
 fn picture_bubble(
     row_id: &str,
     attachment: &Attachment,
     preview: Preview,
     forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
     open: Option<OpenFn>,
     state: Entity<AppState>,
     theme: &Theme,
@@ -242,6 +257,11 @@ fn picture_bubble(
             crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
         ));
     }
+    if let Some(quote) = quote_header {
+        // A reply's quote above the picture, where a text bubble carries it
+        // ([feedback picture-reply-quote-mac-2026-10-28]).
+        out = out.child(div().pl(px(6.0)).max_w(px(w)).child(quote));
+    }
     out = out.child(bubble);
     // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
     // app-01M61EZD0GJ2XGV1EW4SCVXENK): a small "via <provider>" under the
@@ -268,10 +288,12 @@ fn picture_bubble(
 
 /// Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB";
 /// no Download pill — the ↓ disc appears on hover, the viewer has the rest.
+#[allow(clippy::too_many_arguments)]
 fn file_card(
     row_id: &str,
     attachment: &Attachment,
     forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
     open: Option<OpenFn>,
     state: Entity<AppState>,
     theme: &Theme,
@@ -372,7 +394,18 @@ fn file_card(
     if let Some(open) = open {
         card = highlight::button(card.cursor_pointer(), theme).on_click(move |_, _, cx| open(cx));
     }
-    card.into_any_element()
+    match quote_header {
+        // A reply's quote above the card, where a text bubble carries it
+        // ([feedback picture-reply-quote-mac-2026-10-28]).
+        Some(quote) => div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(div().pl(px(6.0)).max_w(px(CARD_WIDTH)).child(quote))
+            .child(card)
+            .into_any_element(),
+        None => card.into_any_element(),
+    }
 }
 
 /// The "Forwarded from <name>" line of a message, when its text is one.
