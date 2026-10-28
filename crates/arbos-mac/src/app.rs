@@ -208,6 +208,25 @@ fn save_read_receipts(enabled: bool) {
     let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
+fn link_previews_path() -> std::path::PathBuf {
+    crate::sync::credentials::config_dir().join("link-previews")
+}
+
+/// Settings → Chat → Link previews, saved on this Mac; on unless switched off
+/// ([feedback link-embeds-mac-2026-10-27]).
+fn load_link_previews() -> bool {
+    std::fs::read_to_string(link_previews_path())
+        .ok()
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true)
+}
+
+fn save_link_previews(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(link_previews_path(), if enabled { "true" } else { "false" });
+}
+
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
 pub fn ago_text(ms: u64) -> String {
     let s = ms / 1000;
@@ -567,6 +586,25 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// The reveal sheet after Connect an agent (#2141): the key, shown once, and the live
+/// connection while the sheet is up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectReveal {
+    pub project_id: Id,
+    pub name: String,
+    /// `acp` | `grok` | `custom`.
+    pub transport: String,
+    pub key: String,
+    pub link: String,
+    pub relay_url: String,
+    pub chat_id: Option<Id>,
+    /// After Rotate key…: the sheet says so instead of the first-time words.
+    pub rotated: bool,
+    pub status: Option<crate::model::OutsideInfo>,
+    /// Which Copy was pressed last ("key" | "link"), for the "Copied" tick.
+    pub copied: Option<&'static str>,
+}
+
 /// What the Create group screen (step 1) hands to the member picker (step 2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupDraft {
@@ -698,6 +736,9 @@ pub struct AppState {
     /// Site icons for the bubbles' named links, by host: `Some` once the relay answered
     /// with a picture, `None` when the site has none; a host still loading is absent.
     pub link_icons: HashMap<String, Option<Arc<RenderImage>>>,
+    /// Each fetched link icon's tone (a dark transparent mark, a light one, or neither), so
+    /// the link tiles can flip their fill under it ([`crate::ui::link_tile`]).
+    pub link_icon_tones: HashMap<String, crate::ui::link_tile::Tone>,
     /// Link-icon fetches in flight or answered (never asked twice per session).
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
@@ -766,6 +807,10 @@ pub struct AppState {
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
     pub forward_message: Option<ForwardMessage>,
     pub new_project_open: bool,
+    /// Connect an agent (#2141): the Create screen in its connect form is up.
+    pub connect_open: bool,
+    /// Connect an agent: the key reveal sheet, after the relay answered.
+    pub connect_reveal: Option<ConnectReveal>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -852,6 +897,8 @@ pub struct AppState {
     /// Settings → Notifications: send and show Presence `{seen}` read receipts
     /// (`<config>/read_receipts.json`, default on).
     pub read_receipts: bool,
+    /// Settings → Chat → Link previews (this Mac).
+    pub link_previews: bool,
     /// People-chat read receipts: chat id → (peer handle → last seen message id).
     pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -884,7 +931,7 @@ pub struct AppState {
     /// reason; the speaker row under that reply offers a retry. Scoped to the
     /// message, never shown as an app-wide banner.
     pub speech_failed: HashMap<Id, String>,
-    awaiting_new_project: bool,
+    pub awaiting_new_project: bool,
     /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
     pub calls_in_chat: HashMap<Id, Call>,
     /// Someone is calling me (ringing): the call and who started it.
@@ -1193,6 +1240,7 @@ impl AppState {
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             link_icons: HashMap::new(),
+            link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             copy_request: None,
@@ -1224,6 +1272,8 @@ impl AppState {
             chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
+            connect_open: false,
+            connect_reveal: None,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1258,6 +1308,11 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
+            link_previews: {
+                let on = load_link_previews();
+                crate::ui::link_card::set_enabled(on);
+                on
+            },
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1639,6 +1694,45 @@ impl AppState {
             assert!(text != "panic!", "test poison event");
         }
         match event {
+            SyncEvent::OutsideAgentKey {
+                project_id,
+                name,
+                transport,
+                key,
+                link,
+                relay_url,
+                chat_id,
+                rotated,
+            } => {
+                self.awaiting_new_project = false;
+                self.connect_reveal = Some(ConnectReveal {
+                    project_id: project_id.clone(),
+                    name,
+                    transport,
+                    key,
+                    link,
+                    relay_url,
+                    chat_id,
+                    rotated,
+                    status: None,
+                    copied: None,
+                });
+                self.poll_connect_status(cx);
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentStatus { project_id, info } => {
+                if let Some(r) = self
+                    .connect_reveal
+                    .as_mut()
+                    .filter(|r| r.project_id == project_id)
+                {
+                    r.status = Some(info.clone());
+                }
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+                    p.outside = Some(info);
+                }
+                cx.notify();
+            }
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
                     .pairing
@@ -1730,6 +1824,23 @@ impl AppState {
                 reachable,
             } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::ChannelMessage {
+                server_id,
+                server_name,
+                channel_id,
+                channel_name,
+                room_id,
+                sender,
+                text,
+            } => self.notify_channel_message(
+                &server_id,
+                &server_name,
+                &channel_id,
+                &channel_name,
+                &room_id,
+                &sender,
+                text.as_deref(),
+            ),
             SyncEvent::FeedbackCapture {
                 request_id,
                 expires_at,
@@ -1931,7 +2042,13 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::LinkIcon { host, png } => {
-                let image = png.and_then(|b| decode_image(&b)).map(Arc::new);
+                let rgba = png.and_then(|b| decode_rgba(&b));
+                let tone = rgba
+                    .as_ref()
+                    .map(crate::ui::link_tile::tone_of)
+                    .unwrap_or_default();
+                let image = rgba.and_then(bgra_frame).map(Arc::new);
+                self.link_icon_tones.insert(host.clone(), tone);
                 self.link_icons.insert(host, image);
                 cx.notify();
             }
@@ -4531,6 +4648,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         if answer {
             let question_id = self.open_plain_question_id(&chat_id);
@@ -5297,6 +5415,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ChannelSend {
             room_id: room_id.clone(),
@@ -5703,6 +5822,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Answer {
             chat_id: chat_id.clone(),
@@ -6189,6 +6309,46 @@ impl AppState {
             chat_id,
             message_id,
         });
+        cx.notify();
+    }
+
+    /// Bubble ⋯ / the card's × → Remove preview: the relay drops the message's link preview
+    /// for everyone (`preview: "off"`); the card goes at once here, the row follows.
+    pub fn remove_link_preview(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        if let Some(m) = self
+            .messages
+            .get_mut(&chat_id)
+            .and_then(|list| list.iter_mut().find(|m| m.id == message_id))
+        {
+            m.preview = Some("off".into());
+        }
+        self.command(ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    /// A link in a bubble or a preview card was clicked: one seam for every chat link, so a
+    /// confirm step (#1522) slots in here for all of them at once. Today: the default opener.
+    pub fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        if url.trim().is_empty() {
+            return;
+        }
+        cx.open_url(url);
+    }
+
+    /// Settings → Chat → Link previews: cards on or off on this Mac.
+    pub fn set_link_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.link_previews == enabled {
+            return;
+        }
+        self.link_previews = enabled;
+        crate::ui::link_card::set_enabled(enabled);
+        save_link_previews(enabled);
         cx.notify();
     }
 
@@ -6752,6 +6912,13 @@ impl AppState {
             _ => None,
         };
         if let ProfilePage::Agent { project_id } = &page {
+            // A connected agent's Details: a fresh "Connected · N s ago" (#2141).
+            if self
+                .project(project_id)
+                .is_some_and(|p| p.outside.is_some())
+            {
+                self.refresh_outside_status(project_id.clone());
+            }
             self.command(ClientCommand::ShellGrantsRefresh {
                 project_id: project_id.clone(),
             });
@@ -7575,6 +7742,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Forward {
             chat_id: target.chat_id.clone(),
@@ -7632,7 +7800,15 @@ impl AppState {
             cx.notify();
             return;
         }
-        let by = self.forward_sender_name(message);
+        // Forwarding a forwarded message keeps the original author (Telegram), not
+        // whoever forwarded it last.
+        let by = message
+            .forwarded_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.forward_sender_name(message));
         self.forward_message = Some(ForwardMessage {
             chat_id,
             message_id,
@@ -7717,6 +7893,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ForwardMessage {
             chat_id: target.chat_id.clone(),
@@ -7801,6 +7978,39 @@ impl AppState {
     ) {
         let Some(project) = self.project(&project_id) else {
             return;
+        };
+        // A message in a group (people group, shared project chat): the banner is titled
+        // with the group and the sender moves into the body — "Arbonites" / "Doug: Five." —
+        // with the group's picture; the same shape as the iPhone and the relay's APNs payload
+        // (Jacob 2026-10-27: "cannot tell which group a message came from"). A DM keeps the
+        // sender as the title.
+        let group = (kind.is_message() && project.is_groupish() && sender.is_some()).then(|| {
+            (
+                project.name.clone(),
+                project
+                    .image_url
+                    .as_deref()
+                    .and_then(|u| self.person_notification_png(u))
+                    .or_else(|| {
+                        crate::ui::avatars::notification_png(
+                            &project.id,
+                            &project.name,
+                            project.avatar_color_index,
+                            crate::ui::theme::system_is_dark(),
+                        )
+                    }),
+            )
+        });
+        let (detail, sender, image) = match group {
+            Some((group_name, group_image)) => {
+                let (title, body) = notify::group_frame(
+                    &group_name,
+                    sender.as_deref().unwrap_or_default(),
+                    &detail,
+                );
+                (body, Some(title), group_image.or(image))
+            }
+            None => (detail, sender, image),
         };
         let mut event = NotifyEvent::new(project.id.clone(), project.name.clone(), kind, detail);
         event.chat_id = chat_id.map(str::to_string);
@@ -8102,8 +8312,75 @@ impl AppState {
         self.sync_focus();
     }
 
-    /// A click on a notification: bring the window up and show that chat.
+    /// A server channel message (relay `channel_message` push, from the homeserver's push
+    /// rules — every member but the sender): a banner "<sender> in #channel" unless that
+    /// channel is on screen in a focused window or the server is muted. The coalescer keys
+    /// it under `server:<id>` so a busy server folds into "N updates in <server>".
+    #[allow(clippy::too_many_arguments)]
+    fn notify_channel_message(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        channel_id: &str,
+        channel_name: &str,
+        room_id: &str,
+        sender: &crate::model::Sender,
+        text: Option<&str>,
+    ) {
+        let key = format!("server:{server_id}");
+        let visible = self.window_active
+            && self
+                .selected_channel
+                .as_ref()
+                .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        let gate = Gate {
+            streaming: false,
+            visible: visible || self.is_muted(&key),
+        };
+        let title = if sender.kind == "agent" || sender.handle.is_empty() {
+            sender.name.clone()
+        } else {
+            format!("@{}", sender.handle)
+        };
+        // Same shape as a group banner: title = where ("Server › #channel"), body = "Sender: text".
+        let (banner_title, body) = notify::channel_frame(server_name, channel_name, &title, text);
+        let mut event = NotifyEvent::new(
+            key,
+            server_name.to_string(),
+            NotifyKind::DirectMessage,
+            body,
+        );
+        event.chat_id = Some(room_id.to_string());
+        event.sender = Some(banner_title);
+        event.image = if sender.kind == "agent" {
+            crate::ui::avatars::notification_png(
+                &sender.id,
+                &sender.name,
+                sender.avatar_color_index,
+                crate::ui::theme::system_is_dark(),
+            )
+        } else if sender.avatar_url.is_empty() {
+            None
+        } else {
+            self.person_notification_png(&sender.avatar_url)
+        };
+        self.notifier.offer(event, now_ms(), gate);
+    }
+
+    /// A click on a notification: bring the window up and show that chat — or, for a
+    /// server channel banner (its id is the room id), that channel.
     pub fn open_chat_from_notification(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let channel = self.servers.iter().find_map(|s| {
+            s.channels
+                .iter()
+                .find(|c| c.room_id.as_deref() == Some(chat_id.as_str()))
+                .map(|c| (s.id.clone(), c.id.clone()))
+        });
+        if let Some((server_id, channel_id)) = channel {
+            self.select_channel(server_id, channel_id, cx);
+            cx.activate(true);
+            return;
+        }
         let project_id = self
             .chats
             .values()
@@ -9498,6 +9775,84 @@ impl AppState {
         cx.notify();
     }
 
+    /// Connect an outside agent (#2141): the relay makes the project and mints the key; the
+    /// reveal sheet opens on [`SyncEvent::OutsideAgentKey`].
+    pub fn connect_agent(
+        &mut self,
+        name: String,
+        transport: &str,
+        avatar_color_index: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        self.connect_open = false;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::ConnectAgent {
+            name,
+            transport: transport.to_owned(),
+            avatar_color_index,
+        });
+        self.push_notice("Connecting…");
+        cx.notify();
+    }
+
+    /// While the reveal sheet is up, ask the relay every 3 s whether the agent has checked in.
+    fn poll_connect_status(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.connect_reveal.as_ref().map(|r| r.project_id.clone()) else {
+            return;
+        };
+        self.command(ClientCommand::OutsideAgentStatus {
+            project_id: project_id.clone(),
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let go = this.update(cx, |state, _| match state.connect_reveal.as_ref() {
+                Some(r) if r.project_id == project_id => {
+                    state.command(ClientCommand::OutsideAgentStatus {
+                        project_id: project_id.clone(),
+                    });
+                    true
+                }
+                _ => false,
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Done / × on the reveal sheet: the key is gone from the screen; open the agent's chat.
+    pub fn close_connect_reveal(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.connect_reveal.take() {
+            if !r.rotated {
+                if let Some(p) = self.projects.iter().find(|p| p.id == r.project_id) {
+                    let id = p.id.clone();
+                    self.select_project(id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Details pane → Key → Rotate key…: a fresh key, the old one stops at once.
+    pub fn rotate_outside_key(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRotate { project_id });
+        cx.notify();
+    }
+
+    /// Details pane → Key → Revoke access.
+    pub fn revoke_outside_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRevoke { project_id });
+        cx.notify();
+    }
+
+    /// Details pane: refresh the connection line when the pane opens on an outside agent.
+    pub fn refresh_outside_status(&mut self, project_id: Id) {
+        self.command(ClientCommand::OutsideAgentStatus { project_id });
+    }
+
     /// Grok / iPhone "Fork": a new agent with the same look and workspace
     /// context (files + memory). Own agents only; chat history stays empty.
     pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -9838,12 +10193,28 @@ impl AppState {
                     continue;
                 };
                 for host in crate::ui::markdown::link_hosts(text) {
-                    if self.link_icons_requested.insert(host.clone()) {
-                        self.command(ClientCommand::FetchLinkIcon { host });
-                    }
+                    self.want_link_icon(host);
                 }
             }
         }
+    }
+
+    /// Ask the source for one host's site icon, once per session (the bubbles' named links,
+    /// the link tiles of the Links tab, the Library and search).
+    pub(crate) fn want_link_icon(&mut self, host: String) {
+        if host.is_empty() {
+            return;
+        }
+        if self.link_icons_requested.insert(host.clone()) {
+            self.command(ClientCommand::FetchLinkIcon { host });
+        }
+    }
+
+    /// The fetched icon for a host and its tone, once the relay answered with a picture.
+    pub fn link_icon(&self, host: &str) -> Option<(&Arc<RenderImage>, crate::ui::link_tile::Tone)> {
+        let image = self.link_icons.get(host)?.as_ref()?;
+        let tone = self.link_icon_tones.get(host).copied().unwrap_or_default();
+        Some((image, tone))
     }
 
     /// Ask the source for the bytes of every image attachment in a chat that has no thumbnail yet.
@@ -9912,13 +10283,41 @@ impl AppState {
         };
         for message in messages {
             for part in &message.parts {
-                let Part::Attachment { attachment, .. } = part else {
-                    continue;
+                // A link preview's picture lives in the chat's slot like an attachment's; its
+                // site icon too, and a host without one is asked of the relay (the shared tile).
+                let key = match part {
+                    Part::LinkPreview { preview, .. } => {
+                        if let Some(icon) = preview
+                            .site_icon
+                            .as_ref()
+                            .filter(|i| !i.blob_ref.is_empty())
+                        {
+                            if self.thumbnails_requested.insert(icon.blob_ref.clone()) {
+                                self.command(ClientCommand::FetchThumbnail {
+                                    project_id: project_id.clone(),
+                                    key: icon.blob_ref.clone(),
+                                });
+                            }
+                        } else if let Some(host) =
+                            preview.site_host.clone().filter(|h| !h.is_empty())
+                        {
+                            if crate::ui::link_tile::Brand::for_host(&host).is_none() {
+                                self.want_link_icon(host);
+                            }
+                        }
+                        match preview.image.as_ref().map(|i| i.blob_ref.clone()) {
+                            Some(k) if !k.is_empty() => Some(k),
+                            _ => None,
+                        }
+                    }
+                    Part::Attachment { attachment, .. }
+                        if attachment.kind() == AttachmentKind::Image =>
+                    {
+                        attachment.blob_ref.clone()
+                    }
+                    _ => None,
                 };
-                if attachment.kind() != AttachmentKind::Image {
-                    continue;
-                }
-                let Some(key) = attachment.blob_ref.clone() else {
+                let Some(key) = key else {
                     continue;
                 };
                 // Optimistic send stores a decoded preview under `local:…`.

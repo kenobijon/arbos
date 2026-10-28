@@ -111,6 +111,25 @@ pub enum SyncEvent {
     NeedsPairing {
         relay_url: String,
     },
+    /// An outside agent's key (#2141), shown once on the reveal sheet: after a connect or a
+    /// rotate.
+    OutsideAgentKey {
+        project_id: Id,
+        name: String,
+        transport: String,
+        key: String,
+        link: String,
+        relay_url: String,
+        /// The agent's 1:1 chat (connect only).
+        chat_id: Option<Id>,
+        rotated: bool,
+    },
+    /// The connection of an outside agent, polled while the reveal sheet is up and on the
+    /// Details pane.
+    OutsideAgentStatus {
+        project_id: Id,
+        info: crate::model::OutsideInfo,
+    },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
     /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
@@ -181,6 +200,17 @@ pub enum SyncEvent {
     CallStarted {
         call: Call,
         sender: Sender,
+    },
+    /// A message in a server channel (`channel_message` push from the relay's Matrix push
+    /// gateway): the banner source for servers, which never pass through the chat docs.
+    ChannelMessage {
+        server_id: String,
+        server_name: String,
+        channel_id: String,
+        channel_name: String,
+        room_id: String,
+        sender: Sender,
+        text: Option<String>,
     },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
@@ -743,6 +773,12 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Remove a message's link preview for everyone (`preview: "off"` on the row, the part
+    /// dropped; the relay decides with the delete rule) ([feedback link-embeds-mac-2026-10-27]).
+    RemoveLinkPreview {
+        chat_id: Id,
+        message_id: Id,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,
@@ -889,6 +925,26 @@ pub enum ClientCommand {
     },
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     DeleteProject {
+        project_id: Id,
+    },
+    /// Connect an outside agent (#2141): `POST /outside-agents {name, transport}` →
+    /// [`SyncEvent::OutsideAgentKey`] (the key, shown once) and a registry refresh.
+    ConnectAgent {
+        name: String,
+        /// `acp` | `grok` | `custom`.
+        transport: String,
+        avatar_color_index: Option<u8>,
+    },
+    /// `GET /outside-agents/{id}` → [`SyncEvent::OutsideAgentStatus`].
+    OutsideAgentStatus {
+        project_id: Id,
+    },
+    /// `POST /outside-agents/{id}/rotate` → [`SyncEvent::OutsideAgentKey`] (fresh key).
+    OutsideAgentRotate {
+        project_id: Id,
+    },
+    /// `DELETE /outside-agents/{id}` (revoke the key; the agent stays) → status refresh.
+    OutsideAgentRevoke {
         project_id: Id,
     },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
