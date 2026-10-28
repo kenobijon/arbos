@@ -16,8 +16,6 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
-use crate::ui::avatars;
-use crate::ui::badge;
 use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
@@ -25,11 +23,10 @@ use crate::ui::groups;
 use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::identity;
-use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::{self, machine_dot};
+use crate::ui::sidebar;
 use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, CONTROL_GLYPH_WIDE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
@@ -202,19 +199,20 @@ pub fn render(
         let showing = state.profile_shows(&page);
         // D92 amendment: the picture built before the clock takes `cx`.
         let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
-        // The machine dot hangs off the disc's corner, inside the slot's box,
-        // in front of the picture (the pill is frosted on both surfaces:
-        // `ui::badge`), ringed in the pill's own colour over the page.
-        let picture = badge::badged(
+        let _ = avatar_state;
+        // The machine mark hangs off the disc's corner, in front of the picture
+        // (`ui::marks::machine_corner`, its own paint layer — the pill is frosted)
+        // in a ring of the page colour. Never a coloured dot (Jacob, 2026-10-27):
+        // the spinner while the machine wakes, the red `!` on a fault, nothing
+        // at rest — then the bare picture in the same box.
+        let picture = crate::ui::marks::machine_corner(
             AVATAR_HEADER,
             picture_disc,
-            Some(badge::Badge::new(
-                machine_dot(machine, &theme),
-                badge::ring::header_pill(&theme),
-            )),
+            machine,
+            theme.bg,
+            |ring| ring,
+            &theme,
+            cx,
         );
         let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
         part.on_click(
@@ -379,24 +377,16 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let chat_id = state.active_chat_id();
     let link = state.link_pill(chat_id.as_deref())?;
     let label = link.label()?;
-    let dot = match link {
-        LinkState::Offline => theme.text_faint,
-        LinkState::RelayDown => theme.danger,
-        LinkState::Reconnecting | LinkState::RestartSoon => theme.warn,
-        LinkState::Syncing => theme.accent,
+    // The capsule's mark (Jacob, 2026-10-27: never a coloured dot): the braille
+    // spinner while the link is being brought back (Reconnecting / Syncing /
+    // RestartSoon), the red `!` glyph when the relay is down, nothing for Offline.
+    let mark: Option<gpui::AnyElement> = match link {
+        LinkState::Reconnecting | LinkState::RestartSoon | LinkState::Syncing => {
+            Some(crate::ui::working::glyph(&theme, cx).into_any_element())
+        }
+        LinkState::RelayDown => Some(crate::ui::marks::fault_glyph(9.0, &theme).into_any_element()),
+        LinkState::Offline => None,
         LinkState::Live => return None,
-    };
-    let pulsing = matches!(
-        link,
-        LinkState::Reconnecting | LinkState::Syncing | LinkState::RestartSoon
-    );
-    if pulsing {
-        PulseClock::request(cx);
-    }
-    let phase = if pulsing {
-        PulseClock::phase(cx, 1400)
-    } else {
-        1.0
     };
     Some(
         div()
@@ -410,12 +400,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .rounded_full()
             .bg(theme.bubble_assistant)
             .debug_selector(|| "chat-header-link-pill".into())
-            .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(Theme::with_alpha(dot, 0.55 + 0.45 * phase)),
-            )
+            .children(mark)
             .child(
                 div()
                     .text_size(px(TEXT_TINY))
