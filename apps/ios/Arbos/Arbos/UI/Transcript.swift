@@ -2708,8 +2708,9 @@ struct ImageBubble: View {
                             .accessibilityIdentifier("photo-caption")
                     }
                     // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+                    // `SwiftUI.Link` — the app's `Link` enum (relay connection) shadows the name.
                     if let source, let url = URL(string: source.pageUrl) {
-                        Link("via \(source.provider)", destination: url)
+                        SwiftUI.Link("via \(source.provider)", destination: url)
                             .font(theme.font(11))
                             .foregroundStyle(theme.muted)
                             .accessibilityIdentifier("photo-via-source")
@@ -2832,8 +2833,7 @@ enum AnimatedImageFrames {
             let webp = data.subdata(in: 8..<12) == Data("WEBP".utf8)
             if riff && webp { return true }
         }
-        let mimeHint = (data as NSData).range(of: Data("ANIM".utf8)).location != NSNotFound
-        return mimeHint
+        return data.range(of: Data("ANIM".utf8)) != nil
     }
 
     private static func frameDelay(source: CGImageSource, index: Int) -> TimeInterval {
