@@ -1133,6 +1133,9 @@ struct ChatSession: View {
         .onAppear {
             appearedAt = Date()
             LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
+            #if DEBUG
+            PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
+            #endif
             // Force: re-PUT even if the cursor is unchanged so the relay clears
             // unread events recorded after the last PUT (other apps / badge).
             model.markRead(chatId: chatId, force: true)
@@ -2054,6 +2057,37 @@ struct ChatSession: View {
                 try? await Task.sleep(for: .seconds(1))
             }
             PerfLog.mark("phase typing end", ms: 0)
+        }
+        if drive.contains("keyboard") {
+            // Keyboard show / hide, three times: the composer inset animation re-lays the
+            // transcript each way (broader pass, iphone-scroll-perf release 3).
+            for i in 0..<3 {
+                PerfLog.mark("phase keyboard-show \(i) begin", ms: 0)
+                composerFocused = true
+                try? await Task.sleep(for: .milliseconds(1600))
+                PerfLog.mark("phase keyboard-hide \(i) begin", ms: 0)
+                composerFocused = false
+                try? await Task.sleep(for: .milliseconds(1600))
+            }
+            PerfLog.mark("phase keyboard end", ms: 0)
+        }
+        if drive.contains("switch"), !PerfDriveProbe.switchStarted {
+            // Chat switching: pop to Home and open the other chat, four times alternating
+            // (`ARBOS_PERF_SWITCH_TO`, default the fixture DM). Only the first-opened chat
+            // drives; every chat it opens runs this driver too and must not start another.
+            PerfDriveProbe.switchStarted = true
+            let other = DebugHooks.perfSwitchTo ?? "fx-dm-unconst"
+            let home = chatId
+            for i in 0..<4 {
+                let target = i % 2 == 0 ? other : home
+                PerfLog.mark("phase switch \(i) pop", ms: 0)
+                model.path = []
+                try? await Task.sleep(for: .milliseconds(1200))
+                PerfLog.mark("phase switch \(i) open \(target)", ms: 0)
+                if let c = model.peopleChats.first(where: { $0.id == target }) { model.open(peopleChat: c) }
+                try? await Task.sleep(for: .milliseconds(3000))
+            }
+            PerfLog.mark("phase switch end", ms: 0)
         }
         PerfLog.mark("phase done", ms: 0)
     }
@@ -3468,6 +3502,7 @@ extension ChatSession {
                         firstRowMarked = true
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
                         #if DEBUG
+                        PerfLog.mark("chat-open first-row \(chatId) shown=\(shown.count)", ms: 0)
                         PerfLog.shared.armScrollable()
                         #endif
                     }
