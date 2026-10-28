@@ -26,6 +26,7 @@ use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
 use crate::ui::highlight;
+use crate::ui::identity;
 use crate::ui::markdown::{
     self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
@@ -1174,6 +1175,21 @@ impl Transcript {
         self.measured.borrow().rows.get(row_id).copied()
     }
 
+    /// The bubble the pointer is over right now (its hover key) — what the
+    /// hover rail and the time are drawn for. `None` when nothing is hovered.
+    #[cfg(test)]
+    pub(crate) fn hovered_bubble(&self) -> Option<String> {
+        self.hover.over.as_ref().map(|(key, _)| key.clone())
+    }
+
+    /// Where the list is scrolled to (item index, pixels into it), for a
+    /// test to compare before and after an input.
+    #[cfg(test)]
+    pub(crate) fn scroll_position(&self) -> (usize, f32) {
+        let top = self.list.logical_scroll_top();
+        (top.item_ix, f32::from(top.offset_in_item))
+    }
+
     /// The first row of a message from a new sender opens the turn gap; a
     /// stamp between them already carries its own spacing.
     fn is_turn_start(&self, ix: usize) -> bool {
@@ -2300,12 +2316,12 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                div()
-                    .text_size(px(CHAT_BODY))
+                // The bubble sits under this line: an emoji-only sender name is
+                // lifted onto the baseline like every other stacked name.
+                identity::name(name, CHAT_BODY)
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
-                    .child(name),
+                    .text_color(color),
             )
             .when(agent, |el| {
                 el.child(
@@ -10717,6 +10733,50 @@ mod reply_in_dm_tests {
             sender_handle: "unconst".into(),
             text: text.into(),
         }
+    }
+
+    /// A server channel's member row names its sender the way a group's does — by display
+    /// name, from the roster-filled `senderName` — and only falls back to the handle when
+    /// no name is known ([feedback server-member-names-2026-10-28]; Affinity: "referred to
+    /// as our handles instead of our usernames in server").
+    #[test]
+    fn a_channel_member_row_renders_the_display_name_not_the_handle() {
+        let t = 1_700_000_000_000u64;
+        let channel = "!general:arbos.life";
+        let mut named = row(channel, "c1", "user:test_01scout", "A", "yo", t);
+        named.sender_name = Some("Scout".into());
+        let nameless = row(channel, "c2", "user:test_01z", "Z", "me", t + 1_000);
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &[named, nameless],
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "test_01ME",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        let labels: Vec<(String, bool)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    from: Some(p),
+                    named,
+                    ..
+                } => Some((p.display_name(), *named)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("Scout".to_string(), true), ("Z".to_string(), true)],
+            "Scout's bubble is labelled Scout; a member with no known name keeps the handle"
+        );
     }
 
     /// `build_rows` alone: a `replyRef` row quotes its snapshot and names the chat; a

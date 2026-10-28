@@ -941,6 +941,13 @@ struct ChatSession: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // The fade the chat bar floats on ([feedback iphone-composer-see-through-2026-10-28]):
+        // rows scrolling under the bar dim from `Theme.composerFade` above it toward the
+        // bottom edge and stay readable through and between the glass pills — no band. The
+        // canvas ends at the bar's top edge (the bar is a safe-area inset), so the layer sits
+        // right on it, moves with the keyboard, is over the transcript and under the pill and
+        // the chevron below — not in the bar's layer.
+        .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.chat) }
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
                 newMessagesPill
@@ -1009,12 +1016,7 @@ struct ChatSession: View {
             .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
             .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
-            .background(alignment: .top) {
-                LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 24)
-                    .offset(y: -24)
-            }
-            .background(theme.bg)
+            // No background of its own: the bar floats on `BottomBarFadeView` in the canvas.
             // A drag that starts here selects text or slides the mic — never "back".
             .backSwipeComposerBar()
         }
@@ -1042,6 +1044,10 @@ struct ChatSession: View {
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true),
                         onReact: { emoji in
+                            // One toggle per overlay: a second report of the same pick
+                            // (the emoji keyboard reports an insert twice, or a cell tapped
+                            // again while the overlay fades) would undo the reaction.
+                            guard actionsRow != nil else { return }
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                         },
@@ -1930,8 +1936,8 @@ struct ChatSession: View {
                     transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
-                    // Clears the 24 pt fade above the composer, so the last row
-                    // is never under the chat bar; the status row rises into it
+                    // Clears the `Theme.composerFade` above the chat bar, so the last
+                    // row at rest is never under the fade; the status row rises into it
                     // (`Theme.presenceLift`).
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
@@ -1958,6 +1964,9 @@ struct ChatSession: View {
                 .contentShape(Rectangle())
             }
             .defaultScrollAnchor(.bottom)
+            // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
+            // composer a second time; the canvas fade is the one treatment.
+            .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
@@ -3705,6 +3714,18 @@ private struct ChatScrollTopKey: PreferenceKey {
 /// re-stick instead of flipping `away` and leaving the transcript stranded.
 /// While unpinned, growth must not re-pin either — a bottom scroll anchor can
 /// briefly shrink distance and would yank the reader out of history.
+/// iOS 26+: no system scroll edge effect under the chat bar — `BottomBarFadeView` is the one
+/// fade ([feedback iphone-composer-see-through-2026-10-28]). Older systems draw none.
+private struct NoBottomScrollEdgeEffect: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content.scrollEdgeEffectHidden(true, for: .bottom)
+        } else {
+            content
+        }
+    }
+}
+
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
