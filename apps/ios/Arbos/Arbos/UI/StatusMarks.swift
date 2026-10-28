@@ -3,7 +3,8 @@
 // app with braille spinners always, on a matter of principle never use colored
 // dots"). Activity → the braille spinner (`WorkingSpinner`); unread → the count
 // pill (`UnreadBadge`); a fault → the red "!" glyph; a resting state (awake,
-// asleep, read) → nothing. `StatusDotLintTests` refuses a new small
+// asleep, read) → nothing. On a picture the mark sits in the presence badge's
+// cut-out ring (`View.presenceMark`, `Avatar.swift`). `StatusDotLintTests` refuses a new small
 // `Circle().fill(<status colour>)` anywhere in the app. Mirrors the Mac's
 // `ui/marks.rs`.
 
@@ -52,27 +53,6 @@ struct StatusMarkView: View {
             WorkingSpinner(size: size, glyphSize: min(size * 1.3, WorkingSpinnerFrames.glyphSize))
         case .fault:
             FaultGlyph(size: size)
-        }
-    }
-}
-
-/// The badge at an avatar's bottom-right corner (where the machine dot sat):
-/// the mark on a disc of the page colour, or nothing when `mark` is nil.
-struct AvatarCornerMark: View {
-    @Environment(\.theme) private var theme
-    let mark: StatusMark?
-    /// The avatar's size; the badge scales like Grok's 12-on-48 status badge.
-    let avatarSize: CGFloat
-
-    var body: some View {
-        if let mark {
-            let d = min(avatarSize * 0.36, 14)
-            ZStack {
-                Circle().fill(theme.bg)
-                StatusMarkView(mark: mark, size: d * 0.7)
-            }
-            .frame(width: d, height: d)
-            .offset(x: avatarSize * 0.08, y: avatarSize * 0.08)
         }
     }
 }

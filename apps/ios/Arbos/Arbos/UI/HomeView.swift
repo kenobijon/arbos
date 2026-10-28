@@ -175,7 +175,7 @@ struct HomeView: View {
         .onAppear {
             // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
-            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
@@ -672,12 +672,11 @@ struct HomeView: View {
     private var topBarRow: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
-                ZStack(alignment: .bottomTrailing) {
-                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
-                    // The machine mark, never a coloured dot (Jacob, 2026-10-27).
-                    AvatarCornerMark(mark: machineMark(model.machine.state), avatarSize: Theme.control)
-                }
-                .frame(width: Theme.control, height: Theme.control)
+                // My picture with the machine mark through the one presence badge (in
+                // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
+                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
+                    .presenceMark(machineMark(model.machine.state), size: Theme.control)
+                    .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Account, machine and settings · \(model.machine.label)")

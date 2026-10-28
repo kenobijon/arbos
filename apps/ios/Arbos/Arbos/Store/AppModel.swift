@@ -140,6 +140,14 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.default.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
+    /// Settings → Appearance → Link previews ([feedback link-embeds-ios-2026-10-27]): on unless
+    /// switched off; off leaves every link plain. Mirrored into the row builder's static.
+    @Published var linkPreviews: Bool = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(linkPreviews, forKey: "linkPreviews")
+            Transcript.linkPreviewsEnabled = linkPreviews
+        }
+    }
     /// Sum of SessionRoom reconnect / state_timeout counters (About page),
     /// plus the most recent non-nil room `lastError`.
     var sharedRoomStats: (reconnects: Int, timeouts: Int, lastError: String?) {
@@ -290,6 +298,8 @@ final class AppModel: ObservableObject {
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
+    /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
+    @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
     @Published var projects: [Project] = [] {
         didSet {
         }
@@ -861,6 +871,9 @@ final class AppModel: ObservableObject {
     private(set) weak static var current: AppModel?
 
     init() {
+        // The row builder's switch mirrors the saved setting from the first row on (no `self`
+        // here: stored properties are still initialising).
+        Transcript.linkPreviewsEnabled = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
@@ -4786,6 +4799,38 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Long-press → Remove preview: the relay drops the message's link preview for everyone
+    /// (`preview: "off"`, the delete rule); the card goes at once here, the row follows.
+    func removeLinkPreview(chatId: Id, messageId: Id, projectId: Id? = nil) {
+        guard !messageId.isEmpty else { return }
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].preview = "off"
+            messages[chatId] = list
+        }
+        #if DEBUG
+        if isFixture { Haptics.pick(); return }
+        #endif
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.removeLinkPreview(room: room, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                fail(e?.status == 403
+                     ? UserError.refused("remove the preview", "You can only remove previews on your own messages.")
+                     : UserError.classify("remove the preview", error))
+            }
+        }
+    }
+
     /// Edit a message's text in the shared chat doc (own messages). No new send
     /// command — peers see the updated body via room sync only.
     func editMessage(chatId: Id, messageId: Id, text: String) {
@@ -6080,6 +6125,54 @@ final class AppModel: ObservableObject {
             } catch {
                 fail("create the agent", error)
             }
+        }
+    }
+
+    // MARK: Outside agents (#2142)
+
+    /// `POST /outside-agents`: the relay makes the agent (no box) and mints its key; the caller
+    /// pushes the reveal screen. A refusal is the claimed failure on the Create sheet.
+    func connectAgent(name: String, transport: String) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.connectAgent(name: name, transport: transport)
+            if let info = reveal.info { outsideInfo[reveal.projectId] = info }
+            await refreshRegistry()
+            return reveal
+        } catch {
+            fail("connect the agent", error)
+            return nil
+        }
+    }
+
+    /// The connection of an outside agent for the pane and the reveal screen; a native agent
+    /// leaves no entry.
+    @discardableResult
+    func refreshOutsideInfo(_ projectId: Id) async -> OutsideAgentInfo? {
+        guard !isFixture else { return nil }
+        if let info = try? await api.outsideAgent(projectId) {
+            outsideInfo[projectId] = info
+            return info
+        }
+        return outsideInfo[projectId]
+    }
+
+    func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.rotateOutsideKey(projectId)
+            if let info = reveal.info { outsideInfo[projectId] = info }
+            return reveal
+        } catch {
+            fail("rotate the key", error)
+            return nil
+        }
+    }
+
+    func revokeOutsideAgent(_ projectId: Id) async {
+        do {
+            try await api.revokeOutsideAgent(projectId)
+            await refreshOutsideInfo(projectId)
+        } catch {
+            fail("revoke the agent's access", error)
         }
     }
 
