@@ -181,18 +181,10 @@ struct ServerChannelsView: View {
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
         }
-        .confirmationDialog(
-            deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
-            isPresented: Binding(get: { deletingChannel != nil }, set: { if !$0 { deletingChannel = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                if let c = deletingChannel { Task { _ = await model.deleteChannel(c) } }
-                deletingChannel = nil
-            }
-            Button("Cancel", role: .cancel) { deletingChannel = nil }
-        } message: {
-            Text("Deletes the channel and its messages for everyone in the server.")
+        .confirm(item: $deletingChannel, spec: { c in
+            ConfirmSpec(title: "Delete #\(c.name)?", message: "Deletes the channel and its messages for everyone in the server.", action: "Delete")
+        }) { c in
+            Task { _ = await model.deleteChannel(c) }
         }
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
     }
@@ -301,27 +293,9 @@ struct NewChannelSheet: View {
                 .padding(.top, 28)
             }
             .background(theme.bg)
-            .navigationTitle("New channel")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { create() } label: {
-                        Text(creating ? "Creating…" : "Create")
-                            .font(theme.font(Theme.small, weight: .semibold))
-                            .foregroundStyle(theme.onPrimary)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(theme.primary))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(slug.isEmpty || creating)
-                    .opacity(slug.isEmpty || creating ? 0.45 : 1)
-                }
-            }
+            .sheetHeader(title: "New channel", onLeading: { dismiss() },
+                         action: creating ? "Creating…" : "Create", actionEnabled: !slug.isEmpty && !creating,
+                         onAction: { create() })
             .onAppear { focused = true }
         }
         .tint(theme.text)

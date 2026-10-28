@@ -1091,6 +1091,12 @@ final class AppModel: ObservableObject {
                                           appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
     }
 
+    /// Opt-in MetricKit payload → the relay (`PerfDiagnostics`). The fixture never posts.
+    func sendPerfReport(_ envelope: [String: Any]) async throws {
+        if isFixture { return }
+        try await api.sendPerfReport(envelope)
+    }
+
     // MARK: Calls v1
 
     private func hookCalls() {
@@ -1451,6 +1457,15 @@ final class AppModel: ObservableObject {
     var deviceId: String { credentials?.deviceId ?? "ios:unpaired" }
 
     // MARK: Pairing
+
+    #if DEBUG
+    /// Unit tests: talk to a loopback relay with a fixed token — no keychain, no auth probe,
+    /// no rooms. Used by `AddMembersActionTests` to drive `addMembers` end to end.
+    func installRelayForTests(url: String, token: String) {
+        api = RelayAPI(endpoint: RelayEndpoint(url)) { token }
+        credentials = DeviceCredentials(relayUrl: url, deviceId: "ios:test", deviceToken: token)
+    }
+    #endif
 
     func setRelayUrl(_ raw: String) {
         let endpoint = RelayEndpoint(raw)
@@ -4223,7 +4238,8 @@ final class AppModel: ObservableObject {
         return out
     }
 
-    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    /// Tests and the fixture (`ARBOS_FIXTURE_BLOCKED`): the relay's block list as `GET /blocks`
+    /// would hand it over.
     func setBlockedForTests(_ list: [Person]) { blocked = list }
 
     /// Is this message hidden for me — from someone I blocked, in a people group?
@@ -4414,13 +4430,25 @@ final class AppModel: ObservableObject {
 
     func unblock(_ person: Person) {
         Task {
-            do { try await api.unblock(userId: person.id) }
+            do {
+                try await api.unblock(userId: person.id)
+                // A DM refused as `blocks_member` is postable again: resend now.
+                retryRefusedRooms(only: nil)
+            }
             catch let e as RelayError where e.status == 404 {
                 // Already not blocked on the relay; the list below says so.
             }
             catch { fail("unblock them", error) }
             await refreshBlocks()
         }
+    }
+
+    /// Ask the rooms that stand refused to resend now ([feedback 2005]): one chat when the
+    /// push names it, else every refused room (an unblock does not say which DM it frees).
+    /// A room that is not refused ignores the nudge inside its session.
+    func retryRefusedRooms(only chatId: Id?) {
+        let targets = chatId.map { pushRefused.contains($0) ? [$0] : [] } ?? Array(pushRefused)
+        for key in targets { rooms[key]?.retryRefused() }
     }
 
     func refreshBlocks() async {
@@ -4455,6 +4483,8 @@ final class AppModel: ObservableObject {
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
             pushLog.notice("push id=\(p.id, privacy: .public) event=\(String(describing: p.event), privacy: .public)")
+            // The chat's members or settings changed: a refused room there resends now.
+            if let cid = RefusedSendRetry.chatToRetry(p.event) { retryRefusedRooms(only: cid) }
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
