@@ -201,6 +201,7 @@ struct LinkPreviewCard: View {
             tileSlot
             if let diff = preview.diff {
                 Text("+\(diff.additions)").foregroundStyle(theme.online).monospacedDigit()
+                // error-ui: exception diff-deletions-count
                 Text("−\(diff.deletions)").foregroundStyle(theme.danger).monospacedDigit()
                 if !parts.isEmpty { Text("·").opacity(0.7) }
             }
