@@ -89,8 +89,12 @@ final class PictureReplyQuoteTests: XCTestCase {
         forwarded.forwardedFrom = "Sam Rivera"
         let out = rows([original, forwarded])
         XCTAssertEqual(shape(out), ["other look at this quote=-", "image quote=- caption=caption"])
-        guard case .image(_, _, _, _, _, let forwardedFrom, _, _, _) = out[1].kind else { return XCTFail("\(out[1].kind)") }
-        XCTAssertEqual(forwardedFrom, "Sam Rivera")
+        // Rows also hold the date stamp: find the card rather than index it.
+        var header: String?
+        for row in out {
+            if case .image(_, _, _, _, _, let forwardedFrom, _, _, _) = row.kind { header = forwardedFrom; break }
+        }
+        XCTAssertEqual(header, "Sam Rivera")
     }
 
     /// The row the send writes through core keeps `replyTo` beside its attachment parts — a
