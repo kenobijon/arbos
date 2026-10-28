@@ -34,9 +34,15 @@ final class WorkingSpinnerTests: XCTestCase {
 
     // MARK: Reduce Motion fallback
 
-    func testReduceMotionGlyphIsEveryDotSet() {
+    func testReduceMotionGlyphIsTheFullSixDotCell() {
+        // ⠿ U+283F: all six dots of the cell the frames use (⠋…⠏ are six-dot
+        // patterns), so the still glyph is the same height as the moving ones.
+        // Not ⣿ U+28FF (the eight-dot cell), which would stand taller.
         XCTAssertEqual(WorkingSpinnerFrames.still, "⠿")
-        XCTAssertEqual(WorkingSpinnerFrames.still.unicodeScalars.first!.value, 0x28FF, "all eight dots")
+        XCTAssertEqual(WorkingSpinnerFrames.still.unicodeScalars.first!.value, 0x283F, "all six dots of the frames' cell")
+        for f in WorkingSpinnerFrames.frames {
+            XCTAssertLessThanOrEqual(f.unicodeScalars.first!.value, 0x283F, "\(f) stays inside the six-dot cell")
+        }
     }
 
     // MARK: single-ticker invariant
