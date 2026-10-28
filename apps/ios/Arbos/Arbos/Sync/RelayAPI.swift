@@ -370,6 +370,18 @@ final class RelayAPI {
         _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
     }
 
+    /// `GET /me/pins` → my sidebar / Home pins, top first, and the relay's cap
+    /// ([feedback sidebar-pinning-ios-2026-10-28]).
+    func pins() async throws -> PinsDto {
+        try await decode(PinsDto.self, "GET", "/me/pins")
+    }
+
+    /// `PUT /me/pins {pins}` replaces the whole list; the answer is the list the relay kept.
+    /// Over the cap → `409 pin_cap`.
+    func setPins(_ pins: [String]) async throws -> PinsDto {
+        try await decode(PinsDto.self, "PUT", "/me/pins", body: ["pins": pins])
+    }
+
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
         let body: [String: Any] = ["models": ["talking_model": ["id": model, "effort": effort.rawValue]]]
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
