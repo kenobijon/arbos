@@ -188,6 +188,8 @@ struct ChatSession: View {
     @State private var pinnedToBottom = true
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
+    /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
+    @State private var firstRowMarked = false
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -3293,8 +3295,10 @@ extension ChatSession {
                         SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
                     }
                     #endif
-                    // Once per open — not on every row (group chats fire this dozens of times).
-                    if row.id == lastId {
+                    // Once per open — not on every row, and not again when the newest row is
+                    // realised a second time after a trip into history.
+                    if row.id == lastId, !firstRowMarked {
+                        firstRowMarked = true
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
                         #if DEBUG
                         PerfLog.shared.armScrollable()
@@ -3392,6 +3396,11 @@ private struct AwayFromBottomReporter: ViewModifier {
                     }
                     return
                 }
+                // Lazy rows: the content height is an estimate that is corrected as rows are
+                // measured, down as well as up. A sample where the height changed says nothing
+                // about where the reader is; only an unchanged height may re-pin (a re-pin on a
+                // shrink would send the next growth's `onStick` to the bottom mid-history).
+                if abs(new.height - old.height) > 0.5 { return }
                 let isAway = new.distance > 120
                 away = isAway
                 if isAway {
