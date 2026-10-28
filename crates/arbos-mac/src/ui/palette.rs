@@ -262,6 +262,15 @@ pub fn overlay(
     // fill between the chat and the rows. The rows are transparent; the
     // highlighted one is a tint on top (`highlight::row`). No dim behind,
     // no second border: `glass::popup_plate`.
+    // The panel owns the pointer over its whole box ([feedback
+    // search-popup-swallows-hover-2026-10-28], Scout: "it also traces
+    // movements through the search popup into the chat window"; Jacob: the
+    // result list scrolled the chat behind it). `occlude` takes every hitbox
+    // under the panel out of the hit test — no row behind it hovers, no rail
+    // appears, no wheel reaches the transcript, also at the list's end; the
+    // wheel stop is the belt to that brace. Clicks inside still land on the
+    // rows and the field; a click outside is the shell's capture-phase
+    // `click_outside`, which never looks at hitboxes under the pointer.
     let panel = div()
         .id("palette-panel")
         .key_context("Palette")
@@ -272,6 +281,8 @@ pub fn overlay(
         .flex_col()
         .rounded(px(RADIUS))
         .overflow_hidden()
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .debug_selector(|| "palette-panel".into())
         .on_action(cx.listener(|this, a: &Pick1, w, cx| this.palette_pick_action(a, w, cx)))
         .on_action(cx.listener(|this, a: &Pick2, w, cx| this.palette_pick_action(a, w, cx)))
@@ -868,11 +879,20 @@ mod tests {
 
 #[cfg(test)]
 mod shell_tests {
-    //! The popup over the real shell: a DM long enough that bubbles fill the
-    //! column under the panel, and enough chats that the palette's own list
-    //! overflows.
+    //! The popup over the real shell ([feedback
+    //! search-popup-swallows-hover-2026-10-28]; Scout 2026-10-28: "it also
+    //! traces movements through the search popup into the chat window";
+    //! Jacob: "scrolling the popup's result list also scrolls the chat behind
+    //! it"). A DM long enough that bubbles fill the column under the panel,
+    //! and enough chats that the palette's own list overflows: the pointer
+    //! over the panel hovers nothing behind it, the wheel over it — also at
+    //! the end of its list — leaves the transcript where it was, a click on
+    //! a row still opens it, and the ⌘F bar swallows the wheel the same way.
     use futures::future::BoxFuture;
-    use gpui::{AppContext as _, Entity, TestAppContext};
+    use gpui::{
+        point, px, AppContext as _, Entity, Pixels, Point, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase,
+    };
     use tokio::sync::mpsc;
 
     use crate::app::AppState;
@@ -996,6 +1016,28 @@ mod shell_tests {
         }
     }
 
+    fn hovered(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> Option<String> {
+        shell.read_with(vcx, |sh, cx| sh.transcript.read(cx).hovered_bubble())
+    }
+
+    fn scroll(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> (usize, f32) {
+        shell.read_with(vcx, |sh, cx| sh.transcript.read(cx).scroll_position())
+    }
+
+    fn own_offset(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> f32 {
+        shell.read_with(vcx, |sh, _| sh.palette_scroll.offset().y.into())
+    }
+
+    fn wheel(vcx: &mut gpui::VisualTestContext, at: Point<Pixels>, dy: f32) {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+            modifiers: Default::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        vcx.run_until_parked();
+    }
+
     fn open_palette(
         state: &Entity<AppState>,
         shell: &Entity<Shell>,
@@ -1004,6 +1046,171 @@ mod shell_tests {
         vcx.dispatch_action(crate::ui::shell::OpenPalette);
         settle(state, shell, vcx);
         assert!(shell.read_with(&*vcx, |sh, _| sh.palette.open));
+    }
+
+    /// The chat column's transcript area: the header's width, from under the
+    /// header to the composer.
+    fn transcript_area(vcx: &mut gpui::VisualTestContext) -> gpui::Bounds<Pixels> {
+        let header = vcx.debug_bounds("chat-header-bar").expect("header drawn");
+        let composer = vcx
+            .debug_bounds("chat-composer-block")
+            .expect("composer drawn");
+        gpui::Bounds::from_corners(
+            point(header.origin.x, header.bottom()),
+            point(header.right(), composer.origin.y),
+        )
+    }
+
+    /// A point on the panel that has a transcript row under it: a row in the
+    /// middle of the list, inside the chat column.
+    fn point_over_a_row(vcx: &mut gpui::VisualTestContext) -> Point<Pixels> {
+        let row = vcx.debug_bounds("palette-row-4").expect("row 4 drawn");
+        let transcript = transcript_area(vcx);
+        let at = row.center();
+        assert!(
+            transcript.contains(&at),
+            "the panel row at {at:?} is not over the chat column {transcript:?}"
+        );
+        at
+    }
+
+    /// Scout: the pointer over the popup hovers the bubble behind — its rail
+    /// and time appear. With the panel occluding, nothing under it hovers;
+    /// the same point with the palette closed hovers the bubble (so the
+    /// check is live).
+    #[gpui::test]
+    fn the_pointer_over_the_panel_hovers_nothing_behind_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        open_palette(&state, &shell, vcx);
+        let at = point_over_a_row(vcx);
+        // Approach from outside the panel, as a hand would.
+        vcx.simulate_mouse_move(point(at.x, px(2.0)), None, Default::default());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(at, None, Default::default());
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            hovered(&shell, vcx),
+            None,
+            "a bubble under the panel hovered"
+        );
+
+        // Control: the palette closed, the same point hovers a bubble.
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        assert!(!shell.read_with(&*vcx, |sh, _| sh.palette.open));
+        vcx.simulate_mouse_move(point(at.x, px(2.0)), None, Default::default());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(at, None, Default::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            hovered(&shell, vcx).is_some(),
+            "with the palette closed the same point hovers a bubble"
+        );
+    }
+
+    /// Jacob: the result list and the chat scrolled together. A wheel over
+    /// the list scrolls the list only; at the list's end the wheel is
+    /// consumed, not forwarded; over the field and the panel's edge the same.
+    #[gpui::test]
+    fn the_wheel_over_the_panel_never_moves_the_transcript_also_at_the_lists_end(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        // Control first: with nothing over it, the wheel moves the chat.
+        let at_rest = scroll(&shell, vcx);
+        let column = transcript_area(vcx);
+        wheel(vcx, column.center(), 160.0);
+        settle(&state, &shell, vcx);
+        assert_ne!(
+            scroll(&shell, vcx),
+            at_rest,
+            "the control wheel moved the chat"
+        );
+
+        open_palette(&state, &shell, vcx);
+        let before = scroll(&shell, vcx);
+        let list = vcx.debug_bounds("palette-list").expect("list");
+        let field = vcx.debug_bounds("palette-field").expect("field");
+        let panel = vcx.debug_bounds("palette-panel").expect("panel");
+        wheel(vcx, list.center(), -160.0);
+        settle(&state, &shell, vcx);
+        assert!(
+            own_offset(&shell, vcx) < -1.0,
+            "the palette's own list scrolled ({})",
+            own_offset(&shell, vcx)
+        );
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the transcript moved under the list"
+        );
+
+        // To the end of the list and past it: still nothing behind moves.
+        for _ in 0..12 {
+            wheel(vcx, list.center(), -400.0);
+        }
+        settle(&state, &shell, vcx);
+        let at_end = own_offset(&shell, vcx);
+        wheel(vcx, list.center(), -160.0);
+        settle(&state, &shell, vcx);
+        assert_eq!(own_offset(&shell, vcx), at_end, "the list is at its end");
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the wheel chained into the transcript at the end"
+        );
+        wheel(vcx, list.center(), 160.0);
+        wheel(vcx, field.center(), 160.0);
+        wheel(
+            vcx,
+            point(panel.right() - px(2.0), panel.bottom() - px(2.0)),
+            160.0,
+        );
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the transcript moved under the panel"
+        );
+    }
+
+    /// Clicks on results still work with the panel occluding: a click on a
+    /// row opens that chat and closes the palette.
+    #[gpui::test]
+    fn a_click_on_a_row_still_opens_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        open_palette(&state, &shell, vcx);
+        let row = vcx.debug_bounds("palette-row-1").expect("row 1");
+        vcx.simulate_click(row.center(), Default::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            !shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "the palette closed"
+        );
+        let selected = state.read_with(&*vcx, |s, _| s.selected_project.clone());
+        assert_eq!(
+            selected.as_deref(),
+            Some(dm_id(1).as_str()),
+            "row 1 opened its chat"
+        );
+    }
+
+    /// The ⌘F bar: a wheel over it leaves the transcript where it was.
+    #[gpui::test]
+    fn the_wheel_over_the_chat_search_bar_never_moves_the_transcript(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Matte);
+        vcx.dispatch_action(crate::ui::chat_search::Open);
+        settle(&state, &shell, vcx);
+        let bar = vcx.debug_bounds("chat-search-bar").expect("bar drawn");
+        let before = scroll(&shell, vcx);
+        wheel(vcx, bar.center(), 160.0);
+        wheel(vcx, bar.center(), -160.0);
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the transcript moved under the bar"
+        );
     }
 
     /// Layering ([feedback search-popup-single-layer-2026-10-28]) over the
