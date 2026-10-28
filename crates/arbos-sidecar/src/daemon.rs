@@ -219,8 +219,20 @@ pub async fn handle_control(
             }
             match relay.event(ev).await {
                 Ok(v) => {
-                    let head = mirror.state().cursor;
-                    let _ = mirror.mark_answered(&chat, head);
+                    // A reply answers the rows up to the one it answers; rows that arrived
+                    // after it stay pending for the trailing nudge. A plain post answers
+                    // everything mirrored so far.
+                    let through = if op == "reply" {
+                        mirror
+                            .rows(&chat)
+                            .iter()
+                            .find(|r| r["id"] == s("message"))
+                            .and_then(|r| r["event_id"].as_i64())
+                            .unwrap_or_else(|| mirror.state().cursor)
+                    } else {
+                        mirror.state().cursor
+                    };
+                    let _ = mirror.mark_answered(&chat, through);
                     let _ = mirror.refresh_brief(&chat);
                     if let Some(tx) = signal {
                         let _ = tx.send(Signal::Done);
