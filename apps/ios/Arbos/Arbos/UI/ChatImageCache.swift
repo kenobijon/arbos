@@ -19,12 +19,14 @@ enum ChatImageCache {
         let image: UIImage
         let stillFrame: UIImage?
         let animated: Bool
-        var naturalSize: CGSize { image.size }
+        /// The picture's own size (after the trim), what the bubble lays out from — the
+        /// bitmap itself may be a smaller thumbnail.
+        let naturalSize: CGSize
     }
 
     private static let images: NSCache<NSString, Entry> = {
         let c = NSCache<NSString, Entry>()
-        c.totalCostLimit = 96 * 1024 * 1024
+        c.totalCostLimit = 48 * 1024 * 1024
         return c
     }()
 
@@ -57,17 +59,29 @@ enum ChatImageCache {
     }
 
     /// Decode the bytes away from the main actor. Still pictures are trimmed (`ImageTrim`)
-    /// and prepared for display so the first draw does no decoding; animated GIF / WebP keep
-    /// every frame (`AnimatedImageFrames`). `nil` when the bytes are not a picture.
-    static func decode(_ data: Data) async -> Decoded? {
+    /// and reduced to a display-ready thumbnail no larger than `maxPixels` (the bubble's
+    /// largest tile at the screen's scale — the viewer loads the full picture itself), so the
+    /// first draw does no decoding and the cache holds bubble-sized bitmaps; animated GIF /
+    /// WebP keep every frame (`AnimatedImageFrames`). `nil` when the bytes are not a picture.
+    static func decode(_ data: Data, maxPixels: CGSize) async -> Decoded? {
         await Task.detached(priority: .userInitiated) { () -> Decoded? in
             if let animated = AnimatedImageFrames.animatedImage(from: data) {
-                return Decoded(image: animated, stillFrame: animated.images?.first ?? animated, animated: true)
+                return Decoded(image: animated, stillFrame: animated.images?.first ?? animated, animated: true,
+                               naturalSize: animated.size)
             }
             guard let img = UIImage(data: data) else { return nil }
             let trimmed = ImageTrim.trimmed(img)
-            let ready = trimmed.preparingForDisplay() ?? trimmed
-            return Decoded(image: ready, stillFrame: nil, animated: false)
+            let natural = trimmed.size
+            let px = CGSize(width: natural.width * trimmed.scale, height: natural.height * trimmed.scale)
+            let ready: UIImage
+            if px.width > maxPixels.width || px.height > maxPixels.height {
+                let k = min(maxPixels.width / px.width, maxPixels.height / px.height)
+                let target = CGSize(width: (px.width * k).rounded(), height: (px.height * k).rounded())
+                ready = trimmed.preparingThumbnail(of: target) ?? trimmed.preparingForDisplay() ?? trimmed
+            } else {
+                ready = trimmed.preparingForDisplay() ?? trimmed
+            }
+            return Decoded(image: ready, stillFrame: nil, animated: false, naturalSize: natural)
         }.value
     }
 }

@@ -2864,6 +2864,7 @@ struct ForwardedHeader: View {
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.displayScale) private var displayScale
     let item: MediaItem
     let chatId: Id
     let fromUser: Bool
@@ -3038,7 +3039,8 @@ struct ImageBubble: View {
         }
         // Decode + trim off the main actor (`ChatImageCache.decode`); animated GIF / WebP keep
         // every frame, no ImageTrim (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
-        guard let decoded = await ChatImageCache.decode(data) else {
+        let maxPixels = CGSize(width: 280 * displayScale, height: Self.maxHeight * displayScale)
+        guard let decoded = await ChatImageCache.decode(data, maxPixels: maxPixels) else {
             failed = true
             return
         }
