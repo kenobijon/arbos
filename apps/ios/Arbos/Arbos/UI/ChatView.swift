@@ -1026,8 +1026,15 @@ struct ChatSession: View {
     }
 
     /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
+    /// Split so the Swift type-checker can finish (ChatView.swift:1030 on main).
     @ViewBuilder
     private var sessionRoot: some View {
+        sessionRootLifecycle
+    }
+
+    /// Sheets and the media viewer cover on top of the canvas.
+    @ViewBuilder
+    private var sessionRootSheets: some View {
         sessionCanvas
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
@@ -1098,6 +1105,12 @@ struct ChatSession: View {
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
+    }
+
+    /// Tasks / appear / onChange hooks hanging off the sheets.
+    @ViewBuilder
+    private var sessionRootLifecycle: some View {
+        sessionRootSheets
         .task(id: chatId) {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it

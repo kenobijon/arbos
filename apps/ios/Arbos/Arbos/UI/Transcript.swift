@@ -3001,20 +3001,10 @@ struct ImageBubble: View {
                     }
                     // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
                     // app-01M61EZD0GJ2XGV1EW4SCVXENK). https `pageUrl` is a link;
-                    // any other scheme stays plain text. `SwiftUI.Link`: model
-                    // `Link` is the chat connection state.
+                    // any other scheme stays plain text.
                     if let source, !source.provider.isEmpty {
-                        let label = "via \(source.provider)"
-                        Group {
-                            if let url = AttachmentSource.httpsPageURL(from: source.pageUrl) {
-                                SwiftUI.Link(label, destination: url)
-                            } else {
-                                Text(label)
-                            }
-                        }
-                        .font(theme.font(11))
-                        .foregroundStyle(theme.muted)
-                        .accessibilityIdentifier("photo-via-source")
+                        MediaViaCaption(source: source, fallback: nil, fontSize: 11, color: theme.muted,
+                                        accessibilityId: "photo-via-source")
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)

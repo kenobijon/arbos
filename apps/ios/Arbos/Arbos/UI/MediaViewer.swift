@@ -15,6 +15,42 @@ import UIKit
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
 // sheet of DMs, agents and groups; one tap sends the item there as a new message.
 
+/// "via <provider>" for GIF-picker attribution. An https `pageUrl` is a link;
+/// any other scheme stays plain text. When `source` is missing and `fallback`
+/// is set, shows the fallback (the viewer's when/caption line) — feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK.
+struct MediaViaCaption: View {
+    @Environment(\.theme) private var theme
+    var source: AttachmentSource?
+    var fallback: String? = nil
+    var fontSize: CGFloat = 13
+    var color: Color? = nil
+    var accessibilityId: String = "viewer-via-source"
+
+    var body: some View {
+        let tint = color ?? Color.white.opacity(0.67)
+        if let source, !source.provider.isEmpty {
+            let label = "via \(source.provider)"
+            Group {
+                if let url = AttachmentSource.httpsPageURL(from: source.pageUrl) {
+                    SwiftUI.Link(label, destination: url)
+                } else {
+                    Text(label)
+                }
+            }
+            .font(theme.font(fontSize))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .accessibilityIdentifier(accessibilityId)
+        } else if let fallback {
+            Text(fallback)
+                .font(theme.font(fontSize))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+        }
+    }
+}
+
 /// One entry of the viewer's album.
 struct MediaItem: Identifiable, Equatable {
     enum Kind: Equatable { case image, video, file }
@@ -255,24 +291,10 @@ struct MediaViewer: View {
             if let item {
                 VStack(spacing: 2) {
                     Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                    // GIF-picker "via <provider>" under the name; https only as a
-                    // link (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
-                    if let source = item.source, !source.provider.isEmpty {
-                        let label = "via \(source.provider)"
-                        Group {
-                            if let url = AttachmentSource.httpsPageURL(from: source.pageUrl) {
-                                SwiftUI.Link(label, destination: url)
-                            } else {
-                                Text(label)
-                            }
-                        }
-                        .font(theme.font(13))
-                        .foregroundStyle(.white.opacity(0.67))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("viewer-via-source")
-                    } else {
-                        Text(item.subline).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
-                    }
+                    // GIF-picker "via <provider>" under the name when present;
+                    // else the when/caption subline (feedback
+                    // app-01M61EZD0GJ2XGV1EW4SCVXENK).
+                    MediaViaCaption(source: item.source, fallback: item.subline)
                 }
             }
 
