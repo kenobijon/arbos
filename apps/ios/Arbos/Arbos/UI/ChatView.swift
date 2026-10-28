@@ -890,6 +890,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
+                            .accessibilityIdentifier("chat-search-field")
                         // The ✕ ([feedback iphone-search-close-2026-10-28], Jacob: "the x button
                         // doesn't work"): the glyph alone was the hit target — 17 pt beside a
                         // 48 pt field, so a near miss refocused the field instead. The whole
