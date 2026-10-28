@@ -407,7 +407,8 @@ pub fn details_sections(
         "It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."
             .into(),
     ));
-    if info.status != "revoked" {
+    // The card needs the relay half (#2185): an older relay reports no `wake` at all.
+    if info.status != "revoked" && info.wake.is_some() {
         out.extend(wake_sections(project_id, info, shell, theme, cx));
     }
     out.push(Section::Title("Key".into()));
