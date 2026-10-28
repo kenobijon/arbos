@@ -52,7 +52,8 @@ use super::dto::{
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
 use super::{
-    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+    ClientCommand, CopyBlob, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent,
+    SyncSource,
 };
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
@@ -4366,6 +4367,11 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
         mime: att.mime,
         kind: att.kind.map(attachment_kind_str),
         blob_ref: att.blob_ref,
+        source: att.source.map(|s| arbos_core::doc::AttachmentSource {
+            provider: s.provider,
+            id: s.id,
+            page_url: s.page_url,
+        }),
     }
 }
 
@@ -4456,6 +4462,7 @@ async fn upload_outgoing(
         mime,
         kind,
         blob_ref,
+        source: None,
     }
 }
 
@@ -4780,6 +4787,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             kind: Some(AttachmentKind::Audio),
             title: None,
             chart_part: None,
+            source: None,
         },
     }
 }
@@ -5909,15 +5917,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{}", shared.me_id());
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
+                let base = arbos_core::doc::normalize_reaction_emoji(&emoji);
                 let already = doc
                     .index_of(&message_id)
                     .and_then(|ix| doc.read_message(ix))
                     .map(|m| {
-                        m.reactions
-                            .get(&emoji)
-                            .and_then(|bucket| bucket.get(&me))
-                            .copied()
-                            .unwrap_or(false)
+                        m.reactions.iter().any(|(e, bucket)| {
+                            arbos_core::doc::normalize_reaction_emoji(e) == base
+                                && bucket.get(&me).copied().unwrap_or(false)
+                        })
                     })
                     .unwrap_or(false);
                 let on = !already;
@@ -7507,6 +7515,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
+            });
+        }
+        ClientCommand::FetchCopyBlobs {
+            project_id,
+            request,
+            keys,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every blob at once; one that fails leaves a hole, the rest still copy.
+                let fetches = keys.iter().map(|key| {
+                    let shared = shared.clone();
+                    let project_id = project_id.clone();
+                    let key = key.clone();
+                    async move {
+                        let mut attempt = 0u32;
+                        loop {
+                            match fetch_blob_bytes(&shared, &project_id, &key).await {
+                                Ok((mime, bytes)) => {
+                                    break Some(CopyBlob {
+                                        key,
+                                        mime,
+                                        bytes: Arc::new(bytes),
+                                    })
+                                }
+                                Err(err) => {
+                                    let text = format!("{err:#}");
+                                    if diagnostics::is_transient(&text) && attempt < 2 {
+                                        attempt += 1;
+                                        sleep(Duration::from_millis(400 * u64::from(attempt)))
+                                            .await;
+                                        continue;
+                                    }
+                                    shared.diagnostic("copy", format!("{key}: {text}"));
+                                    break None;
+                                }
+                            }
+                        }
+                    }
+                });
+                let blobs = futures::future::join_all(fetches).await;
+                let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
             });
         }
         ClientCommand::DownloadAttachment {

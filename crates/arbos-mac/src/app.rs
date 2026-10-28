@@ -417,6 +417,7 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                source: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -465,6 +466,14 @@ pub struct ForwardMessage {
     pub message_id: Id,
     /// The original sender's display name ("Forwarded from <by>").
     pub by: String,
+}
+
+/// A Copy whose attachment bytes are being fetched
+/// ([feedback copy-image-messages-mac-2026-10-27]): the body to lay out once they land.
+#[derive(Clone, Debug, PartialEq)]
+struct CopyRequest {
+    id: u64,
+    body: MessageBody,
 }
 
 /// The parts the optimistic row in the destination draws before the relay
@@ -738,6 +747,11 @@ pub struct AppState {
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// The Copy whose attachment bytes are on their way
+    /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
+    /// older answer is dropped by its `request` number.
+    copy_request: Option<CopyRequest>,
+    copy_request_seq: u64,
     pub notices: Vec<Notice>,
     /// Rooms whose pushes were refused (`not_available` / `blocked`) and why; the chat-level
     /// note draws the sentence. Cleared when that room's next ACK arrives.
@@ -1233,6 +1247,8 @@ impl AppState {
             link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            copy_request: None,
+            copy_request_seq: 0,
             notices: Vec::new(),
             push_refused: HashMap::new(),
             selected_project: None,
@@ -2072,6 +2088,9 @@ impl AppState {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
                 }
                 cx.notify();
+            }
+            SyncEvent::CopyBlobs { request, blobs } => {
+                self.finish_copy(request, blobs, cx);
             }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
@@ -4554,6 +4573,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4580,6 +4600,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 },
             });
         }
@@ -4594,6 +4615,7 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    source: None,
                 },
             });
         }
@@ -7576,6 +7598,43 @@ impl AppState {
         cx.notify();
     }
 
+    /// A Library row's Copy ([feedback copy-image-messages-mac-2026-10-27]): the
+    /// picture or file of that row, from the slot its chat's blobs live in (its
+    /// project, or the people chat itself; a channel row falls back to the selected space).
+    pub fn copy_viewer_item(&mut self, item: &ViewerItem, cx: &mut Context<Self>) {
+        let known = self
+            .chats
+            .values()
+            .any(|tabs| tabs.iter().any(|c| c.id == item.chat_id));
+        let slot = if known {
+            self.space_of_chat(&item.chat_id)
+        } else {
+            match self.selected_project.clone() {
+                Some(p) => p,
+                None => return,
+            }
+        };
+        let attachment = item.attachment.clone();
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
+    /// Viewer → Copy (the pill, or ⌘C while the viewer is up): the open picture or
+    /// file on the pasteboard, original bytes under their own type
+    /// ([feedback copy-image-messages-mac-2026-10-27]).
+    pub fn media_viewer_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index) else {
+            return;
+        };
+        if item.picture_url.is_some() || viewer.forward_open {
+            return;
+        }
+        let (slot, attachment) = (viewer.slot.clone(), item.attachment.clone());
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
     /// Viewer → Play / Quick Look: fetch the bytes to a temp file and hand them
     /// to macOS (`qlmanage -p` for files, `open` for video → QuickTime Player).
     pub fn media_viewer_open_external(&mut self, cx: &mut Context<Self>) {
@@ -10047,6 +10106,135 @@ impl AppState {
         cx.notify();
     }
 
+    /// Copy of a whole message — the bubble menu, control-click, ⌘C on a whole
+    /// bubble ([feedback copy-image-messages-mac-2026-10-27]): its body
+    /// (`Message::body`, the accessor Forward reads too) as [`crate::pasteboard`] lays
+    /// it out. Words alone land at once; a message with pictures or files first fetches
+    /// their original bytes from the relay (never the thumbnail) and writes the
+    /// pasteboard when they are in. Says what happened when nothing could be copied.
+    pub fn copy_message(&mut self, chat_id: &Id, message_id: &Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == *message_id))
+        else {
+            return;
+        };
+        let Some(body) = message.body() else {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        };
+        let slot = self.space_of_chat(chat_id);
+        self.copy_body(slot, body, cx);
+    }
+
+    /// Copy of one attachment on its own — the media viewer's Copy, the Library's
+    /// row menu: the picture (or file) without the message's words.
+    pub fn copy_attachment(&mut self, slot: Id, attachment: &Attachment, cx: &mut Context<Self>) {
+        if !attachment.is_on_relay() {
+            self.push_notice(if attachment.is_uploading() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        }
+        let body = MessageBody {
+            text: String::new(),
+            attachments: vec![attachment.clone()],
+            charts: Vec::new(),
+        };
+        self.copy_body(slot, body, cx);
+    }
+
+    fn copy_body(&mut self, slot: Id, body: MessageBody, cx: &mut Context<Self>) {
+        if body.attachments.is_empty() {
+            let items =
+                crate::pasteboard::plan(&body.text, &[], &crate::pasteboard::copied_files_dir());
+            crate::pasteboard::write(&items, cx);
+            self.copy_request = None;
+            return;
+        }
+        self.copy_request_seq += 1;
+        let request = self.copy_request_seq;
+        let keys: Vec<String> = body
+            .attachments
+            .iter()
+            .filter_map(|a| a.blob_ref.clone())
+            .collect();
+        self.copy_request = Some(CopyRequest { id: request, body });
+        self.command(ClientCommand::FetchCopyBlobs {
+            project_id: slot,
+            request,
+            keys,
+        });
+        cx.notify();
+    }
+
+    /// The blobs of a Copy came back: lay the items out and write the pasteboard.
+    fn finish_copy(
+        &mut self,
+        request: u64,
+        blobs: Vec<Option<crate::sync::CopyBlob>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.copy_request.take_if(|p| p.id == request) else {
+            return;
+        };
+        let fetched: Vec<crate::pasteboard::Fetched> = pending
+            .body
+            .attachments
+            .iter()
+            .zip(blobs)
+            .filter_map(|(attachment, blob)| {
+                let blob = blob?;
+                // The relay's content-type unless it is the generic one; then the row's.
+                let generic =
+                    blob.mime.is_empty() || blob.mime.starts_with("application/octet-stream");
+                Some(crate::pasteboard::Fetched {
+                    name: attachment.name.clone(),
+                    mime: if generic {
+                        attachment.mime.clone()
+                    } else {
+                        blob.mime.clone()
+                    },
+                    bytes: blob.bytes.as_ref().clone(),
+                })
+            })
+            .collect();
+        let missing = pending.body.attachments.len() - fetched.len();
+        let items = crate::pasteboard::plan(
+            &pending.body.text,
+            &fetched,
+            &crate::pasteboard::copied_files_dir(),
+        );
+        let written = crate::pasteboard::write(&items, cx);
+        if !written {
+            self.push_notice("Couldn't copy — the picture didn't download. Try again.");
+        } else if missing > 0 {
+            self.push_notice(if missing == 1 {
+                "Copied — one picture didn't download".to_owned()
+            } else {
+                format!("Copied — {missing} pictures didn't download")
+            });
+        } else {
+            let pictures = fetched.len();
+            self.push_notice(match (pictures, pending.body.text.is_empty()) {
+                (1, true) => "Copied the picture".to_owned(),
+                (1, false) => "Copied the picture and its text".to_owned(),
+                (n, true) => format!("Copied {n} pictures"),
+                (n, false) => format!("Copied {n} pictures and the text"),
+            });
+        }
+        cx.notify();
+    }
+
     /// Ask the source for the site icon of every named link in `messages` that has not been
     /// asked for yet ([feedback link-icons-mac-2026-10-25]): the hosts of `[Name](https://…)`
     /// in prose, lists and table cells of agent and people rows alike.
@@ -11435,14 +11623,19 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → BGRA frame for GPUI (`RenderImage` is BGRA).
+/// PNG/JPEG/GIF/WebP/ICO → BGRA frame(s) for GPUI (`RenderImage` is BGRA).
+/// GIF and animated WebP keep every frame (capped); other formats stay one frame.
 pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
-    decode_rgba(bytes).and_then(bgra_frame)
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => bgra_frames(frames),
+        DecodedPixels::Still(rgba) => bgra_frame(rgba),
+    }
 }
 
 /// Decode `bytes` for a small tile: the longer side shrinks to `max_side`
 /// device pixels (never enlarged). The composer's staged thumbnails use it so
 /// a pasted Retina screenshot does not sit in GPU memory at full size.
+/// Animated GIF/WebP use the first frame only (the tile does not animate).
 pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
     let img = decode_rgba(bytes)?;
     // A macOS window capture (⌘⇧4 + space, "Copy") is the window plus its
@@ -11518,13 +11711,22 @@ pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
 /// must not become a white band in the bubble). The viewer shows the untrimmed
 /// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
 /// scroll without holding full-resolution textures.
+/// Animated GIF/WebP skip the trim (every frame must stay aligned) and return
+/// a multi-frame [`RenderImage`].
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
-    let rgba = decode_rgba(bytes)?;
-    let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
-        .map(downscale_for_chat);
-    let full = bgra_frame(downscale_for_chat(rgba))?;
-    Some((full, trimmed.and_then(bgra_frame)))
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => {
+            let full = bgra_frames(frames)?;
+            Some((full, None))
+        }
+        DecodedPixels::Still(rgba) => {
+            let trimmed = trim_rect(&rgba)
+                .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+                .map(downscale_for_chat);
+            let full = bgra_frame(downscale_for_chat(rgba))?;
+            Some((full, trimmed.and_then(bgra_frame)))
+        }
+    }
 }
 
 /// Where the content of `img` sits once a uniform border is removed:
@@ -11592,20 +11794,120 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
     Some((left, top, cw, ch))
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels.
+/// Cap on GIF/WebP frames kept for a chat bubble (feedback
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG). Past this, only the first frame is shown.
+pub const ANIM_MAX_FRAMES: usize = 300;
+/// Cap on decoded RGBA bytes across all frames. Past this, only the first frame.
+pub const ANIM_MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
+
+/// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
+enum DecodedPixels {
+    Still(image::RgbaImage),
+    Animated(Vec<image::Frame>),
+}
+
+/// GIF87a / GIF89a magic.
+fn looks_like_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF8")
+}
+
+/// RIFF....WEBP magic.
+fn looks_like_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+}
+
+/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels (first / only frame). Used by thumbnails
+/// and the still path for formats that are not GIF/WebP.
 fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     Some(image::load_from_memory(bytes).ok()?.into_rgba8())
 }
 
-/// RGBA pixels → the BGRA frame GPUI draws.
-fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+/// Decode `bytes`: multi-frame for GIF/animated WebP, still otherwise.
+fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    if looks_like_gif(bytes) || looks_like_webp(bytes) {
+        // A still WebP (or a GIF the animation decoder rejects) falls back to
+        // the single-frame path so the bubble still shows something.
+        return decode_animation_pixels(bytes)
+            .or_else(|| decode_rgba(bytes).map(DecodedPixels::Still));
+    }
+    Some(DecodedPixels::Still(decode_rgba(bytes)?))
+}
+
+/// All frames of a GIF or WebP, each scaled to [`CHAT_IMAGE_MAX_SIDE`]. A still
+/// WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`]. Over the
+/// frame or memory cap → first frame only.
+fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    let frames_iter: Box<dyn Iterator<Item = image::ImageResult<image::Frame>>> =
+        if looks_like_gif(bytes) {
+            let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        } else {
+            let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        };
+
+    let mut frames: Vec<image::Frame> = Vec::new();
+    let mut decoded_bytes: usize = 0;
+    for result in frames_iter {
+        let frame = result.ok()?;
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let scaled = downscale_for_chat(frame.into_buffer());
+        let (w, h) = scaled.dimensions();
+        let frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if frames.len() >= ANIM_MAX_FRAMES
+            || decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES
+        {
+            // Cap hit: keep only the first frame as a still.
+            return frames
+                .into_iter()
+                .next()
+                .map(|f| DecodedPixels::Still(f.into_buffer()))
+                .or(Some(DecodedPixels::Still(scaled)));
+        }
+        decoded_bytes += frame_bytes;
+        frames.push(image::Frame::from_parts(scaled, left, top, delay));
+    }
+    match frames.len() {
+        0 => None,
+        1 => Some(DecodedPixels::Still(
+            frames.into_iter().next()?.into_buffer(),
+        )),
+        _ => Some(DecodedPixels::Animated(frames)),
+    }
+}
+
+/// RGBA pixels → BGRA (swap R/B in place).
+fn rgba_to_bgra(img: image::RgbaImage) -> Option<image::RgbaImage> {
     let (w, h) = img.dimensions();
     let mut raw = img.into_raw();
     for px in raw.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    let buffer = image::RgbaImage::from_raw(w, h, raw)?;
+    image::RgbaImage::from_raw(w, h, raw)
+}
+
+/// RGBA pixels → the BGRA frame GPUI draws.
+fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+    let buffer = rgba_to_bgra(img)?;
     Some(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+/// Many RGBA frames → one multi-frame BGRA [`RenderImage`] (delays kept).
+fn bgra_frames(frames: Vec<image::Frame>) -> Option<RenderImage> {
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let buffer = rgba_to_bgra(frame.into_buffer())?;
+        out.push(image::Frame::from_parts(buffer, left, top, delay));
+    }
+    Some(RenderImage::new(out))
 }
 
 fn same_shape(a: &Message, b: &Message) -> bool {
@@ -12270,6 +12572,105 @@ mod chat_image_scale_tests {
         // Aspect ≈ 3024/1964.
         let ratio = w as f32 / h as f32;
         assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod animated_image_tests {
+    //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+    use super::{decode_image, decode_image_pair, ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    fn three_color_frames() -> Vec<Frame> {
+        [
+            ([255, 0, 0, 255], 100u32),
+            ([0, 255, 0, 255], 100),
+            ([0, 0, 255, 255], 100),
+        ]
+        .into_iter()
+        .map(|(c, ms)| {
+            Frame::from_parts(
+                RgbaImage::from_pixel(8, 8, Rgba(c)),
+                0,
+                0,
+                Delay::from_numer_denom_ms(ms, 1),
+            )
+        })
+        .collect()
+    }
+
+    fn encode_gif(frames: Vec<Frame>) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(Cursor::new(&mut out));
+            enc.encode_frames(frames).expect("gif encode");
+        }
+        out
+    }
+
+    fn encode_webp_anim(frames: Vec<Frame>) -> Vec<u8> {
+        // image::codecs::webp::WebPEncoder is still-only; build via the
+        // `image-webp` path used by the decoder tests — encode a GIF and
+        // re-wrap is not WebP. Use the fixture bytes for WebP instead.
+        let _ = frames;
+        include_bytes!("../../arbos-core/fixtures/anim_three.webp").to_vec()
+    }
+
+    #[test]
+    fn a_three_frame_gif_keeps_every_frame() {
+        let bytes = encode_gif(three_color_frames());
+        let image = decode_image(&bytes).expect("gif decodes");
+        assert_eq!(image.frame_count(), 3);
+        let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
+        assert_eq!(full.frame_count(), 3);
+        assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn an_animated_webp_keeps_every_frame() {
+        let bytes = encode_webp_anim(three_color_frames());
+        let image = decode_image(&bytes).expect("webp decodes");
+        assert_eq!(image.frame_count(), 3);
+    }
+
+    #[test]
+    fn a_still_webp_and_a_png_are_one_frame() {
+        let still_webp = include_bytes!("../../arbos-core/fixtures/still.webp");
+        assert_eq!(
+            decode_image(still_webp).expect("still webp").frame_count(),
+            1
+        );
+        let png = include_bytes!("../../arbos-core/fixtures/anim_still.png");
+        assert_eq!(decode_image(png).expect("png").frame_count(), 1);
+    }
+
+    #[test]
+    fn past_the_frame_cap_falls_back_to_the_first_frame() {
+        // Many tiny frames: the decoder stops at ANIM_MAX_FRAMES and returns
+        // only the first as a still.
+        let delay = Delay::from_numer_denom_ms(20, 1);
+        let frames: Vec<Frame> = (0..(ANIM_MAX_FRAMES + 5))
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(2, 2, Rgba([c, 0, 0, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(
+            image.frame_count(),
+            1,
+            "over {ANIM_MAX_FRAMES} frames → first only"
+        );
+        // Memory cap is the sibling of the frame cap (same fallback path).
+        let _ = ANIM_MAX_DECODED_BYTES;
     }
 }
 

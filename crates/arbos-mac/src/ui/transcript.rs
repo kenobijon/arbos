@@ -763,9 +763,10 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     pub(crate) rows: Vec<Row>,
-    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V):
-    /// a send or streaming upsert rebuilds one message, not the whole
-    /// transcript — keeps scrolling and gestures responsive after send.
+    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V,
+    /// addendum app-01M5Z3T4F4KAMTWA7YKW3CP58H): a send or streaming upsert
+    /// rebuilds one message, not the whole transcript — keeps scrolling and
+    /// reply/menu gestures responsive after send (Mac has no swipe-to-reply).
     row_cache: MessageRowCache,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
@@ -825,6 +826,10 @@ pub struct Transcript {
     /// list holds while it lays its items out — v0.6.224 crashed on launch,
     /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
     measured: Rc<std::cell::RefCell<Measured>>,
+    /// Reaction chip whose senders are listed under the chips (iPhone
+    /// `reactionSenders`): `(message_id, emoji)`. Set while the pointer is
+    /// over that chip; click still toggles my reaction (capsule also toggles).
+    reaction_senders: Option<(String, String)>,
 }
 
 /// Last-frame geometry, by row id, plus the transcript's viewport.
@@ -896,6 +901,7 @@ impl Transcript {
             }),
             drag_scroll: None,
             measured: Rc::default(),
+            reaction_senders: None,
         }
     }
 
@@ -1013,9 +1019,17 @@ impl Transcript {
     /// last, in transcript order whichever way the drag went, one blank line
     /// between messages (what Grok's copy gives).
     fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let span = self.selection.read(cx).span();
+        if let Some(message_id) = span
+            .as_ref()
+            .and_then(|span| self.whole_bubble_with_attachments(span, cx))
+        {
+            self.copy_message(&message_id, cx);
+            return;
+        }
         let text = {
             let selection = self.selection.read(cx);
-            match selection.span() {
+            match span {
                 Some(span) if !span.one_bubble() => copy_across(&span, &self.bubble_texts(cx)),
                 _ => selection.selected_text(),
             }
@@ -1391,6 +1405,7 @@ impl Transcript {
         self.pane_open = pane_open;
         if chat_changed {
             self.drag_scroll = None;
+            self.reaction_senders = None;
         }
         let messages: Vec<Message> = chat_id
             .as_deref()
@@ -1571,39 +1586,89 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Plain text of a message in this chat, for copy / control-click.
-    fn message_plain(&self, message_id: &Id, cx: &App) -> Option<String> {
+    /// The message a selection bubble key (`<message>#text`, `<row>.u`, see
+    /// `bubble_texts`) belongs to.
+    fn message_of_bubble(&self, key: &str) -> Option<Id> {
+        self.rows.iter().find_map(|row| {
+            let row_key = match &row.kind {
+                RowKind::Markdown { .. } | RowKind::NoAnswer { .. } => {
+                    format!("{}#text", row.message_id)
+                }
+                RowKind::User { .. } => format!("{}.u", row.id),
+                _ => return None,
+            };
+            (row_key == key).then(|| row.message_id.clone())
+        })
+    }
+
+    /// ⌘C with a whole bubble selected (triple-click, select-all in it) on a message
+    /// that carries pictures or files: the whole message, pictures included, is what
+    /// the user means ([feedback copy-image-messages-mac-2026-10-27]). `Some(id)`
+    /// names that message; `None` keeps the plain text copy.
+    fn whole_bubble_with_attachments(
+        &self,
+        span: &crate::ui::select::Span,
+        cx: &App,
+    ) -> Option<Id> {
+        if !span.one_bubble() {
+            return None;
+        }
+        let whole = span.start_index == 0
+            && span.end_index >= span.start.text.trim_end().len()
+            && !span.start.text.trim().is_empty();
+        if !whole {
+            return None;
+        }
+        let message_id = self.message_of_bubble(&span.start.key)?;
         let chat_id = self.chat_id.as_ref()?;
         self.state
             .read(cx)
             .messages
             .get(chat_id)
-            .and_then(|list| list.iter().find(|m| m.id == *message_id))
-            .map(|m| m.plain_text())
+            .and_then(|list| list.iter().find(|m| m.id == message_id))
+            .and_then(|m| m.body())
+            .filter(|b| !b.attachments.is_empty())
+            .map(|_| message_id)
     }
 
+    /// Copy of a message — the bubble menu's Copy, control-click, ⌘C on a whole
+    /// bubble: the whole message through `AppState::copy_message` (its text and
+    /// every picture / file it carries, [feedback copy-image-messages-mac-2026-10-27];
+    /// before, only `plain_text()` went out and a picture message copied nothing).
+    /// The bubble reads "Copied" for [`COPY_FEEDBACK_MS`] when it has anything to copy.
     pub(crate) fn copy_message(&mut self, message_id: &Id, cx: &mut Context<Self>) {
-        if let Some(text) = self.message_plain(message_id, cx) {
-            if !text.is_empty() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                self.copied_feedback = Some((message_id.clone(), Instant::now()));
-                cx.notify();
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(COPY_FEEDBACK_MS))
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
-                            at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
-                        }) {
-                            this.copied_feedback = None;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let has_body = self
+            .state
+            .read(cx)
+            .messages
+            .get(&chat_id)
+            .and_then(|list| list.iter().find(|m| m.id == *message_id))
+            .is_some_and(|m| m.body().is_some());
+        self.state
+            .update(cx, |s, cx| s.copy_message(&chat_id, message_id, cx));
+        if !has_body {
+            return;
         }
+        self.copied_feedback = Some((message_id.clone(), Instant::now()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(COPY_FEEDBACK_MS))
+                .await;
+            let _ =
+                this.update(cx, |this, cx| {
+                    if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
+                        at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
+                    }) {
+                        this.copied_feedback = None;
+                        cx.notify();
+                    }
+                });
+        })
+        .detach();
     }
 
     /// A code card's Copy pill: the block's text to the clipboard and the pill
@@ -2246,6 +2311,49 @@ impl Transcript {
             })
     }
 
+    /// Display name for a reaction sender id (`user:…` / `agent:…`), matching
+    /// the iPhone's `reactionSenderLabel` ("You" for self).
+    fn reaction_sender_label(&self, sender: &str, me: &str, cx: &App) -> String {
+        if sender == me {
+            return "You".into();
+        }
+        if let Some(m) = self.mentions.by_id(sender) {
+            return m.name.clone();
+        }
+        let state = self.state.read(cx);
+        if let Some(id) = sender.strip_prefix("agent:") {
+            if let Some(p) = state.project(id) {
+                return p.name.clone();
+            }
+            for space in state.projects.iter().filter(|p| p.is_people()) {
+                if let Some(a) = space.agents.iter().find(|a| a.project_id == id) {
+                    return a.name.clone();
+                }
+            }
+        }
+        if let Some(id) = sender.strip_prefix("user:") {
+            if id == state.me_id() {
+                return "You".into();
+            }
+            if let Some(p) = state
+                .projects
+                .iter()
+                .flat_map(|p| p.people.iter())
+                .chain(state.people_results.iter())
+                .chain(state.people_directory.iter())
+                .find(|p| p.id == id)
+            {
+                return p.display_name();
+            }
+        }
+        sender
+            .split_once(':')
+            .map(|(_, bare)| bare)
+            .filter(|b| !b.is_empty())
+            .unwrap_or(sender)
+            .to_string()
+    }
+
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
     #[allow(clippy::too_many_arguments)]
     fn markdown_bubble(
@@ -2848,18 +2956,27 @@ impl Transcript {
                 indent,
             } => {
                 // iPhone parity: small capsules under the bubble, mine tinted;
-                // click toggles my reaction on that emoji.
+                // click toggles my reaction. Hover lists who used that emoji
+                // under the chips — iPhone `reactionSenders`.
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
+                let showing = self
+                    .reaction_senders
+                    .as_ref()
+                    .filter(|(mid, _)| mid == &row.message_id)
+                    .map(|(_, e)| e.clone());
                 let mut chips = div().flex().flex_wrap().gap(px(4.0));
-                for (emoji, senders) in reactions {
+                for (emoji, senders) in &reactions {
                     let on = senders.contains(&me);
+                    let selected = showing.as_ref() == Some(emoji);
                     let (state, chat, message_id, e) = (
                         self.state.clone(),
                         chat_id.clone(),
                         row.message_id.clone(),
                         emoji.clone(),
                     );
+                    let hover_mid = row.message_id.clone();
+                    let hover_emoji = emoji.clone();
                     chips = chips.child(
                         div()
                             .id(SharedString::from(format!("{}#{}", row.id, emoji)))
@@ -2869,13 +2986,13 @@ impl Transcript {
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded_full()
-                            .bg(if on {
+                            .bg(if on || selected {
                                 Theme::with_alpha(theme.accent, 0.22)
                             } else {
                                 theme.bubble_assistant
                             })
                             .border_1()
-                            .border_color(if on {
+                            .border_color(if on || selected {
                                 Theme::with_alpha(theme.accent, 0.55)
                             } else {
                                 theme.border
@@ -2891,6 +3008,18 @@ impl Transcript {
                                         .child(senders.len().to_string()),
                                 )
                             })
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                let key = (hover_mid.clone(), hover_emoji.clone());
+                                if *hovered {
+                                    if this.reaction_senders.as_ref() != Some(&key) {
+                                        this.reaction_senders = Some(key);
+                                        cx.notify();
+                                    }
+                                } else if this.reaction_senders.as_ref() == Some(&key) {
+                                    this.reaction_senders = None;
+                                    cx.notify();
+                                }
+                            }))
                             .on_click(move |_, _, cx| {
                                 let (chat, message_id, e) =
                                     (chat.clone(), message_id.clone(), e.clone());
@@ -2899,15 +3028,37 @@ impl Transcript {
                             }),
                     );
                 }
+                let names = showing.as_ref().and_then(|emoji| {
+                    reactions
+                        .iter()
+                        .find(|(e, _)| e == emoji)
+                        .map(|(_, senders)| {
+                            senders
+                                .iter()
+                                .map(|s| self.reaction_sender_label(s, &me, cx))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                });
                 div()
                     .w_full()
                     .flex()
-                    .when(mine, |el| el.justify_end())
-                    .when(!mine, |el| el.justify_start())
+                    .flex_col()
+                    .gap(px(4.0))
+                    .when(mine, |el| el.items_end())
+                    .when(!mine, |el| el.items_start())
                     .when(indent, |el| el.pl(px(2.0)))
                     .mt(px(-2.0))
                     .pb(px(ROW_GAP_HALF))
                     .child(chips)
+                    .when_some(names, |el, names| {
+                        el.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(names),
+                        )
+                    })
                     .into_any_element()
             }
             RowKind::Handoff { names, total } => {
@@ -3736,7 +3887,8 @@ fn is_json_block(block: &Block) -> bool {
 
 /// Built rows for one message, keyed by a render version so a streaming
 /// upsert rebuilds only that message (#1405 /
-/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V).
+/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V,
+/// addendum app-01M5Z3T4F4KAMTWA7YKW3CP58H).
 #[derive(Default)]
 pub struct MessageRowCache {
     entries: HashMap<Id, CachedMessageRows>,

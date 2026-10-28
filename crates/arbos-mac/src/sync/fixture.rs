@@ -1276,6 +1276,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 })
                 .collect();
             send_user(
@@ -1398,6 +1399,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
                 chart_part: None,
+                source: None,
             }];
             send_user(
                 shared,
@@ -1518,15 +1520,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{ME_ID}");
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
+                let base = arbos_core::doc::normalize_reaction_emoji(&emoji);
                 let already = doc
                     .index_of(&message_id)
                     .and_then(|ix| doc.read_message(ix))
                     .map(|m| {
-                        m.reactions
-                            .get(&emoji)
-                            .and_then(|bucket| bucket.get(&me))
-                            .copied()
-                            .unwrap_or(false)
+                        m.reactions.iter().any(|(e, bucket)| {
+                            arbos_core::doc::normalize_reaction_emoji(e) == base
+                                && bucket.get(&me).copied().unwrap_or(false)
+                        })
                     })
                     .unwrap_or(false);
                 let on = !already;
@@ -2035,6 +2037,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(fixture_png(&key)),
                 key,
             });
+        }
+        ClientCommand::FetchCopyBlobs { request, keys, .. } => {
+            // The fixture's pictures are PNGs; a key that reads as a file gets a small text body.
+            let blobs = keys
+                .into_iter()
+                .map(|key| {
+                    let is_picture = key.ends_with(".png")
+                        || key.ends_with(".jpg")
+                        || key.ends_with(".jpeg")
+                        || key.contains("Screenshot")
+                        || key.starts_with("fixture-g")
+                        || key.starts_with("img-");
+                    let (mime, bytes) = if is_picture {
+                        ("image/png".to_owned(), fixture_png(&key))
+                    } else {
+                        (
+                            "text/plain".to_owned(),
+                            format!("Fixture attachment {key}.\n").into_bytes(),
+                        )
+                    };
+                    Some(super::CopyBlob {
+                        key,
+                        mime,
+                        bytes: Arc::new(bytes),
+                    })
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
         }
         ClientCommand::FetchLinkIcon { host } => {
             // The real icons of the fixture replies' sites (`assets/link-icons`), so the
@@ -4927,6 +4957,14 @@ fn user_attachments(attachments: &[Attachment]) -> Vec<UserAttachment> {
                 .and_then(|k| serde_json::to_value(k).ok())
                 .and_then(|v| v.as_str().map(str::to_owned)),
             blob_ref: a.blob_ref.clone(),
+            source: a
+                .source
+                .as_ref()
+                .map(|s| arbos_core::doc::AttachmentSource {
+                    provider: s.provider.clone(),
+                    id: s.id.clone(),
+                    page_url: s.page_url.clone(),
+                }),
         })
         .collect()
 }
@@ -5683,6 +5721,7 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             kind: Some(kind),
             title: Some(title.into()),
             chart_part: None,
+            source: None,
         },
     }
 }
@@ -6333,6 +6372,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
                 chart_part: None,
+                source: None,
             }],
         );
         s.assistant(
