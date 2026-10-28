@@ -46,7 +46,8 @@ final class ChatSearchCloseTests: XCTestCase {
     /// a filter behind; a keyword with no hit shows a line instead of a blank list.
     func testChatViewWiresTheClosePaths() {
         let src = chatView
-        XCTAssertTrue(src.contains("if ChatSearchClose.tapOutsideCloses(open: showSearch) { closeSearch() }"), "transcript tap closes")
+        XCTAssertTrue(src.contains("guard ChatSearchClose.tapOutsideCloses(open: showSearch) else { return }"), "transcript tap closes")
+        XCTAssertTrue(src.contains("if searchResultTapped == nil { closeSearch() }"), "…unless a result row took the tap")
         XCTAssertTrue(src.contains("if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }"), "swipe closes")
         XCTAssertTrue(src.contains("SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row))"), "result rows take the tap")
         XCTAssertTrue(src.contains("closeSearch(scrollToTail: false)\n        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }"), "a result closes, then reveals")
