@@ -300,6 +300,9 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Bool, Never>?
     /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
     @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
+    /// Connected agents' session logs (`GET /outside-agents/{id}/log`, #2224), oldest first,
+    /// for the Details pane's Session log card and its View all page.
+    @Published var outsideLogs: [Id: [OutsideLogEntry]] = [:]
     @Published var projects: [Project] = [] {
         didSet {
         }
@@ -6237,9 +6240,28 @@ final class AppModel: ObservableObject {
         guard !isFixture else { return nil }
         if let info = try? await api.outsideAgent(projectId) {
             outsideInfo[projectId] = info
+            if info.logSummary != nil { await refreshOutsideLog(projectId) }
             return info
         }
         return outsideInfo[projectId]
+    }
+
+    /// The session log for the Details pane's card and View all (#2224).
+    func refreshOutsideLog(_ projectId: Id) async {
+        guard !isFixture else { return }
+        if let entries = try? await api.outsideAgentLog(projectId) {
+            outsideLogs[projectId] = entries
+        }
+    }
+
+    /// The chat a log line names, as the person knows it: a group's or DM's name, the agent's
+    /// own chat, or "Chat" when it is not in this app's lists any more.
+    func outsideLogChatTitle(_ chat: String, agent: Id) -> String {
+        if let p = project(chat) { return p.name }
+        for p in projects where chats(of: p.id).contains(where: { $0.id == chat }) {
+            return p.id == agent ? "Your chat" : p.name
+        }
+        return "Chat"
     }
 
     func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
