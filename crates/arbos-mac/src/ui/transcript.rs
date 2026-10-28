@@ -10823,6 +10823,13 @@ mod link_preview_tests {
         )
     }
 
+    /// The global Link previews switch is process-wide: the tests that read or flip it take
+    /// this lock so the parallel runner cannot interleave them.
+    fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn user_row(rows: &[Row]) -> (String, Option<Box<(String, LinkPreview)>>) {
         rows.iter()
             .find_map(|r| match &r.kind {
@@ -10862,6 +10869,7 @@ mod link_preview_tests {
 
     #[test]
     fn text_plus_link_keeps_the_text_and_a_bare_link_becomes_the_card() {
+        let _switch = switch_lock();
         let (text, preview) = user_row(&rows_of(user_message(
             "listen to this https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
             None,
@@ -10886,6 +10894,7 @@ mod link_preview_tests {
 
     #[test]
     fn preview_off_and_the_global_switch_hide_the_card() {
+        let _switch = switch_lock();
         let (text, preview) = user_row(&rows_of(user_message(
             "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
             Some("off"),
@@ -10904,6 +10913,7 @@ mod link_preview_tests {
 
     #[test]
     fn an_agents_link_preview_is_the_bubbles_last_block() {
+        let _switch = switch_lock();
         let m: Message = serde_json::from_value(serde_json::json!({
             "id": "m2", "chatId": "c1", "role": "assistant", "sender": "box:1", "status": "done",
             "createdAt": 1_700_000_002_000u64,
