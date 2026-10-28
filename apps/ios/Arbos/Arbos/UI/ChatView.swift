@@ -993,27 +993,11 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("channel-read-only")
-                    } else if isPeople, let people, people.silenced {
-                        // Group admin muted me from posting — one quiet line, no composer.
-                        // TimelineView restores the composer at `silencedUntil`
-                        // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
-                        let ends: [Date] = people.silencedUntil.map {
-                            [Date(timeIntervalSince1970: TimeInterval($0) / 1000)]
-                        } ?? []
-                        TimelineView(.explicit(ends)) { context in
-                            let nowMs = Int64(context.date.timeIntervalSince1970 * 1000)
-                            let stillMuted = people.silencedUntil.map { $0 > nowMs } ?? true
-                            if stillMuted {
-                                Text(BlockedState.mutedUntilLabel(untilMs: people.silencedUntil, nowMs: nowMs))
-                                    .font(theme.font(Theme.small))
-                                    .foregroundStyle(theme.muted)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: Theme.composerHeight)
-                                    .accessibilityIdentifier("group-silenced")
-                            } else {
-                                composer
-                            }
-                        }
+                    } else if isPeople, let people, people.isSilencedNow {
+                        // Group admin muted me from posting — one quiet line, no composer
+                        // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Extracted so ChatView
+                        // type-checks; `sessionRootTasks` clears silenced when the end passes.
+                        SilencedComposerLine(untilMs: people.silencedUntil)
                     } else if let peer = blockedPeer {
                         // A DM with someone I blocked has no input ([feedback
                         // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.

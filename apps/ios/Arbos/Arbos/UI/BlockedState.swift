@@ -135,6 +135,24 @@ struct BlockedChip: View {
     }
 }
 
+/// The composer's stand-in when an admin muted me in a group: one quiet "Muted until …" line
+/// ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Kept out of `ChatView` so the type-checker
+/// finishes; the chat's `.task` clears local silenced state when `untilMs` passes.
+struct SilencedComposerLine: View {
+    @Environment(\.theme) private var theme
+    let untilMs: Int64?
+
+    var body: some View {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        Text(BlockedState.mutedUntilLabel(untilMs: untilMs, nowMs: now))
+            .font(theme.font(Theme.small))
+            .foregroundStyle(theme.muted)
+            .frame(maxWidth: .infinity)
+            .frame(height: Theme.composerHeight)
+            .accessibilityIdentifier("group-silenced")
+    }
+}
+
 /// The composer's stand-in for a DM with someone I blocked: "You blocked X" with an Unblock
 /// button at the right — the composer field's height and capsule (`Controls`), its rim.
 struct BlockedComposerBar: View {
