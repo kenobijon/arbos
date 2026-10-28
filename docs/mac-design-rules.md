@@ -1024,7 +1024,7 @@ this is the correctness of the existing surface):
 
 Pinned by `theme::glass_contrast_tests` (white / black / photo × light / dark × 0 / 50 / 100 %, sampled and unsampled; the floors over the friendly desktop), `backdrop::tests` (throttle, change gate, bands, coverage) and `vibrancy::tests` (Liquid on 26, under-window before, none on Matte, kept across dark → light → dark).
 
-### Right pane components on Glass (Jacob 2026-10-28, [feedback right-pane-glass-cards-2026-10-28] — mockup, awaiting his go)
+### Right pane components on Glass (Jacob 2026-10-28, [feedback right-pane-glass-cards-2026-10-28]; approved 18:17 UTC on the Xvfb sheet)
 
 Jacob's Members-tab shot: the pane wore the adaptive wash but its cards
 ("Add members / Description", the member list), the Members · Library
@@ -1043,6 +1043,7 @@ wash; **Matte returns the old tokens untouched.**
 | --- | --- | --- | --- | --- |
 | Grouped card (`kit::card`: members, settings, Connection / Key cards, Library lists) | `pane_card` | white 8 % + 1 pt rim white 10 % (inset shadow: no layout cost) | white 55 % + rim black 6 % | `Theme::pane_card_fill` / `pane_card_rim`, `PANE_CARD_GLASS_*` |
 | Small controls: the round-button family — the pane's share / close / back discs, the sidebar strip's search · + · collapse and the collapsed rail's discs (Jacob 2026-10-28 16:58: "they should be glass"; hover and pressed stay `ui::highlight`'s two wash steps over the fill, the glyph the text colour) — the tab capsule, glyph tiles, Library thumbnails, hero glyph tile, Message pill, tag chips | `surface_2` | white 14 % | black 7 % | `Theme::control_fill` |
+| Sidebar filter's selected capsule (All · Agents · People · Servers) | `bubble_assistant` | white 14 % | black 7 % | `Theme::filter_on_fill` |
 | Fields in the pane (description / label / name editors, the handle field, Unarchive) | `field` | white 6 % | white 60 % | `Theme::field_fill` |
 | Settings icon tile | `#5c5c60` / `#6e6e73` | white 22 % | black 42 % (white glyph ≥ 3:1) | `Theme::tile_fill` |
 | Selected On / Off / Dark / Light segment | `bubble` | white 16 % | black 72 % | `Theme::segment_on_fill` |
@@ -1059,7 +1060,10 @@ and `…::on_matte_the_pane_components_keep_their_solid_tokens`.
 
 Rig: `ARBOS_MOCK_WALLPAPER=<pre-blurred png>` + `ARBOS_MOCK_BACKDROP_LUM=<0…1>`
 (`ui::mock_backdrop`) paint a stand-in desktop under the window and seed the
-sampler where there is no vibrancy (Linux / Xvfb previews).
+sampler where there is no vibrancy (Linux / Xvfb previews); inert without the
+variables (`mock_backdrop::tests`). The iPhone's `PaneCard` takes the same
+card token (`Theme.paneCardFill` / `paneCardRim`, [feedback
+right-pane-glass-cards-ios-2026-10-28]) so both panes match on Glass.
 
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 

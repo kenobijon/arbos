@@ -1085,7 +1085,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 // highlight token's washes plus the label brightening.
                 .map(|el| {
                     if on {
-                        highlight::washed(el, theme.bubble_assistant, &theme)
+                        highlight::washed(el, theme.filter_on_fill(), &theme)
                     } else {
                         let text = theme.text;
                         highlight::button_with(el, &theme, move |s| s.text_color(text))

@@ -59,6 +59,9 @@ fn wallpaper(cx: &mut App) -> Option<Arc<RenderImage>> {
 /// The layer under everything: the stand-in desktop, filling the window.
 /// `None` when no stand-in is configured or the picture did not load.
 pub fn layer(cx: &mut App) -> Option<Div> {
+    if !active() {
+        return None;
+    }
     let image = wallpaper(cx)?;
     Some(
         div()
@@ -67,4 +70,37 @@ pub fn layer(cx: &mut App) -> Option<Div> {
             .overflow_hidden()
             .child(img(image).size_full().object_fit(ObjectFit::Cover)),
     )
+}
+
+/// The hook ships inert: without its two variables nothing is painted and
+/// the shell wash is what it always was (opaque `bg` off macOS, the glass
+/// tint on it); the test suite never sets them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::{Appearance, Surface, Theme};
+
+    #[test]
+    fn inert_without_the_variables() {
+        assert!(std::env::var_os(WALLPAPER_VAR).is_none());
+        assert!(std::env::var_os(LUM_VAR).is_none());
+        assert!(!active());
+        assert_eq!(lum(), None);
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let matte = Theme::with(appearance, Surface::Matte);
+            assert_eq!(matte.shell(), matte.bg);
+            let glass = Theme::with(appearance, Surface::Glass);
+            if Theme::glass_available() {
+                assert!(glass.shell().a < 1.0, "the glass tint, as before");
+            } else {
+                assert_eq!(glass.shell(), glass.bg, "no stand-in: opaque off macOS");
+            }
+            assert_eq!(glass.backdrop, None, "nothing seeded");
+        }
+    }
+
+    #[gpui::test]
+    fn no_layer_without_the_variables(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| assert!(layer(cx).is_none()));
+    }
 }
