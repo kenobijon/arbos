@@ -40,13 +40,14 @@ struct NewChatSheet: View {
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
-    /// `ARBOS_SHOW=newagent|newgroup|newserver` lands on that Create screen, `newgroup2` on the
-    /// member picker (screenshot rig).
+    /// `ARBOS_SHOW=newagent|newgroup|newserver|newconnect` lands on that Create screen, `newgroup2`
+    /// on the member picker (screenshot rig).
     @State private var showCreate: CreateKind? = {
         switch DebugHooks.show {
         case "newagent": return .agent
         case "newgroup": return .group
         case "newserver": return .server
+        case "newconnect": return .connect
         default: return nil
         }
     }()
