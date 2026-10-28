@@ -854,7 +854,11 @@ struct HomeView: View {
     }
 
     private func peoplePreview(_ c: PeopleChat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // Skip group deletion audits (hidden in the chat; Activity only) so the
+        // home row matches what you see when you open the conversation.
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1175,8 +1179,13 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews.
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty && !model.hidesMessage($0, chatId: c.id) }) else {
+        // A row hidden for me (someone I blocked) never previews. Deletion
+        // audits stay out too — same filter as the open chat (Transcript).
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1305,31 +1314,13 @@ struct PeopleRow: View {
         return other?.handle ?? chat.title
     }
 
-    /// Tokenised blob URL for the group's custom picture, when one is set.
-    private var groupImageURL: String? {
-        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
-        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
-    }
-
     var body: some View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    if let groupImageURL {
-                        AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
-                    } else if chat.isNeutralAvatar {
-                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
-                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
-                        // D92 amendment: the leaf picked on the Create screen.
-                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
-                    } else {
-                        ZStack {
-                            Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
-                            Image(systemName: "person.2.fill")
-                                .font(theme.font(17, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
+                    // The group's picture through the resolver (its upload, else the leaf or
+                    // neutral initial from the Create screen, else the two-person disc).
+                    GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
