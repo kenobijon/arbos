@@ -1203,6 +1203,7 @@ mod render_tests {
                 kind: Some(kind),
                 title: None,
                 chart_part: None,
+                url: None,
                 source: None,
             },
         }

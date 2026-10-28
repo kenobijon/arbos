@@ -33,6 +33,14 @@ struct MediaItem: Identifiable, Equatable {
     /// instead of a chat blob — no Download / Forward, and `caption` under the name.
     var pictureURL: String? = nil
     var caption: String? = nil
+    /// A picked GIF that lives with its provider (ARB-544): fetched through the relay's
+    /// pass-through, never stored; the row has no `blobRef`.
+    var remoteURL: String? = nil
+    /// A picker sticker: fixed square, no bubble.
+    var sticker: Bool = false
+
+    /// What the decoded picture is cached under: the blob ref, or `url:<url>` for a GIF.
+    var cacheKey: String? { blobRef ?? remoteURL.map { "url:" + $0 } }
 
     /// The line under the name: the caption of a profile picture, else when it was shared.
     var subline: String { caption ?? whenLabel }
@@ -91,7 +99,8 @@ enum MediaAlbum {
     static func item(id: String, message m: Message, attachment a: Attachment, kind: MediaItem.Kind, slot: String,
                      projectName: (String) -> String?) -> MediaItem {
         MediaItem(id: id, name: a.name, mime: a.mime, kind: kind, blobRef: a.blobRef, slot: slot,
-                  by: senderName(m, projectName: projectName), at: m.createdAt)
+                  by: senderName(m, projectName: projectName), at: m.createdAt,
+                  remoteURL: a.blobRef == nil ? a.url : nil, sticker: a.isSticker)
     }
 
     /// Who shared it, for the caption: name, else `@handle`, else "You" / the agent.
@@ -861,6 +870,12 @@ enum MediaFetch {
         if let picture = item.pictureURL {
             guard let url = URL(string: picture), url.scheme?.hasPrefix("http") == true else { return nil }
             return await data(url, headers: [:])
+        }
+        // A picked GIF (ARB-544): the provider's bytes through the relay's pass-through, with
+        // the device bearer (the relay checks the host; nothing is stored on either side).
+        if item.blobRef == nil, let remote = item.remoteURL {
+            guard let url = model.gifMediaURL(remote) else { return nil }
+            return await data(url, headers: model.authHeaders)
         }
         guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
         #if DEBUG
