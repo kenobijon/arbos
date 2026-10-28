@@ -3011,10 +3011,8 @@ impl Transcript {
                             })
                             .border_1()
                             .border_color(if on { accent_edge } else { theme.border })
-                            .when(!on, |el| {
-                                el.hover(move |s| s.bg(accent_soft).border_color(accent_edge))
-                            })
                             .cursor_pointer()
+                            .map(|el| highlight::button(el, &theme))
                             .tooltip(move |_, cx| {
                                 cx.new(|_| ReactionSendersTip(names.clone())).into()
                             })
