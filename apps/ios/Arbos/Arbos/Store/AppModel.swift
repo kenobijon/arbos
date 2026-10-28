@@ -76,12 +76,30 @@ struct Toast: Identifiable, Equatable {
     var error: UserError?
     var detailsOpen = false
     var held = false
+    /// Since when a touch holds it (the hold has a cap).
+    var heldSince: Date? = nil
     var hasRetry = false
     var at: Date
+    /// How many times this same failure arrived while the toast stood (1 = once); 2 and up
+    /// is a "×N" on the note instead of a second toast ([feedback toast-stack-ios-2026-10-27]).
+    var count: Int = 1
 
     static let infoTTL: TimeInterval = 6
     static let errorTTL: TimeInterval = 10
+    /// A held toast (touch on it, Details closed) is let go after this long.
+    static let holdMax: TimeInterval = 60
+    /// How many the slot shows at once; older ones fold into one "N more" line.
+    static let visibleMax = 3
     var ttl: TimeInterval { error == nil ? Toast.infoTTL : Toast.errorTTL }
+
+    /// Two toasts are the same failure when they read the same sentence.
+    func sameAs(_ other: UserError) -> Bool { error?.sentence == other.sentence }
+}
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded.
+struct ToastStack: Equatable {
+    var visible: [Toast]
+    var folded: Int
 }
 
 /// Which surface owns which failures while it is up (a sheet with a form open): a failure for
@@ -121,6 +139,14 @@ final class AppModel: ObservableObject {
     /// explicit "system", "dark" or "light" stays.
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.default.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
+    }
+    /// Settings → Appearance → Link previews ([feedback link-embeds-ios-2026-10-27]): on unless
+    /// switched off; off leaves every link plain. Mirrored into the row builder's static.
+    @Published var linkPreviews: Bool = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(linkPreviews, forKey: "linkPreviews")
+            Transcript.linkPreviewsEnabled = linkPreviews
+        }
     }
     /// Sum of SessionRoom reconnect / state_timeout counters (About page),
     /// plus the most recent non-nil room `lastError`.
@@ -272,6 +298,8 @@ final class AppModel: ObservableObject {
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
+    /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
+    @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
     @Published var projects: [Project] = [] {
         didSet {
         }
@@ -387,6 +415,11 @@ final class AppModel: ObservableObject {
                 store.put(StoreKey.lastChat, Data(chatId.utf8))
             }
         }
+    }
+    /// A chat screen is on top of the stack: the toast slot is its header's, not the root's.
+    var chatIsUp: Bool {
+        if case .chat? = path.last { return true }
+        return false
     }
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
@@ -838,6 +871,9 @@ final class AppModel: ObservableObject {
     private(set) weak static var current: AppModel?
 
     init() {
+        // The row builder's switch mirrors the saved setting from the first row on (no `self`
+        // here: stored properties are still initialising).
+        Transcript.linkPreviewsEnabled = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
@@ -964,6 +1000,11 @@ final class AppModel: ObservableObject {
             }
             path = [.chat(chatId: chatId, projectId: projectId)]
             pendingOpen = deferRoom ? (chatId, projectId) : nil
+        } else if projectId == channelSlot,
+                  let server = servers.first(where: { $0.channels.contains { $0.id == chatId } }) {
+            // A server channel banner: land in the server, then the channel.
+            path = [.server(serverId: server.id), .chat(chatId: chatId, projectId: channelSlot)]
+            pendingOpen = nil
         } else {
             pendingOpen = (chatId, projectId)
         }
@@ -1048,6 +1089,12 @@ final class AppModel: ObservableObject {
         }
         return try await api.sendFeedback(note: note, image: data, mime: mime, width: w, height: h,
                                           appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
+    }
+
+    /// Opt-in MetricKit payload → the relay (`PerfDiagnostics`). The fixture never posts.
+    func sendPerfReport(_ envelope: [String: Any]) async throws {
+        if isFixture { return }
+        try await api.sendPerfReport(envelope)
     }
 
     // MARK: Calls v1
@@ -1451,9 +1498,29 @@ final class AppModel: ObservableObject {
 
     // MARK: - toasts and failures (one element, one place — Jacob 2026-10-26)
 
-    /// An info toast: something that worked or a plain status. Never a failure.
+    /// An info toast: something that worked or a plain status. Never a failure. The same text
+    /// again while its toast stands restarts that toast instead of adding one.
     func notify(_ text: String) {
+        if let i = toasts.firstIndex(where: { $0.error == nil && $0.text == text }) {
+            toasts[i].count += 1
+            toasts[i].at = Date()
+            armToast(toasts[i].id, after: toasts[i].ttl)
+            return
+        }
         pushToast(Toast(id: UUID(), text: text, error: nil, at: Date()))
+    }
+
+    /// The newest `Toast.visibleMax` toasts (oldest first) and how many older ones are folded
+    /// away above them (Jacob 2026-10-27: at most three visible, the rest a count).
+    var toastStack: ToastStack {
+        let folded = max(0, toasts.count - Toast.visibleMax)
+        return ToastStack(visible: Array(toasts.dropFirst(folded)), folded: folded)
+    }
+
+    /// The "N more" line's ×: the whole slot goes.
+    func dismissAllToasts() {
+        for t in toasts { toastTimers[t.id]?.cancel(); toastTimers[t.id] = nil; toastRetries[t.id] = nil }
+        toasts.removeAll()
     }
 
     /// Something the user asked for did not happen: `verb` is what they tried ("save the
@@ -1463,11 +1530,22 @@ final class AppModel: ObservableObject {
         fail(UserError.classify(verb, error), retry: retry)
     }
 
-    /// A failure already classified.
+    /// A failure already classified. The same failure again while its toast stands (same
+    /// sentence) bumps that toast's count and restarts its clock — one note per failure,
+    /// however often it repeats (eight "Couldn't load your secrets. You're offline." toasts
+    /// on the Mac, 2026-10-27, are the reason).
     func fail(_ error: UserError, retry: (() -> Void)? = nil) {
         if let claim = failureClaim, claim.verbs.contains(where: { error.verb.hasPrefix($0) }) {
             claimedFailure = error
             claimedFailureDetailsOpen = false
+            return
+        }
+        if let i = toasts.firstIndex(where: { $0.sameAs(error) }) {
+            toasts[i].count += 1
+            toasts[i].error = error
+            toasts[i].at = Date()
+            if let retry { toastRetries[toasts[i].id] = retry; toasts[i].hasRetry = true }
+            armToast(toasts[i].id, after: toasts[i].ttl)
             return
         }
         let toast = Toast(id: UUID(), text: error.sentence, error: error, hasRetry: retry != nil, at: Date())
@@ -1490,7 +1568,16 @@ final class AppModel: ObservableObject {
         toastTimers[id] = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(ttl * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
-            if let t = self.toasts.first(where: { $0.id == id }), t.held { return }
+            if let t = self.toasts.first(where: { $0.id == id }), t.held {
+                // Details open: stays. A plain hold ends at the cap (a finger parked on the
+                // slot, or a release that never arrived, cannot pin a toast forever).
+                let since = t.heldSince ?? Date()
+                let left = Toast.holdMax - Date().timeIntervalSince(since)
+                if t.detailsOpen || left > 0 {
+                    self.armToast(id, after: t.detailsOpen ? ttl : max(left, 0.5))
+                    return
+                }
+            }
             self.dismissToast(id)
         }
     }
@@ -1505,13 +1592,15 @@ final class AppModel: ObservableObject {
     /// A touch on a toast holds it; letting go restarts its clock.
     func holdToast(_ id: UUID, held: Bool) {
         guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
+        if held, !toasts[i].held { toasts[i].heldSince = Date() }
         toasts[i].held = held
-        if !held { armToast(id, after: toasts[i].ttl) }
+        if !held { toasts[i].heldSince = nil; armToast(id, after: toasts[i].ttl) }
     }
 
     func setToastDetails(_ id: UUID, open: Bool) {
         guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
         toasts[i].detailsOpen = open
+        if !toasts[i].held { toasts[i].heldSince = Date() }
         toasts[i].held = true
     }
 
@@ -4140,7 +4229,8 @@ final class AppModel: ObservableObject {
         return out
     }
 
-    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    /// Tests and the fixture (`ARBOS_FIXTURE_BLOCKED`): the relay's block list as `GET /blocks`
+    /// would hand it over.
     func setBlockedForTests(_ list: [Person]) { blocked = list }
 
     /// Is this message hidden for me — from someone I blocked, in a people group?
@@ -4331,13 +4421,25 @@ final class AppModel: ObservableObject {
 
     func unblock(_ person: Person) {
         Task {
-            do { try await api.unblock(userId: person.id) }
+            do {
+                try await api.unblock(userId: person.id)
+                // A DM refused as `blocks_member` is postable again: resend now.
+                retryRefusedRooms(only: nil)
+            }
             catch let e as RelayError where e.status == 404 {
                 // Already not blocked on the relay; the list below says so.
             }
             catch { fail("unblock them", error) }
             await refreshBlocks()
         }
+    }
+
+    /// Ask the rooms that stand refused to resend now ([feedback 2005]): one chat when the
+    /// push names it, else every refused room (an unblock does not say which DM it frees).
+    /// A room that is not refused ignores the nudge inside its session.
+    func retryRefusedRooms(only chatId: Id?) {
+        let targets = chatId.map { pushRefused.contains($0) ? [$0] : [] } ?? Array(pushRefused)
+        for key in targets { rooms[key]?.retryRefused() }
     }
 
     func refreshBlocks() async {
@@ -4372,6 +4474,8 @@ final class AppModel: ObservableObject {
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
             pushLog.notice("push id=\(p.id, privacy: .public) event=\(String(describing: p.event), privacy: .public)")
+            // The chat's members or settings changed: a refused room there resends now.
+            if let cid = RefusedSendRetry.chatToRetry(p.event) { retryRefusedRooms(only: cid) }
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
@@ -4490,9 +4594,17 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
-            case .channelMessage:
-                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
-                break
+            case .channelMessage(let payload):
+                // A server channel message (relay push gateway; every member but the sender).
+                // No banner while that channel is on screen; a tap opens it (openFromNotification).
+                if !isWatching(payload.channel_id) {
+                    let sender = payload.sender
+                    let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
+                    let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    PushManager.post(id: p.id, title: "\(who) in #\(payload.channel_name)",
+                                     body: text.isEmpty ? "New message" : text,
+                                     chatId: payload.channel_id, projectId: channelSlot)
+                }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             case .notificationsCleared(let payload):
@@ -4708,6 +4820,38 @@ final class AppModel: ObservableObject {
                 fail(e?.status == 403
                      ? UserError.refused("delete the message", "You can only delete your own messages.")
                      : UserError.classify("delete the message", error))
+            }
+        }
+    }
+
+    /// Long-press → Remove preview: the relay drops the message's link preview for everyone
+    /// (`preview: "off"`, the delete rule); the card goes at once here, the row follows.
+    func removeLinkPreview(chatId: Id, messageId: Id, projectId: Id? = nil) {
+        guard !messageId.isEmpty else { return }
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].preview = "off"
+            messages[chatId] = list
+        }
+        #if DEBUG
+        if isFixture { Haptics.pick(); return }
+        #endif
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.removeLinkPreview(room: room, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                fail(e?.status == 403
+                     ? UserError.refused("remove the preview", "You can only remove previews on your own messages.")
+                     : UserError.classify("remove the preview", error))
             }
         }
     }
@@ -6006,6 +6150,54 @@ final class AppModel: ObservableObject {
             } catch {
                 fail("create the agent", error)
             }
+        }
+    }
+
+    // MARK: Outside agents (#2142)
+
+    /// `POST /outside-agents`: the relay makes the agent (no box) and mints its key; the caller
+    /// pushes the reveal screen. A refusal is the claimed failure on the Create sheet.
+    func connectAgent(name: String, transport: String) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.connectAgent(name: name, transport: transport)
+            if let info = reveal.info { outsideInfo[reveal.projectId] = info }
+            await refreshRegistry()
+            return reveal
+        } catch {
+            fail("connect the agent", error)
+            return nil
+        }
+    }
+
+    /// The connection of an outside agent for the pane and the reveal screen; a native agent
+    /// leaves no entry.
+    @discardableResult
+    func refreshOutsideInfo(_ projectId: Id) async -> OutsideAgentInfo? {
+        guard !isFixture else { return nil }
+        if let info = try? await api.outsideAgent(projectId) {
+            outsideInfo[projectId] = info
+            return info
+        }
+        return outsideInfo[projectId]
+    }
+
+    func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.rotateOutsideKey(projectId)
+            if let info = reveal.info { outsideInfo[projectId] = info }
+            return reveal
+        } catch {
+            fail("rotate the key", error)
+            return nil
+        }
+    }
+
+    func revokeOutsideAgent(_ projectId: Id) async {
+        do {
+            try await api.revokeOutsideAgent(projectId)
+            await refreshOutsideInfo(projectId)
+        } catch {
+            fail("revoke the agent's access", error)
         }
     }
 

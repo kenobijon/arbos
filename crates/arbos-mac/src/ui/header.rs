@@ -16,7 +16,6 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
-use crate::ui::avatars;
 use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
@@ -24,11 +23,10 @@ use crate::ui::groups;
 use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::identity;
-use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::{self, machine_dot};
+use crate::ui::sidebar;
 use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, CONTROL_GLYPH_WIDE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
@@ -136,7 +134,6 @@ pub fn render(
         );
         part.on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let page = page.clone();
             this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
         }))
@@ -149,7 +146,6 @@ pub fn render(
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let sid = sid.clone();
             this.state.update(cx, |s, cx| {
                 s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
@@ -203,38 +199,25 @@ pub fn render(
         let showing = state.profile_shows(&page);
         // D92 amendment: the picture built before the clock takes `cx`.
         let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
-        // The machine dot hangs off the disc's corner, inside the slot's box.
-        let picture = div()
-            .relative()
-            .size(px(AVATAR_HEADER))
-            .flex_shrink_0()
-            .child(picture_disc)
-            .child(
-                div()
-                    .absolute()
-                    .right(px(-2.0))
-                    .bottom(px(-2.0))
-                    .size(px(10.0))
-                    .rounded_full()
-                    .bg(theme.bg)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(machine_dot(machine, &theme)),
-                    ),
-            );
+        let _ = avatar_state;
+        // The machine mark hangs off the disc's corner, in front of the picture
+        // (`ui::marks::machine_corner`, its own paint layer — the pill is frosted)
+        // in a ring of the page colour. Never a coloured dot (Jacob, 2026-10-27):
+        // the spinner while the machine wakes, the red `!` on a fault, nothing
+        // at rest — then the bare picture in the same box.
+        let picture = crate::ui::marks::machine_corner(
+            AVATAR_HEADER,
+            picture_disc,
+            machine,
+            theme.bg,
+            |ring| ring,
+            &theme,
+            cx,
+        );
         let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
-                this.add_agent_open = false;
                 let p = pid.clone();
                 if !can_rename {
                     this.open_from_name(p, groupish, cx);
@@ -394,24 +377,16 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let chat_id = state.active_chat_id();
     let link = state.link_pill(chat_id.as_deref())?;
     let label = link.label()?;
-    let dot = match link {
-        LinkState::Offline => theme.text_faint,
-        LinkState::RelayDown => theme.danger,
-        LinkState::Reconnecting | LinkState::RestartSoon => theme.warn,
-        LinkState::Syncing => theme.accent,
+    // The capsule's mark (Jacob, 2026-10-27: never a coloured dot): the braille
+    // spinner while the link is being brought back (Reconnecting / Syncing /
+    // RestartSoon), the red `!` glyph when the relay is down, nothing for Offline.
+    let mark: Option<gpui::AnyElement> = match link {
+        LinkState::Reconnecting | LinkState::RestartSoon | LinkState::Syncing => {
+            Some(crate::ui::working::glyph(&theme, cx).into_any_element())
+        }
+        LinkState::RelayDown => Some(crate::ui::marks::fault_glyph(9.0, &theme).into_any_element()),
+        LinkState::Offline => None,
         LinkState::Live => return None,
-    };
-    let pulsing = matches!(
-        link,
-        LinkState::Reconnecting | LinkState::Syncing | LinkState::RestartSoon
-    );
-    if pulsing {
-        PulseClock::request(cx);
-    }
-    let phase = if pulsing {
-        PulseClock::phase(cx, 1400)
-    } else {
-        1.0
     };
     Some(
         div()
@@ -425,12 +400,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .rounded_full()
             .bg(theme.bubble_assistant)
             .debug_selector(|| "chat-header-link-pill".into())
-            .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(Theme::with_alpha(dot, 0.55 + 0.45 * phase)),
-            )
+            .children(mark)
             .child(
                 div()
                     .text_size(px(TEXT_TINY))
@@ -524,6 +494,10 @@ pub mod metrics {
             b
         }
     }
+    /// The toast slot (`shell::render_notices`): just below the pill — under the connection
+    /// pill when it hangs there — centred on the chat column (Jacob 2026-10-27, [feedback
+    /// toast-stack-mac-2026-10-27]).
+    pub const TOAST_SLOT_TOP: f32 = LINK_PILL_TOP + LINK_PILL_HEIGHT + 8.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: the top
@@ -628,7 +602,6 @@ pub fn render_channel(
     )
     .on_click(cx.listener(move |this, _, _, cx| {
         this.members_open = false;
-        this.add_agent_open = false;
         let page = page.clone();
         this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
     }));
@@ -714,10 +687,6 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
     let streaming = active
         .as_deref()
         .is_some_and(|id| state.chat_is_streaming(id));
-    if streaming {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 1200);
     let open = shell.tab_menu_open;
     Some(
         div()
@@ -750,13 +719,10 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
                     .child("·"),
             )
             .child(div().max_w(px(160.0)).truncate().child(current))
+            // The working spinner, not an amber dot (Jacob, 2026-10-27): the
+            // same shared ticker as the sidebar rows' status cell.
             .when(streaming, |el| {
-                el.child(
-                    div()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
-                )
+                el.child(crate::ui::working::glyph(&theme, cx))
             })
             .child(icon("chevron-down", 11.0, theme.text_muted))
             // Mouse-down, not click: the root closes every popover on
