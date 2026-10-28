@@ -476,7 +476,6 @@ struct ChatSession: View {
     /// Long-press → Edit: the own message whose text is in the composer.
     @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
-    @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
     /// After a quote tap: the reply we came from. The ↓ disc returns here once
@@ -1565,7 +1564,7 @@ struct ChatSession: View {
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
                             if let project {
-                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
+                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state), working: streaming)
                             }
                             Text(name)
                                 .font(.system(size: Theme.body, weight: .semibold))
@@ -2317,22 +2316,18 @@ struct ChatSession: View {
     @ViewBuilder private var linkPill: some View {
         let _ = model.linkPillRepaint
         if let state = model.linkPill(for: chatId, channel: isChannel), let label = state.label {
-            let dot: Color = {
+            // The capsule's mark (Jacob, 2026-10-27: never a coloured dot): the braille
+            // spinner while the link is being brought back, the fault glyph when the
+            // relay is down, nothing for Offline — the words say it.
+            let mark: StatusMark? = {
                 switch state {
-                case .offline: return theme.muted.opacity(0.6)
-                case .relayDown: return theme.danger
-                case .reconnecting, .restartSoon: return theme.warn
-                case .syncing: return theme.accent
-                case .live: return .clear
+                case .reconnecting, .restartSoon, .syncing: return .working
+                case .relayDown: return .fault
+                case .offline, .live: return nil
                 }
             }()
-            let pulsing = state == .reconnecting || state == .syncing || state == .restartSoon
             HStack(spacing: 6) {
-                Circle()
-                    .fill(dot)
-                    .frame(width: 6, height: 6)
-                    .opacity(pulsing ? (pulsePhase ? 1 : 0.5) : 1)
-                    .animation(pulsing ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true) : .default, value: pulsePhase)
+                if let mark { StatusMarkView(mark: mark, size: 9) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
@@ -2343,8 +2338,6 @@ struct ChatSession: View {
             .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("link-pill")
-            .onAppear { pulsePhase = true }
-            .onDisappear { pulsePhase = false }
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
@@ -3741,7 +3734,8 @@ private struct ComposerField: View {
                         .opacity(min(1, -memoDragX / cancelDistance))
                 } else {
                     HStack(spacing: 8) {
-                        Circle().fill(theme.danger).frame(width: 8, height: 8)
+                        // The braille spinner, not a red dot (Jacob, 2026-10-27).
+                        WorkingSpinner(size: 8, glyphSize: 11)
                         // Level bars drawn into whatever width is left (newest on the right),
                         // so the recorder row never pushes the composer past the screen edge.
                         Canvas { ctx, size in
