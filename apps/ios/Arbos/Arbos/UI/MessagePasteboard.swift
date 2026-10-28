@@ -167,7 +167,7 @@ enum MessagePasteboard {
     enum Pick: Equatable {
         case image(String)
         case file(String)
-        case none
+        case nothing
     }
 
     /// The composer's paste rule, on the declared types alone (per item, in order):
@@ -185,12 +185,12 @@ enum MessagePasteboard {
             if !richCopy, let native = readPreference.first(where: { types.contains($0) }) {
                 return .image(native)
             }
-            guard !hasText else { return .none }
+            guard !hasText else { return .nothing }
             let file = types.lazy
                 .filter { !richTextTypes.contains($0) }
                 .compactMap { UTType($0) }
                 .first { t in t.conforms(to: .data) && !t.conforms(to: .text) && !t.conforms(to: .url) && t != .data }
-            return file.map { .file($0.identifier) } ?? .none
+            return file.map { .file($0.identifier) } ?? .nothing
         }
     }
 
@@ -212,7 +212,7 @@ enum MessagePasteboard {
                 let fileType = UTType(type)
                 let ext = fileType?.preferredFilenameExtension ?? "bin"
                 out.append(.init(name: "Pasted file \(stamp).\(ext)", mime: fileType?.preferredMIMEType ?? "application/octet-stream", data: data))
-            case .none:
+            case .nothing:
                 continue
             }
         }

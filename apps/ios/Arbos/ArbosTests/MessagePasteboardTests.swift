@@ -260,17 +260,17 @@ final class MessagePasteboardTests: XCTestCase {
 
     func testPicksOnDeclaredTypes() {
         let text = MessagePasteboard.text
-        XCTAssertEqual(MessagePasteboard.picks([[text, "public.rtf"]]), [.none])
-        XCTAssertEqual(MessagePasteboard.picks([[text, "public.html"]]), [.none])
-        XCTAssertEqual(MessagePasteboard.picks([["com.apple.uikit.attributedstring", text]]), [.none])
-        XCTAssertEqual(MessagePasteboard.picks([["com.apple.flat-rtfd"]]), [.none], "a rich-text flavor is never a file")
+        XCTAssertEqual(MessagePasteboard.picks([[text, "public.rtf"]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([[text, "public.html"]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([["com.apple.uikit.attributedstring", text]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([["com.apple.flat-rtfd"]]), [.nothing], "a rich-text flavor is never a file")
         XCTAssertEqual(MessagePasteboard.picks([[MessagePasteboard.png]]), [.image(MessagePasteboard.png)])
         XCTAssertEqual(MessagePasteboard.picks([[MessagePasteboard.png, MessagePasteboard.gif]]), [.image(MessagePasteboard.gif)])
         XCTAssertEqual(MessagePasteboard.picks([[MessagePasteboard.png, text], [MessagePasteboard.jpeg]]),
                        [.image(MessagePasteboard.png), .image(MessagePasteboard.jpeg)],
                        "a copied message's pictures + caption still stage")
-        XCTAssertEqual(MessagePasteboard.picks([[text, "public.rtf", MessagePasteboard.tiff]]), [.none])
+        XCTAssertEqual(MessagePasteboard.picks([[text, "public.rtf", MessagePasteboard.tiff]]), [.nothing])
         XCTAssertEqual(MessagePasteboard.picks([["com.adobe.pdf"]]), [.file("com.adobe.pdf")])
-        XCTAssertEqual(MessagePasteboard.picks([["com.adobe.pdf"], [text]]), [.none, .none])
+        XCTAssertEqual(MessagePasteboard.picks([["com.adobe.pdf"], [text]]), [.nothing, .nothing])
     }
 }
