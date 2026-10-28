@@ -39,14 +39,15 @@ use gpui::{
 };
 
 use crate::model::Id;
+use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::highlight;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{
-    self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM,
-    FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, LIST_FADE_BAND, STRIP_GAP,
+    self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_HEIGHT,
+    LIST_FADE_BAND, STRIP_GAP,
 };
 use crate::ui::theme::{Theme, CONTROL, TEXT_SMALL};
 
@@ -96,8 +97,9 @@ pub(crate) mod metrics {
     /// The hover tip: 28 tall, 8 right of the rail's edge.
     pub const TIP_HEIGHT: f32 = 28.0;
     pub const TIP_GAP: f32 = 8.0;
-    // Badges at the picture's bottom-right corner (`badge_element`): the working
-    // spinner in the footer dot's ring, or the unread count pill (`ui::marks`).
+    // Badges at the picture's bottom-right corner (`tile_badge` through
+    // `ui::badge::corner`): the working spinner in a ring of the tile's colour,
+    // or the unread count pill (`ui::marks`) — never a coloured dot.
 }
 
 /// Whether the chat header draws the sidebar toggle this frame: only for the
@@ -220,34 +222,28 @@ pub(crate) fn lights_frame() -> Bounds<Pixels> {
     )
 }
 
-/// The badge at a tile's corner (Jacob, 2026-10-27: never a coloured dot):
-/// the braille spinner in a ring while the space's agent works, the unread
-/// count pill otherwise.
-fn badge_element(
+/// A tile's badge for `ui::badge::corner` (Jacob, 2026-10-27: never a coloured
+/// dot): the braille spinner in a ring of the tile's colour while the space's
+/// agent works, the unread count pill otherwise. `ring` is the tile's fill.
+fn tile_badge(
     badge: RailBadge,
     unread_count: usize,
     ring: gpui::Hsla,
     theme: &Theme,
     cx: &mut App,
 ) -> Div {
-    let corner = div()
-        .absolute()
-        .right(px(-FOOTER_DOT_OVERHANG))
-        .bottom(px(-FOOTER_DOT_OVERHANG));
     match badge {
-        RailBadge::Working => corner
-            .size(px(FOOTER_DOT_RING))
+        RailBadge::Working => div()
+            .size(px(badge::metrics(metrics::AVATAR).ring))
             .rounded_full()
             .bg(ring)
             .flex()
             .items_center()
             .justify_center()
             .child(crate::ui::working::glyph(theme, cx)),
-        RailBadge::Unread => corner.child(
-            crate::ui::marks::unread_pill(unread_count, theme)
-                .border_2()
-                .border_color(ring),
-        ),
+        RailBadge::Unread => crate::ui::marks::unread_pill(unread_count, theme)
+            .border_2()
+            .border_color(ring),
     }
 }
 
@@ -374,17 +370,20 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
                 el.debug_selector(|| "rail-first-tile".into())
             })
             .child(
-                div()
-                    .relative()
-                    .size(px(metrics::AVATAR))
-                    .flex_shrink_0()
-                    .when(index == 0, |el| {
-                        el.debug_selector(|| "rail-first-picture".into())
-                    })
-                    .child(picture)
-                    .when_some(badge, |el, b| {
-                        el.child(badge_element(b, unread_count, ring, &theme, cx))
-                    }),
+                match badge {
+                    // The badge in front of the picture, in its own paint layer
+                    // (`ui::badge`); the bare picture keeps the same box.
+                    Some(b) => badge::corner(
+                        metrics::AVATAR,
+                        picture,
+                        tile_badge(b, unread_count, ring, &theme, cx),
+                        badge::metrics(metrics::AVATAR).overhang,
+                    ),
+                    None => badge::badged(metrics::AVATAR, picture, None),
+                }
+                .when(index == 0, |el| {
+                    el.debug_selector(|| "rail-first-picture".into())
+                }),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let now = if *hovered {

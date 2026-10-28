@@ -16,6 +16,7 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
+use crate::ui::badge;
 use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
@@ -200,29 +201,27 @@ pub fn render(
         // D92 amendment: the picture built before the clock takes `cx`.
         let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
         let _ = avatar_state;
-        // The machine mark hangs off the disc's corner, inside the slot's box
-        // (Jacob, 2026-10-27: never a coloured dot — the spinner while the
-        // machine wakes, the red `!` on a fault, nothing at rest).
-        let picture = div()
-            .relative()
-            .size(px(AVATAR_HEADER))
-            .flex_shrink_0()
-            .child(picture_disc)
-            .children(
-                crate::ui::marks::machine_mark_element(machine, 8.0, &theme, cx).map(|mark| {
-                    div()
-                        .absolute()
-                        .right(px(-3.0))
-                        .bottom(px(-3.0))
-                        .size(px(14.0))
-                        .rounded_full()
-                        .bg(theme.bg)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(mark)
-                }),
-            );
+        // The machine mark hangs off the disc's corner, in front of the picture
+        // (`ui::badge::corner`, its own paint layer — the pill is frosted) and
+        // ringed in the pill's colour. Never a coloured dot (Jacob, 2026-10-27):
+        // the spinner while the machine wakes, the red `!` on a fault, nothing
+        // at rest — then the bare picture in the same box.
+        let picture = match crate::ui::marks::machine_mark_element(machine, 8.0, &theme, cx) {
+            Some(mark) => badge::corner(
+                AVATAR_HEADER,
+                picture_disc,
+                div()
+                    .size(px(14.0))
+                    .rounded_full()
+                    .bg(badge::ring::header_pill(&theme))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(mark),
+                3.0,
+            ),
+            None => badge::badged(AVATAR_HEADER, picture_disc, None),
+        };
         let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
