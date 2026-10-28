@@ -10,6 +10,8 @@ struct RelayError: Error, LocalizedError {
     var message: String
     /// `error.type` from the self-serve relay (token_expired, credits_exhausted, …).
     var type: String? = nil
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    var detail: String? = nil
 
     var errorDescription: String? {
         message.isEmpty ? "HTTP \(status)" : "HTTP \(status): \(message)"
@@ -20,7 +22,11 @@ struct RelayError: Error, LocalizedError {
     /// Decode `ApiErrorDto` when the body is the current shape; plain text for older relays.
     static func from(status: Int, body: Data) -> RelayError {
         if let dto = try? JSONDecoder().decode(ApiErrorDto.self, from: body) {
-            return RelayError(status: status, message: dto.error.message, type: dto.error.type)
+            let detail = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }
+                .flatMap { $0["detail"] as? String }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return RelayError(status: status, message: dto.error.message, type: dto.error.type, detail: detail)
         }
         let text = (String(data: body, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,23 +111,26 @@ final class RelayAPI {
         return "ios/\(v) (\(b))"
     }
 
-    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    /// `timeout`: this one request's limit instead of the session's 30 s (an avatar generation
+    /// gets 90 s so the relay's 75 s budget always answers first).
+    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         do {
-            return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+            return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
         } catch let error as RelayError where error.isUnauthorized && auth {
             if let refresher, await refresher() {
-                return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+                return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
             }
             throw error
         }
     }
 
-    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        if let timeout { req.timeoutInterval = timeout }
         if auth {
             req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         }
@@ -309,6 +318,41 @@ final class RelayAPI {
         if let sourceProjectId { body["source_project_id"] = sourceProjectId }
         let v = try await json("POST", "/projects", body: body)
         return (v as? [String: Any])?["id"] as? String
+    }
+
+    // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay
+
+    /// `POST /outside-agents {name, transport}` → the new agent's key, shown once.
+    func connectAgent(name: String, transport: String) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents", body: ["name": name, "transport": transport])
+        guard let reveal = ConnectReveal(json: v, rotated: false) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `GET /outside-agents/{id}` → its connection; `nil` for an agent that is not outside.
+    func outsideAgent(_ projectId: Id) async throws -> OutsideAgentInfo? {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)")
+            return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
+    }
+
+    /// `POST /outside-agents/{id}/rotate` → a fresh key; the old one stops at once.
+    func rotateOutsideKey(_ projectId: Id) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents/\(projectId)/rotate", body: [String: Any]())
+        guard let reveal = ConnectReveal(json: v, rotated: true) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `DELETE /outside-agents/{id}`: revoke the key; the agent and its messages stay.
+    func revokeOutsideAgent(_ projectId: Id) async throws {
+        _ = try await request("DELETE", "/outside-agents/\(projectId)")
     }
 
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
@@ -1004,10 +1048,16 @@ final class RelayAPI {
         return body
     }
 
+    /// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s
+    /// per provider attempt), so the relay's own 504 reaches the sheet before this client gives up
+    /// (Jacob, 2026-10-26: the session's 30 s had cut a slow generation first).
+    static let avatarGenerateTimeout: TimeInterval = 90
+
     private func generateAvatar(path: String, prompt: String) async throws -> String {
-        let v = try await json("POST", path, body: ["prompt": prompt])
+        let (data, _) = try await request("POST", path, body: ["prompt": prompt], timeout: Self.avatarGenerateTimeout)
+        let v = (try? JSONSerialization.jsonObject(with: data)) ?? NSNull()
         guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
-            throw RelayError(status: 0, message: "The relay sent no picture")
+            throw RelayError(status: 0, message: "Couldn't generate the image.", detail: "The relay sent no picture")
         }
         return key
     }
@@ -1197,6 +1247,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
     }
 
+    /// Remove a message's link preview for everyone (#2064): the relay checks who may (the
+    /// delete rule, 403 `not_yours`), writes `preview: "off"` and drops the part itself.
+    func removeLinkPreview(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)/preview")
+    }
+
     /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
     func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]
@@ -1377,5 +1433,83 @@ final class RelayAPI {
             NSLog("GoalDto: \(error)")
             throw RelayError(status: 0, message: "Bad goal reply")
         }
+    }
+}
+
+// MARK: - Outside agents (#2142)
+
+/// The connection of an outside agent (`GET /outside-agents/{id}` → `agent`).
+struct OutsideAgentInfo: Equatable {
+    /// `connected` | `away` | `never` | `revoked`.
+    var status: String
+    var connected: Bool
+    /// `acp` | `grok` | `custom`.
+    var transport: String
+    /// `asp/1`.
+    var proto: String
+    var lastSeenAt: Int64?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any] else { return nil }
+        status = d["status"] as? String ?? "never"
+        connected = d["connected"] as? Bool ?? false
+        transport = d["transport"] as? String ?? "custom"
+        proto = d["protocol"] as? String ?? "asp/1"
+        if let t = d["last_seen_at"] as? NSNumber { lastSeenAt = t.int64Value } else { lastSeenAt = nil }
+    }
+
+    /// The transport as the Details pane names it.
+    var transportLabel: String {
+        switch transport {
+        case "acp": return "ACP · on your Mac"
+        case "grok": return "Grok · HTTPS"
+        default: return "Custom · HTTPS / WebSocket"
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat", "Disconnected".
+    func statusLine(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        func ago(_ t: Int64) -> String {
+            let s = max(0, (now - t) / 1000)
+            if s < 60 { return "\(s) s ago" }
+            if s < 3600 { return "\(s / 60) min ago" }
+            if s < 86_400 { return "\(s / 3600) h ago" }
+            return "\(s / 86_400) d ago"
+        }
+        switch (status, lastSeenAt) {
+        case ("revoked", _): return "Disconnected"
+        case ("connected", let t?): return "Connected · \(ago(t))"
+        case ("connected", nil): return "Connected"
+        case ("away", let t?): return "Away · \(ago(t))"
+        case ("away", nil): return "Away"
+        default: return "Waiting for the first heartbeat"
+        }
+    }
+}
+
+/// What the reveal screen shows once: the key and the link, plus the live connection.
+struct ConnectReveal: Equatable {
+    var projectId: Id
+    var name: String
+    var transport: String
+    var key: String
+    var link: String
+    var relayURL: String
+    var chatId: Id?
+    var rotated: Bool
+    var info: OutsideAgentInfo?
+
+    init?(json: Any, rotated: Bool) {
+        guard let d = json as? [String: Any], let agent = d["agent"] as? [String: Any],
+              let id = agent["project_id"] as? String, let key = d["key"] as? String else { return nil }
+        projectId = id
+        name = agent["name"] as? String ?? ""
+        transport = agent["transport"] as? String ?? "custom"
+        self.key = key
+        link = d["link"] as? String ?? ""
+        relayURL = d["relay_url"] as? String ?? ""
+        chatId = d["chat_id"] as? String
+        self.rotated = rotated
+        info = OutsideAgentInfo(json: agent)
     }
 }

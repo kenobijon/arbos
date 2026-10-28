@@ -71,8 +71,54 @@ final class AvatarSourceState: ObservableObject {
     @Published var prompt = ""
     @Published var generating = false
     @Published var generatedKey: String?
-    @Published var errorText: String?
+    /// The last failure, drawn by the shared `ErrorNote` at the top of the sheet's body (Jacob,
+    /// 2026-10-26, [feedback error-messages-ios-2026-10-26]): one sentence, Try again, Details.
+    @Published var error: UserError?
+    @Published var detailsOpen = false
+    /// The sentence alone (the older name, read-only).
+    var errorText: String? { error?.sentence }
+    /// When the running generation started (the status line counts the seconds).
+    @Published var startedAt: Date?
     @Published var photoItem: PhotosPickerItem?
+
+    /// One generation: progress on, then the key or the (sentence, detail) of the failure.
+    /// Both sheets call this so the wording is the same everywhere.
+    func run(_ work: @escaping () async throws -> String) {
+        guard !generating else { return }
+        generating = true
+        startedAt = Date()
+        error = nil
+        detailsOpen = false
+        Task { @MainActor in
+            do {
+                generatedKey = try await work()
+            } catch {
+                self.error = Self.failure(error)
+            }
+            generating = false
+            startedAt = nil
+        }
+    }
+
+    /// What the sheet says when a generation failed — the shared classifier under the verb
+    /// "generate the image": a relay timeout / refusal keeps its class, a client-side timeout
+    /// reads "The server took too long.", no network "You're offline."; the raw words ride in
+    /// `raw` for Details / Copy, never in the sentence.
+    static func failure(_ error: Error) -> UserError {
+        UserError.classify("generate the image", error)
+    }
+
+    /// The older pair, for callers that still read it: (sentence, raw words).
+    static func failureWords(_ error: Error) -> (String, String?) {
+        let e = failure(error)
+        return (e.sentence, e.raw.isEmpty ? nil : e.raw)
+    }
+
+    /// Seconds since Generate was pressed, while it runs.
+    func generatingFor(_ now: Date) -> Int? {
+        guard generating, let startedAt else { return nil }
+        return max(0, Int(now.timeIntervalSince(startedAt)))
+    }
     @Published var uploadPreview: UIImage?
     /// The encoded master of the chosen photo (PNG or JPEG — `PictureMaster.mime` tells which;
     /// the name predates the PNG case).
@@ -100,7 +146,7 @@ final class AvatarSourceState: ObservableObject {
         // the 1024 px square through the layer's linear filter.
         uploadPreview = encoded.flatMap(AvatarImageCache.decode) ?? square
         uploadJpeg = encoded
-        errorText = nil
+        error = nil
     }
 }
 
@@ -147,9 +193,10 @@ struct AvatarSourceBody<Preview: View>: View {
     @FocusState private var promptFocused: Bool
 
     private var canGenerate: Bool { !state.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !state.generating }
-    private var statusLine: String {
-        if let errorText = state.errorText { return errorText }
-        if state.generating { return "Painting a picture — a few seconds." }
+    /// The status line never carries a failure (that is the note at the top of the body):
+    /// progress, the keep hint, or the prompt hint.
+    private func statusLine(_ now: Date) -> String {
+        if let s = state.generatingFor(now) { return "Painting a picture — \(s) s" }
         if state.generatedKey != nil { return keepsLine }
         return "A few words about the picture you want."
     }
@@ -177,7 +224,7 @@ struct AvatarSourceBody<Preview: View>: View {
                 .padding(.horizontal, 16.5)
                 .accessibilityIdentifier("avatar-generate-prompt")
             Button(action: go) {
-                Text(state.generating ? "Generating…" : (state.generatedKey == nil ? "Generate" : "Generate again"))
+                Text(pillLabel)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(canGenerate ? AvatarSheetPalette.title : AvatarSheetPalette.disabledText)
                     .padding(.horizontal, 18)
@@ -188,15 +235,47 @@ struct AvatarSourceBody<Preview: View>: View {
             .disabled(!canGenerate)
             .padding(.top, 12)
             .accessibilityIdentifier("avatar-generate-go")
+            // The preview slot: the picture, dimmed under a spinner while painting. A failure is
+            // the shared note at the top of the body (`errorNote`), never anything near the footer.
             preview()
-            Text(statusLine)
-                .font(.system(size: 12))
-                .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 16.5)
-                .padding(.top, 12)
+                .opacity(state.generating ? 0.4 : 1)
+                .overlay {
+                    if state.generating {
+                        ProgressView().controlSize(.large).tint(theme.accent)
+                            .accessibilityIdentifier("avatar-generate-spinner")
+                    }
+                }
+            // One line, never more.
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                Text(statusLine(ctx.date))
+                    .font(.system(size: 12))
+                    .foregroundStyle(AvatarSheetPalette.placeholder)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("avatar-generate-status")
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// The note for the top of a sheet's body (the picker's and the Create sheets'): inset like
+    /// the field, `ErrorNote.gap` under it. Try again re-sends the prompt.
+    @ViewBuilder
+    static func errorNote(_ state: AvatarSourceState, generate: @escaping () -> Void) -> some View {
+        if let error = state.error {
+            ErrorNote(id: "avatar-generate-error", error: error,
+                      detailsOpen: Binding(get: { state.detailsOpen }, set: { state.detailsOpen = $0 }),
+                      onTryAgain: generate)
+                .padding(.horizontal, 16.5)
+                .padding(.bottom, ErrorNote.gap)
+        }
+    }
+
+    private var pillLabel: String {
+        if state.generating { return "Generating…" }
+        return state.generatedKey == nil ? "Generate" : "Generate again"
     }
 
     private func go() {
@@ -253,7 +332,7 @@ struct AvatarPickerSheet: View {
     private var generating: Bool { source.generating }
     private var errorText: String? {
         get { source.errorText }
-        nonmutating set { source.errorText = newValue }
+        nonmutating set { if newValue == nil { source.error = nil } }
     }
 
     // Grok's dark sheet palette, as the Create sheet has it.
@@ -337,6 +416,10 @@ struct AvatarPickerSheet: View {
         VStack(spacing: 0) {
             bar
             ScrollView(showsIndicators: false) {
+                // The note first (Jacob 2026-10-26): under the bar, before the field; the body
+                // below moves down, the footer never moves.
+                AvatarSourceBody<EmptyView>.errorNote(source, generate: generate)
+                    .padding(.top, tab == .generate ? 12 : 0)
                 switch tab {
                 case .bot: botBody
                 case .generate, .upload:
@@ -381,7 +464,7 @@ struct AvatarPickerSheet: View {
     static func viewablePicture(target: AvatarTarget, model: AppModel) -> (name: String, url: String)? {
         switch target {
         case .agent(let id):
-            guard let p = model.project(id), let url = p.imageURL, !url.isEmpty else { return nil }
+            guard let p = model.project(id), let url = model.projectImageURL(p)?.absoluteString, !url.isEmpty else { return nil }
             return (p.name, url)
         case .group(let id):
             guard let c = model.peopleChats.first(where: { $0.id == id }), let key = c.imageKey,
@@ -507,24 +590,16 @@ struct AvatarPickerSheet: View {
     private func generate() {
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
-        source.generating = true
-        source.errorText = nil
         reset = false
-        Task {
-            do {
-                switch target {
-                case .agent(let id): source.generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
-                case .group(let id): source.generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
-                case .server(let id): source.generatedKey = try await model.generateServerAvatar(id, prompt: text)
-                case .me: source.generatedKey = try await model.generateMyAvatar(prompt: text)
-                }
-            } catch {
-                // The relay's own line ("That prompt was refused — try a different one."), not
-                // "HTTP 422: …" (Jacob, 2026-10-25 23:42: a refusal read as a server outage).
-                let relay = error as? RelayError
-                source.errorText = relay.map(\.message).flatMap { $0.isEmpty ? nil : $0 } ?? error.localizedDescription
+        let target = target
+        let model = model
+        source.run {
+            switch target {
+            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text)
+            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text)
+            case .server(let id): return try await model.generateServerAvatar(id, prompt: text)
+            case .me: return try await model.generateMyAvatar(prompt: text)
             }
-            source.generating = false
         }
     }
 
