@@ -29,6 +29,9 @@ enum Block: Equatable, Hashable {
     /// block of the agent's bubble like a code card. `spec` is the `chart` part's JSON, `table`
     /// its markdown table (what a copy carries).
     case chart(partId: String, spec: String, table: String)
+    /// A link preview card ([feedback link-embeds-ios-2026-10-27]): the relay's `link_preview`
+    /// part as one block of the bubble, under the prose that held the link.
+    case linkPreview(partId: String, preview: LinkPreview)
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
@@ -95,6 +98,7 @@ struct Quote: Equatable, Hashable {
             case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
             case .math(let source): pieces = [MathText.plain(source)]
             case .chart(_, _, let table): pieces = [table]
+            case .linkPreview(_, let p): pieces = [p.oneLine]
             }
             for piece in pieces {
                 words.append(contentsOf: Markdown.plain(piece).split(whereSeparator: \.isWhitespace))
@@ -114,6 +118,7 @@ struct Quote: Equatable, Hashable {
             case .table(let header, let rows): return (header + rows.flatMap { $0 }).map(Markdown.plain).joined(separator: " ")
             case .math(let source): return MathText.plain(source)
             case .chart(_, _, let table): return table
+            case .linkPreview(_, let p): return p.oneLine
             }
         }.joined(separator: " ")
     }
@@ -146,13 +151,13 @@ struct Quote: Equatable, Hashable {
 
 enum RowKind: Equatable {
     /// My bubble; `delivery` is its opacity (pending dimmed, delivered / failed full).
-    case user(text: String, delivery: Delivery, quote: Quote?)
+    case user(text: String, delivery: Delivery, quote: Quote?, preview: LinkPreview? = nil)
     /// Another person's message in a people chat: left bubble with avatar; the name above
     /// only when the sender changed (`named`, Grok Bot's group style) and the chat names its
     /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
     /// (Jacob, 2026-10-23). No time inside any bubble: the time is the transcript's
     /// drag-to-reveal only (Jacob, 2026-10-24, docs/mac-design-rules.md).
-    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?)
+    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, preview: LinkPreview? = nil)
     case assistant(blocks: [Block], live: Bool, caption: String?, quote: Quote? = nil)
     /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
     /// reply — consecutive answers from the same agent must not merge, #1447). No
@@ -179,16 +184,36 @@ enum RowKind: Equatable {
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
-    case file(item: MediaItem, subtitle: String, caption: String?)
+    /// `forwardedFrom`: the "Forwarded from <name>" header at the top of the card when
+    /// this is the first media of a forwarded message
+    /// ([feedback forward-attachments-ios-2026-10-27]).
+    /// `sender` / `named`: someone else's card in a people chat carries their avatar beside it
+    /// and, on the message's first card when the run changes sender, their name above it —
+    /// a picture is a message like any other (Jacob's Scout case).
+    case file(item: MediaItem, subtitle: String, caption: String?, forwardedFrom: String? = nil,
+              sender: MediaSender? = nil, named: Bool = false)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
     /// `caption` is the description bar under the picture when the send carried text.
     /// `lane`: in a people chat someone else's (person or agent) picture sits after the
     /// sender's avatar lane, like their bubble (Mac `RowKind::Attachment.lane`).
-    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool)
+    /// `forwardedFrom`: the "Forwarded from <name>" header above the picture when this is
+    /// the first media of a forwarded message ([feedback forward-attachments-ios-2026-10-27]).
+    /// `source`: GIF-picker attribution ("via <provider>").
+    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool, source: AttachmentSource?,
+               forwardedFrom: String? = nil, sender: MediaSender? = nil, named: Bool = false)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
+}
+
+/// Who sent a picture / file row that is not mine in a people chat — the same identity its
+/// text bubble resolves ([feedback forward-attachments-ios-2026-10-27]).
+enum MediaSender: Equatable {
+    /// Another person: their handle and picture URL (`.other` bubble fields).
+    case person(handle: String, avatar: String?)
+    /// An agent (`.member` bubble fields): project id when known, handle, name, picture.
+    case agent(id: String?, handle: String, name: String?, avatar: String?)
 }
 
 struct Row: Identifiable, Equatable {
@@ -223,6 +248,10 @@ enum Transcript {
     /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
+    /// Settings → Appearance → Link previews: off hides every card (plain links stay).
+    /// Set by `AppModel.linkPreviews`; a static so the row builder needs no model.
+    nonisolated(unsafe) static var linkPreviewsEnabled = true
+
     static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
         rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
     }
@@ -250,8 +279,33 @@ enum Transcript {
             if message.voice { continue }
             // A background job's row (duplex §2.3, `job` + `hidden`) is wordless by design:
             // its status parts feed the presence line and the tasks sheet, never a bubble —
-            // not while it runs, not the "no answer" stock line when it ends.
-            if message.hidden || message.job != nil { continue }
+            // not while it runs, not the "no answer" stock line when it ends. One exception:
+            // a file or picture the worker delivered onto that row (agentd ≤ 0.1.150 put
+            // `deliver_file` there — Jacob's SN120 chart, 2026-10-27, "the chart is in the
+            // card above" over nothing) still draws as its card, so a posted file is never
+            // invisible on a box that has not upgraded.
+            if message.hidden || message.job != nil {
+                // The card carries the agent's avatar and name like its bubbles do
+                // ([feedback forward-attachments-ios-2026-10-27]). A worker row from an older
+                // box says a bare `agent` with no handle; then the agent's own ack or result
+                // row answering the same ask lends its attribution.
+                let who = hiddenRowAgent(message, in: messages)
+                let inLane = people && who.senderHandle != nil
+                let whoId: String? = who.sender.hasPrefix("agent:") ? String(who.sender.dropFirst(6)) : nil
+                let cards = message.parts.compactMap { part -> (String, Attachment)? in
+                    if case .attachment(let id, let a) = part { return (id, a) }
+                    return nil
+                }
+                for (ix, (id, a)) in cards.enumerated() {
+                    rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
+                                              projectId: projectId, fromUser: false, agentNames: agentNames,
+                                              lane: inLane,
+                                              sender: inLane ? .agent(id: whoId, handle: who.senderHandle ?? "",
+                                                                      name: who.senderName, avatar: who.senderAvatar) : nil,
+                                              named: multiParty && inLane && ix == 0))
+                }
+                continue
+            }
             // A background worker's spawn row (`worker: true`, Grok parity trait 15) draws nothing at
             // all — no hand-off line, no legacy status line, no date separator. Its `activity` reaches
             // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
@@ -304,10 +358,20 @@ enum Transcript {
                         mediaParts.append((id, a))
                     }
                 }
-                let text = message.plainText
-                // A forwarded attachment's "Forwarded from …" line is a hint under
-                // the card, not a bubble of its own.
+                var text = message.plainText
+                // The link preview card ([feedback link-embeds-ios-2026-10-27]); a message that
+                // was only the link shows the card alone (iMessage's rule).
+                var preview: LinkPreview? = Self.linkPreviewsEnabled ? message.linkPreview?.preview : nil
+                preview?.slot = projectId
+                if let p = preview, p.isLinkOnly(text) { text = "" }
+                // A media-viewer forward's whole text is the "Forwarded from …" line: a
+                // hint under the card, not a bubble of its own.
                 let forwarded = hasAttachment ? MediaAlbum.forwardedFrom(text) : nil
+                // A bubble-menu forward carries `forwardedFrom`; with media the header sits
+                // once, on the first card, and the caption / note under it stays plain
+                // ([feedback forward-attachments-ios-2026-10-27]).
+                let forwardedBy = (message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .flatMap { $0.isEmpty ? nil : $0 }
                 // Only pictures and videos take a description bar; a PDF + note
                 // still uses a normal text bubble.
                 let lastCaptionable = mediaParts.lastIndex { Self.isCaptionableMedia($0.a) }
@@ -318,11 +382,16 @@ enum Transcript {
                 }()
                 for (i, part) in mediaParts.enumerated() {
                     let cap = (i == lastCaptionable) ? mediaCaption : nil
-                    // Another person's picture / file sits left like their bubble —
-                    // after the avatar lane in a people chat (Mac Attachment.lane).
+                    // Another person's picture / file sits left like their bubble, with their
+                    // avatar beside it and their name on the first card when the run changes
+                    // sender ([feedback forward-attachments-ios-2026-10-27]).
                     chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
                                                projectId: projectId, fromUser: mine, agentNames: agentNames,
-                                               caption: cap, lane: !mine))
+                                               caption: cap, lane: !mine,
+                                               forwardedFrom: i == 0 && forwarded == nil ? forwardedBy : nil,
+                                               sender: mine ? nil : .person(handle: message.senderHandle ?? "someone",
+                                                                            avatar: message.senderAvatar),
+                                               named: named && i == 0))
                 }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
@@ -331,11 +400,12 @@ enum Transcript {
                 // Generic labels ("Image", "Photo", …) are not prose — the attachment
                 // row already carries the media. Showing them as a bubble is noise.
                 // A real description on a picture/video is the caption bar on that row.
-                if !text.isEmpty, forwarded == nil, mediaCaption == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
-                    // A forward carries its "Forwarded from" header where a reply carries its quote.
+                if (!text.isEmpty || preview != nil), forwarded == nil, mediaCaption == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
+                    // A forward carries its "Forwarded from" header where a reply carries its
+                    // quote — on the first media card when the message has any, else here.
                     let quote: Quote?
-                    if let by = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines), !by.isEmpty {
-                        quote = .forwarded(from: by)
+                    if let by = forwardedBy {
+                        quote = mediaParts.isEmpty ? .forwarded(from: by) : nil
                     } else if let r = message.replyRef {
                         // Reply in DM: the quote comes from the row's own snapshot.
                         quote = .forReplyRef(r)
@@ -344,10 +414,12 @@ enum Transcript {
                     }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
-                                         kind: .user(text: text, delivery: Delivery.of(message), quote: quote)))
+                                         kind: .user(text: text, delivery: Delivery.of(message), quote: quote, preview: preview)))
                     } else {
+                        // The first card already names the sender.
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar,
+                                                      named: named && mediaParts.isEmpty, quote: quote, preview: preview)))
                     }
                 }
             case .system:
@@ -393,6 +465,10 @@ enum Transcript {
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
                 let rowsBeforeParts = chunk.count
+                // The sender's name goes on the message's first row: a picture before the
+                // prose takes it, and the first text block then does not repeat it
+                // ([feedback forward-attachments-ios-2026-10-27]).
+                var nameTaken = false
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
@@ -402,9 +478,11 @@ enum Transcript {
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
                         if people, let h = message.senderHandle {
+                            let names = named && pix == firstTextPart && !nameTaken
+                            nameTaken = nameTaken || names
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h, name: message.senderName,
-                                                           avatar: message.senderAvatar, named: named && pix == firstTextPart,
+                                                           avatar: message.senderAvatar, named: names,
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil)))
                         } else if message.role == .project, let from = Self.projectSender(message) {
@@ -446,15 +524,41 @@ enum Transcript {
                         // the chart instead ([feedback chart-bubble-ios-2026-10-26]).
                         break
                     case .attachment(let id, let a):
-                        // People-chat agent media keeps the sender lane free, like the bubble
-                        // and the question card (Mac Attachment.lane / #1509).
+                        // A people-chat agent's picture / file sits in its lane with its avatar
+                        // and names it when it is the message's first row (Scout's photo in
+                        // Arbonites drew as a bare picture before).
+                        let inLane = people && message.senderHandle != nil
+                        let names = inLane && named && !nameTaken
+                        nameTaken = nameTaken || names
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
                                                    projectId: projectId, fromUser: false, agentNames: agentNames,
-                                                   lane: people && message.senderHandle != nil))
+                                                   lane: inLane,
+                                                   sender: inLane ? .agent(id: agentId, handle: message.senderHandle ?? "",
+                                                                           name: message.senderName, avatar: message.senderAvatar) : nil,
+                                                   named: names))
                     case .chart(let id, _, let spec, let table, _):
                         // A chart bubble's card: one block of the bubble, like a code card. It
                         // joins the caption's bubble when that is the row just before it.
                         let block: Block = .chart(partId: id, spec: spec, table: table)
+                        if let last = chunk.indices.last, chunk[last].messageId == message.id,
+                           let joined = Self.appending(block, to: chunk[last].kind) {
+                            chunk[last].kind = joined
+                        } else if people, let h = message.senderHandle {
+                            let names = named && !nameTaken
+                            nameTaken = nameTaken || names
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: [block], live: false, handle: h, name: message.senderName,
+                                                           avatar: message.senderAvatar, named: names,
+                                                           agentId: agentId, quote: nil)))
+                        } else {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .assistant(blocks: [block], live: false, caption: nil, quote: nil)))
+                        }
+                    case .linkPreview(let id, var p) where Self.linkPreviewsEnabled && message.linkPreview?.id == id:
+                        // The link preview card: one block under the prose, joining the
+                        // bubble before it ([feedback link-embeds-ios-2026-10-27]).
+                        p.slot = projectId
+                        let block: Block = .linkPreview(partId: id, preview: p)
                         if let last = chunk.indices.last, chunk[last].messageId == message.id,
                            let joined = Self.appending(block, to: chunk[last].kind) {
                             chunk[last].kind = joined
@@ -467,6 +571,8 @@ enum Transcript {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: [block], live: false, caption: nil, quote: nil)))
                         }
+                    case .linkPreview:
+                        break
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .unknown:
@@ -485,7 +591,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown, .chart: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown, .chart, .linkPreview: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -504,7 +610,7 @@ enum Transcript {
                             && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || other.parts.contains { part in
                                     switch part {
-                                    case .question, .attachment, .chart: return true
+                                    case .question, .attachment, .chart, .linkPreview: return true
                                     default: return false
                                     }
                                 })
@@ -732,9 +838,22 @@ enum Transcript {
         }
     }
 
+    /// Who a hidden job row's card is drawn under: the row itself when it names its agent
+    /// (`agent:<id>` + handle), else the agent's ack / result row answering the same ask —
+    /// agentd ≤ 0.1.150 wrote worker rows as a bare `agent` with no handle.
+    static func hiddenRowAgent(_ message: Message, in messages: [Message]) -> Message {
+        if message.sender.hasPrefix("agent:"), message.senderHandle != nil { return message }
+        guard let ask = message.inReplyTo, !ask.isEmpty else { return message }
+        return messages.first {
+            $0.id != message.id && ($0.role == .assistant || $0.role == .project)
+                && $0.inReplyTo == ask && $0.sender.hasPrefix("agent:") && $0.senderHandle != nil
+        } ?? message
+    }
+
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
                                       agentNames: [String: String], caption: String? = nil,
-                                      lane: Bool = false) -> Row {
+                                      lane: Bool = false, forwardedFrom: String? = nil,
+                                      sender: MediaSender? = nil, named: Bool = false) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -743,13 +862,15 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane))
+                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: a.source,
+                                    forwardedFrom: forwardedFrom, sender: sender, named: named))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                    kind: .file(item: item, subtitle: subtitle(for: a),
-                               caption: kind == .video ? caption : nil))
+                               caption: kind == .video ? caption : nil, forwardedFrom: forwardedFrom,
+                               sender: sender, named: named))
     }
 
     /// Picture or video — the kinds that take a description bar with the send.
@@ -1168,6 +1289,9 @@ struct RowView: View, Equatable {
     var onQuoteTap: ((Quote) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
+    /// Search-in-chat hit: soft accent wash so the keyword match stands out while
+    /// searching ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
+    var searchHit: Bool = false
     /// A message row: swipe right on it replies (the long-press Reply item's twin;
     /// `BubbleSwipe`). False on system / channel / non-message rows.
     var canReply: Bool = false
@@ -1177,8 +1301,11 @@ struct RowView: View, Equatable {
     var replyArmed: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
+    /// When true (held-bubble overlay), list everyone under every reaction chip so
+    /// a message long-press shows who used each emoji without an extra tap.
+    var showReactionSenders: Bool = false
 
-    /// Which reaction chip is expanded to show who used that emoji under the bubble.
+    /// Chip long-press: which emoji's sender list is open under the chips.
     @State private var selectedReactionEmoji: String? = nil
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
@@ -1195,6 +1322,7 @@ struct RowView: View, Equatable {
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
+            && lhs.searchHit == rhs.searchHit
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
             && lhs.people == rhs.people
@@ -1202,6 +1330,7 @@ struct RowView: View, Equatable {
             && lhs.replyDrag == rhs.replyDrag
             && lhs.replyArmed == rhs.replyArmed
             && lhs.theme == rhs.theme
+            && lhs.showReactionSenders == rhs.showReactionSenders
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
         #endif
@@ -1245,19 +1374,25 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
-                if let emoji = selectedReactionEmoji,
-                   let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
+                if showReactionSenders {
+                    ForEach(row.reactions, id: \.emoji) { reaction in
+                        reactionSenders(reaction)
+                    }
+                } else if let emoji = selectedReactionEmoji,
+                          let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
                     reactionSenders(reaction)
                 }
             }
         }
-        // Quote tap landed here: a soft accent wash that fades out (Mac parity).
+        // Quote tap: brief accent wash. Search hit: a softer persistent wash so
+        // keyword matches read as a slightly different colour while searching.
         .background(
             RoundedRectangle(cornerRadius: Theme.bubbleRadius + 4, style: .continuous)
-                .fill(theme.accent.opacity(highlighted ? 0.14 : 0))
+                .fill(theme.accent.opacity(highlighted ? 0.14 : (searchHit ? 0.10 : 0)))
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
+        .animation(.easeOut(duration: 0.18), value: searchHit)
         // iMessage: drag left → times; drag right → reply. Exclusive by direction.
         .offset(x: replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
@@ -1292,7 +1427,7 @@ struct RowView: View, Equatable {
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
-        case .user(let text, let delivery, let quote):
+        case .user(let text, let delivery, let quote, let preview):
             // My bubble: delivered is the full style at once; only pending is dimmed; a
             // failed one is full with the red mark on its outer edge — the words and Try again
             // are the composer's note (Jacob, 2026-10-24 / 2026-10-26; docs/mac-design-rules.md).
@@ -1315,6 +1450,7 @@ struct RowView: View, Equatable {
                         .foregroundStyle(theme.muted)
                         .accessibilityLabel("Sending")
                 }
+                let linkOnly = text.isEmpty && preview != nil
                 VStack(alignment: .leading, spacing: 6) {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
@@ -1322,17 +1458,25 @@ struct RowView: View, Equatable {
                     // No `.textSelection(.enabled)`: it steals pans from the chat
                     // ScrollView so a drag on / onto a bubble sticks
                     // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]). Copy is on long-press.
-                    TypedBody(text: text, ink: theme.userText, chip: theme.userCodeChip, mentions: mentions)
+                    if !linkOnly {
+                        TypedBody(text: text, ink: theme.userText, chip: theme.userCodeChip, mentions: mentions)
+                    }
+                    // The link preview card under the text — or as the whole bubble when the
+                    // message was only the link ([feedback link-embeds-ios-2026-10-27]).
+                    if let preview {
+                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: true)
+                            .padding(.top, linkOnly ? 0 : 2)
+                    }
                 }
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad)
+                .padding(.horizontal, linkOnly ? LinkPreviewCard.bubbleInset : Theme.bubbleHPad)
+                .padding(.vertical, linkOnly ? LinkPreviewCard.bubbleInset : Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(delivery.opacity)
                 .accessibilityIdentifier("own-bubble-\(delivery)")
             }
-        case .other(let text, let handle, let avatar, let named, let quote):
+        case .other(let text, let handle, let avatar, let named, let quote, let preview):
             // The avatar and the name are one profile target (`ProfileToggle`): a tap
             // opens the person's sheet, a tap on either while it is up dismisses it.
             let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
@@ -1364,7 +1508,13 @@ struct RowView: View, Equatable {
                         quoteHeader(quote, color: theme.text)
                             .padding(.bottom, Self.quoteToTextGap)
                     }
-                    TypedBody(text: text, ink: theme.text, chip: theme.codeChip, mentions: mentions)
+                    if !(text.isEmpty && preview != nil) {
+                        TypedBody(text: text, ink: theme.text, chip: theme.codeChip, mentions: mentions)
+                    }
+                    if let preview {
+                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: false)
+                            .padding(.top, text.isEmpty ? 0 : 8)
+                    }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1409,7 +1559,7 @@ struct RowView: View, Equatable {
                         }
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
+                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId)
                             }
                         }
                     }
@@ -1430,7 +1580,7 @@ struct RowView: View, Equatable {
                         quoteHeader(quote, color: theme.text)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
+                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId)
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -1525,13 +1675,23 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-        case .file(let item, let subtitle, let caption):
-            HStack {
-                if row.role == .user { Spacer(minLength: 0) }
-                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption)
-                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
-                    .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
-                if row.role != .user { Spacer(minLength: 0) }
+        case .file(let item, let subtitle, let caption, let forwardedFrom, let sender, let named):
+            if let sender {
+                mediaRow(sender: sender, named: named) {
+                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
+                             forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                        .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                }
+            } else {
+                HStack {
+                    if row.role == .user { Spacer(minLength: 0) }
+                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
+                             forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
+                        .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
+                    if row.role != .user { Spacer(minLength: 0) }
+                }
             }
         case .forwardHint(let text, let fromUser):
             HStack {
@@ -1548,17 +1708,27 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser, let caption, let lane):
+        case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, let sender, let named):
             // Same left edge and cap as an incoming bubble: after the avatar lane in a
-            // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane).
-            HStack(spacing: 0) {
-                if fromUser { Spacer(minLength: 0) }
-                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
-                            maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
-                            caption: caption, mentions: mentions)
-                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
-                if !fromUser { Spacer(minLength: 0) }
+            // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane) — with
+            // the sender's avatar in that lane and the name above the first card.
+            if let sender {
+                mediaRow(sender: sender, named: named) {
+                    ImageBubble(item: item, chatId: chatId, fromUser: false,
+                                maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
+                                caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                }
+            } else {
+                HStack(spacing: 0) {
+                    if fromUser { Spacer(minLength: 0) }
+                    if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                                maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
+                                caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
+                    if !fromUser { Spacer(minLength: 0) }
+                }
             }
         case .error(let code, let message):
             // An agent turn that failed: the shared element in the transcript's flow (the agent's
@@ -1584,43 +1754,59 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// Compact chips under the bubble (iMessage-style). Tap shows who used that
-    /// emoji below the message; add/remove stays on the long-press capsule.
+    /// Compact chips under the bubble (iMessage-style). Tap toggles my reaction
+    /// with that emoji; long-press lists everyone who used it below the chips.
     private var reactionChips: some View {
         let mine = model.myUserId
         return HStack(spacing: 4) {
             if row.role == .user { Spacer(minLength: 0) }
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
-                let selected = selectedReactionEmoji == reaction.emoji
-                Button {
-                    selectedReactionEmoji = selected ? nil : reaction.emoji
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(reaction.emoji).font(theme.font(14))
-                        if reaction.senders.count > 1 {
-                            Text("\(reaction.senders.count)")
-                                .font(theme.font(12, weight: .medium))
-                                .foregroundStyle(theme.muted)
-                        }
+                let selected = !showReactionSenders && selectedReactionEmoji == reaction.emoji
+                HStack(spacing: 3) {
+                    Text(reaction.emoji).font(theme.font(14))
+                    if reaction.senders.count > 1 {
+                        Text("\(reaction.senders.count)")
+                            .font(theme.font(12, weight: .medium))
+                            .foregroundStyle(theme.muted)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(
-                                (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
-                                lineWidth: 1
-                            )
-                    )
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
+                            lineWidth: 1
+                        )
+                )
+                .contentShape(Capsule(style: .continuous))
+                .onTapGesture {
+                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
+                }
+                // High-priority so the row's bubble long-press (capsule + menu)
+                // does not also fire when holding a chip.
+                .highPriorityGesture(
+                    LongPressGesture(minimumDuration: 0.35)
+                        .onEnded { _ in
+                            guard !showReactionSenders else { return }
+                            selectedReactionEmoji = selected ? nil : reaction.emoji
+                        }
+                )
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
-                .accessibilityHint("Shows who used this emoji")
+                .accessibilityHint(mineOn
+                    ? "Removes your reaction. Long-press to see who used it."
+                    : "Adds your reaction. Long-press to see who used it.")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction(named: "See who reacted") {
+                    guard !showReactionSenders else { return }
+                    selectedReactionEmoji = selected ? nil : reaction.emoji
+                }
             }
             if row.role != .user { Spacer(minLength: 0) }
         }
@@ -1674,7 +1860,7 @@ struct RowView: View, Equatable {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
         case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
-        case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .image(_, _, _, let lane, _, _, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
@@ -1684,6 +1870,68 @@ struct RowView: View, Equatable {
     /// the handle (#1592).
     private func memberAvatar(_ agent: Project) -> some View {
         AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar, still: true)
+    }
+
+    /// Someone else's picture / file row in a people chat: their avatar on the lane (the
+    /// same profile target as their bubble's), the name above the card when `named`, then
+    /// the card — a picture is a message like any other
+    /// ([feedback forward-attachments-ios-2026-10-27], Jacob's Scout case).
+    @ViewBuilder
+    private func mediaRow<Card: View>(sender: MediaSender, named: Bool, @ViewBuilder card: () -> Card) -> some View {
+        switch sender {
+        case .person(let handle, let avatar):
+            let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let personName = model.personName(handle: handle) ?? "@\(handle)"
+            let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
+            let openPerson = { model.toggleProfile(personTarget) }
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                Button(action: openPerson) {
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .accessibilityLabel(personLabel)
+                .accessibilityIdentifier("sender-avatar")
+                VStack(alignment: .leading, spacing: 4) {
+                    if named {
+                        Button(action: openPerson) {
+                            LiveSenderName(name: personName, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 6)
+                        .accessibilityLabel(personLabel)
+                        .accessibilityIdentifier("bubble-name")
+                    }
+                    card()
+                }
+                Spacer(minLength: 0)
+            }
+            .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
+        case .agent(let id, let handle, let name, let avatar):
+            let agent = model.agent(sender: id ?? "", handle: handle, name: name, chatId: chatId)
+            let memberTarget: ProfileTarget = id.map { ProfileTarget.agent(projectId: $0) }
+                ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
+            let openMember = { model.toggleProfile(memberTarget) }
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                Button(action: openMember) { memberAvatar(agent) }
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(memberLabel)
+                    .accessibilityIdentifier("sender-avatar")
+                VStack(alignment: .leading, spacing: 4) {
+                    if named {
+                        Button(action: openMember) { memberName(agent) }
+                            .buttonStyle(.plain)
+                            .padding(.leading, 6)
+                            .accessibilityLabel(memberLabel)
+                            .accessibilityIdentifier("bubble-name")
+                    }
+                    card()
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
@@ -1728,17 +1976,7 @@ struct RowView: View, Equatable {
     @ViewBuilder
     private func quoteHeader(_ quote: Quote, color: Color) -> some View {
         if let by = quote.forwardedFrom {
-            // Telegram / iMessage: forward glyph + "Forwarded from <name>", one line, not tappable.
-            HStack(spacing: 6) {
-                Image(systemName: "arrowshape.turn.up.right")
-                    .font(.system(size: 11, weight: .medium))
-                Text(MediaAlbum.forwardedPrefix + by)
-                    .font(theme.font(Theme.small, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .foregroundStyle(color.opacity(0.72))
-            .accessibilityLabel("Forwarded from \(by)")
+            ForwardedHeader(by: by, color: color)
         } else {
             replyQuoteHeader(quote, color: color)
         }
@@ -1844,6 +2082,10 @@ struct BlockView: View {
     let live: Bool
     /// Shared mention table from the row (built once per directory sync).
     let mentions: MentionTable
+    /// The row's chat and message, for blocks that act on the message (a link card's
+    /// Remove preview) — nil in previews that have none.
+    var chatId: Id = ""
+    var messageId: Id = ""
     /// The bubble's ink: the theme's text on an agent's bubble, `userText` on my own
     /// (`nil` = `theme.text`). Quotes draw their blocks in a muted cut of it.
     var ink: Color? = nil
@@ -1926,6 +2168,8 @@ struct BlockView: View {
             CodeCard(lang: lang, code: code)
         case .chart(let partId, let spec, _):
             ChartCard(partId: partId, spec: spec)
+        case .linkPreview(_, let preview):
+            LinkPreviewCard(preview: preview, chatId: chatId, messageId: messageId, own: false)
         case .math(let source):
             // Display math: typeset, a size up, centred on its own line (KaTeX's display
             // mode in Grok Bot).
@@ -2631,17 +2875,48 @@ struct AvatarCluster: View {
 /// A picture narrower than its bubble (portrait + long caption) sits centred at
 /// the top with a small inset and its own radius; one that spans the bubble is
 /// flush, exactly as a picture-only bubble.
+/// The forwarded bubble's header (Telegram / iMessage): forward glyph, then "Forwarded
+/// from <name>", one line, not tappable. On a text bubble, a picture bubble (above the
+/// picture) and a file card alike ([feedback forward-attachments-ios-2026-10-27]).
+struct ForwardedHeader: View {
+    @Environment(\.theme) private var theme
+    let by: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrowshape.turn.up.right")
+                .font(.system(size: 11, weight: .medium))
+            Text(MediaAlbum.forwardedPrefix + by)
+                .font(theme.font(Theme.small, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .foregroundStyle(color.opacity(0.72))
+        .accessibilityLabel("Forwarded from \(by)")
+        .accessibilityIdentifier("forwarded-header")
+    }
+}
+
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.displayScale) private var displayScale
     let item: MediaItem
     let chatId: Id
     let fromUser: Bool
     let maxWidth: CGFloat
     var caption: String? = nil
     var mentions: MentionTable? = nil
+    /// GIF-picker attribution (`Attachment.source`); opens `pageUrl` when tapped.
+    var source: AttachmentSource? = nil
+    /// "Forwarded from <name>" above the picture, inside the bubble.
+    var forwardedFrom: String? = nil
 
     @State private var image: UIImage?
+    /// First frame only — shown while the bubble is off screen so the animation pauses.
+    @State private var stillFrame: UIImage?
+    @State private var animate = false
     @State private var failed = false
     @State private var viewer: MediaViewerState?
 
@@ -2667,8 +2942,15 @@ struct ImageBubble: View {
     }
 
     private var size: CGSize {
-        guard let image, image.size.width > 0, image.size.height > 0 else { return Self.placeholder }
-        return Self.fit(image.size, maxWidth: bubbleWidth)
+        if let image, image.size.width > 0, image.size.height > 0 {
+            return Self.fit(image.size, maxWidth: bubbleWidth)
+        }
+        // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
+        // natural size keeps the row's height steady while the picture comes back.
+        if let ref = item.blobRef, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+            return Self.fit(known, maxWidth: bubbleWidth)
+        }
+        return Self.placeholder
     }
 
     static func fit(_ natural: CGSize, maxWidth: CGFloat) -> CGSize {
@@ -2683,30 +2965,59 @@ struct ImageBubble: View {
     }
 
     var body: some View {
-        PhotoBubbleLayout(maxWidth: maxWidth, pictureInset: Self.pictureInset) {
-            Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-                pictureTile
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
-            if let captionText {
-                // The same text as a text bubble: body size, body line spacing, links
-                // and mention chips (Jacob: "normal font size").
-                Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
-                                    codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
-                    .font(theme.font(Theme.body))
-                    .lineSpacing(Theme.bodyLineSpacing)
-                    .tint(theme.accent)
-                    .multilineTextAlignment(.leading)
+        // Only the picture opens the viewer. The description bar sits outside
+        // that tap so a long-press on the text still shows Edit / Reply
+        // ([feedback app-01M5TK984G6NY5A66K75RR5PWJ]).
+        PhotoBubbleLayout(maxWidth: maxWidth, pictureInset: Self.pictureInset, hasHeader: forwardedFrom != nil) {
+            if let forwardedFrom {
+                ForwardedHeader(by: forwardedFrom, color: fromUser ? theme.userText : theme.text)
                     .padding(.horizontal, Theme.bubbleHPad)
-                    .padding(.vertical, Theme.bubbleVPad)
-                    .accessibilityIdentifier("photo-caption")
+                    .padding(.top, Theme.bubbleVPad)
+                    .padding(.bottom, 6)
+            }
+            // Tap opens the viewer. Not a Button: the transcript's reply swipe
+            // owns the row pan, and a SwiftUI Button still counts a right pan
+            // that starts here as a tap on lift ([feedback
+            // app-01M5Z71ZQQ9G8EG5WF8SVNGM85]). onTapGesture yields once the
+            // pan moves; the flag covers the case where the swipe already claimed.
+            pictureTile
+                .contentShape(Rectangle())
+                .onTapGesture(perform: openViewer)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Image, tap to view")
+            if captionText != nil || source != nil {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let captionText {
+                        // The same text as a text bubble: body size, body line spacing, links
+                        // and mention chips (Jacob: "normal font size").
+                        Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
+                                            codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
+                            .font(theme.font(Theme.body))
+                            .lineSpacing(Theme.bodyLineSpacing)
+                            .tint(theme.accent)
+                            .multilineTextAlignment(.leading)
+                            .accessibilityIdentifier("photo-caption")
+                            .accessibilityLabel("Description")
+                    }
+                    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+                    // `SwiftUI.Link`: model `Link` is the chat connection state.
+                    if let source, let url = URL(string: source.pageUrl), !source.pageUrl.isEmpty {
+                        SwiftUI.Link("via \(source.provider)", destination: url)
+                            .font(theme.font(11))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityIdentifier("photo-via-source")
+                    }
+                }
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
             }
         }
         .background(fill)
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         .accessibilityIdentifier("photo-bubble")
         .task(id: item.blobRef) { await load() }
+        .onAppear { animate = stillFrame != nil }
+        .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
@@ -2723,8 +3034,8 @@ struct ImageBubble: View {
         return GeometryReader { g in
             let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
             ZStack {
-                if let image {
-                    Image(uiImage: image)
+                if let shown = (animate ? image : stillFrame) ?? image {
+                    Image(uiImage: shown)
                         .resizable()
                         .scaledToFit()
                 } else if failed || item.blobRef == nil {
@@ -2745,13 +3056,106 @@ struct ImageBubble: View {
                minHeight: picture.height, idealHeight: picture.height, maxHeight: .infinity)
     }
 
+    /// Open the full-screen viewer for this picture. Skipped while a reply
+    /// swipe owns the drag so a right pan on the image only replies.
+    private func openViewer() {
+        guard !BackSwipe.bubbleSwipeActive else { return }
+        viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+    }
+
     private func load() async {
-        if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
-            image = ImageTrim.trimmed(img)
-            failed = false
-        } else {
-            failed = true
+        // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
+        // no decode, no placeholder flash.
+        if let ref = item.blobRef, let hit = ChatImageCache.decoded(for: ref) {
+            show(hit)
+            return
         }
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+            failed = true
+            return
+        }
+        // Decode + trim off the main actor (`ChatImageCache.decode`); animated GIF / WebP keep
+        // every frame, no ImageTrim (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+        let maxPixels = CGSize(width: 280 * displayScale, height: Self.maxHeight * displayScale)
+        guard let decoded = await ChatImageCache.decode(data, maxPixels: maxPixels) else {
+            failed = true
+            return
+        }
+        if let ref = item.blobRef { ChatImageCache.store(decoded, for: ref) }
+        show(decoded)
+    }
+
+    private func show(_ decoded: ChatImageCache.Decoded) {
+        image = decoded.image
+        stillFrame = decoded.stillFrame
+        animate = decoded.animated
+        failed = false
+    }
+}
+
+/// GIF / animated WebP frames for chat bubbles and tests
+/// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG). Caps match the Mac decoder.
+enum AnimatedImageFrames {
+    static let maxFrames = 300
+    static let maxDecodedBytes = 20 * 1024 * 1024
+
+    /// Frame list + total duration for an animated GIF/WebP, or `nil` for a
+    /// still (PNG, JPEG, single-frame WebP) or when the caps force a still.
+    static func frames(from data: Data) -> (images: [UIImage], duration: TimeInterval)? {
+        guard looksAnimated(data) else { return nil }
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(src)
+        guard count > 1 else { return nil }
+
+        var images: [UIImage] = []
+        var total: TimeInterval = 0
+        var decoded = 0
+        images.reserveCapacity(min(count, maxFrames))
+        for i in 0..<count {
+            if images.count >= maxFrames { return nil }
+            guard let cg = CGImageSourceCreateImageAtIndex(src, i, nil) else { continue }
+            let bytes = cg.bytesPerRow * cg.height
+            if decoded + bytes > maxDecodedBytes { return nil }
+            decoded += bytes
+            let delay = frameDelay(source: src, index: i)
+            total += delay
+            images.append(UIImage(cgImage: cg))
+        }
+        guard images.count > 1 else { return nil }
+        return (images, max(total, 0.1))
+    }
+
+    /// Animated `UIImage`, or `nil` when `data` is still / over cap.
+    static func animatedImage(from data: Data) -> UIImage? {
+        guard let (images, duration) = frames(from: data) else { return nil }
+        return UIImage.animatedImage(with: images, duration: duration)
+    }
+
+    private static func looksAnimated(_ data: Data) -> Bool {
+        if data.count >= 6, data.starts(with: Data("GIF8".utf8)) { return true }
+        if data.count >= 12 {
+            let riff = data.prefix(4) == Data("RIFF".utf8)
+            let webp = data.subdata(in: 8..<12) == Data("WEBP".utf8)
+            if riff && webp { return true }
+        }
+        return false
+    }
+
+    private static func frameDelay(source: CGImageSource, index: Int) -> TimeInterval {
+        let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+        if let gif = props?[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+            let unclamped = gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double
+            let clamped = gif[kCGImagePropertyGIFDelayTime] as? Double
+            let d = unclamped ?? clamped ?? 0.1
+            return d < 0.02 ? 0.1 : d
+        }
+        if let webp = props?[kCGImagePropertyWebPDictionary] as? [CFString: Any] {
+            let unclamped = webp[kCGImagePropertyWebPUnclampedDelayTime] as? Double
+            let clamped = webp[kCGImagePropertyWebPDelayTime] as? Double
+            let d = unclamped ?? clamped ?? 0.1
+            return d < 0.02 ? 0.1 : d
+        }
+        return 0.1
     }
 }
 
@@ -2763,13 +3167,19 @@ struct ImageBubble: View {
 struct PhotoBubbleLayout: Layout {
     let maxWidth: CGFloat
     let pictureInset: CGFloat
+    /// The first subview is a "Forwarded from" header above the picture
+    /// ([feedback forward-attachments-ios-2026-10-27]); it widens the bubble like a
+    /// caption does, so a long name over a narrow portrait floats the picture.
+    var hasHeader = false
 
     struct Geometry: Equatable {
         /// The bubble's size; the caption is placed at `captionTop`, full bubble width.
         var size: CGSize
         /// The picture tile's height: the picture plus its top inset when it floats.
         var tileHeight: CGFloat
-        var captionTop: CGFloat { tileHeight }
+        /// Where the picture tile starts: under the header when there is one.
+        var tileTop: CGFloat = 0
+        var captionTop: CGFloat { tileTop + tileHeight }
         /// Whether the picture spans the bubble (flush, no inset, square against the caption).
         var pictureFlush: Bool
     }
@@ -2778,16 +3188,18 @@ struct PhotoBubbleLayout: Layout {
     /// included) or nil for a picture-only bubble; `cap` is what the row offers, at
     /// most the bubble cap.
     static func geometry(picture: CGSize, caption: CGSize?, cap: CGFloat, pictureInset: CGFloat) -> Geometry {
-        let width: CGFloat
-        if let caption {
-            width = min(cap, max(picture.width, caption.width))
-        } else {
-            width = min(cap, picture.width)
-        }
+        geometry(picture: picture, caption: caption, header: nil, cap: cap, pictureInset: pictureInset)
+    }
+
+    /// As above with an optional header (its one-line size, padding included) on top.
+    static func geometry(picture: CGSize, caption: CGSize?, header: CGSize?, cap: CGFloat,
+                         pictureInset: CGFloat) -> Geometry {
+        let width = min(cap, max(picture.width, caption?.width ?? 0, header?.width ?? 0))
         let flush = pictureIsFlush(picture: picture, bubbleWidth: width)
         let tile = picture.height + (flush ? 0 : pictureInset)
-        return Geometry(size: CGSize(width: width, height: tile + (caption?.height ?? 0)),
-                        tileHeight: tile, pictureFlush: flush)
+        let top = header?.height ?? 0
+        return Geometry(size: CGSize(width: width, height: top + tile + (caption?.height ?? 0)),
+                        tileHeight: tile, tileTop: top, pictureFlush: flush)
     }
 
     /// Flush when the bubble is no wider than the picture (half a point of slack for
@@ -2802,31 +3214,52 @@ struct PhotoBubbleLayout: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let g = measure(proposal: proposal, subviews: subviews)
-        guard let picture = subviews.first else { return }
-        picture.place(at: bounds.origin, anchor: .topLeading,
+        let (header, picture, caption) = split(subviews)
+        guard let picture else { return }
+        header?.place(at: bounds.origin, anchor: .topLeading,
+                      proposal: ProposedViewSize(width: g.size.width, height: nil))
+        picture.place(at: CGPoint(x: bounds.minX, y: bounds.minY + g.tileTop), anchor: .topLeading,
                       proposal: ProposedViewSize(width: g.size.width, height: g.tileHeight))
-        if subviews.count > 1 {
-            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + g.captionTop), anchor: .topLeading,
-                              proposal: ProposedViewSize(width: g.size.width, height: nil))
+        caption?.place(at: CGPoint(x: bounds.minX, y: bounds.minY + g.captionTop), anchor: .topLeading,
+                       proposal: ProposedViewSize(width: g.size.width, height: nil))
+    }
+
+    /// (header, picture, caption) by position: the header only when `hasHeader`.
+    private func split(_ subviews: Subviews) -> (LayoutSubview?, LayoutSubview?, LayoutSubview?) {
+        var ix = subviews.startIndex
+        func next() -> LayoutSubview? {
+            guard ix < subviews.endIndex else { return nil }
+            defer { ix += 1 }
+            return subviews[ix]
         }
+        let header = hasHeader ? next() : nil
+        let picture = next()
+        return (header, picture, next())
     }
 
     private func measure(proposal: ProposedViewSize, subviews: Subviews) -> Geometry {
         let cap = min(maxWidth, proposal.width ?? maxWidth)
-        guard let pictureView = subviews.first else {
+        let (headerView, pictureView, captionView) = split(subviews)
+        guard let pictureView else {
             return Geometry(size: .zero, tileHeight: 0, pictureFlush: true)
         }
         let picture = pictureView.sizeThatFits(.unspecified)
-        guard subviews.count > 1 else {
-            return Self.geometry(picture: picture, caption: nil, cap: cap, pictureInset: pictureInset)
+        // One line, as wide as it wants up to the cap; measured first so it counts
+        // toward the width the caption wraps at.
+        let header = headerView.map { v -> CGSize in
+            let s = v.sizeThatFits(ProposedViewSize(width: cap, height: nil))
+            return CGSize(width: min(cap, s.width), height: s.height)
+        }
+        guard let captionView else {
+            return Self.geometry(picture: picture, caption: nil, header: header, cap: cap, pictureInset: pictureInset)
         }
         // Wrap the caption at the cap to learn the bubble's width, then once more at that
         // width so the height matches what is placed.
-        let wide = subviews[1].sizeThatFits(ProposedViewSize(width: cap, height: nil))
-        let width = min(cap, max(picture.width, wide.width))
-        let caption = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        let wide = captionView.sizeThatFits(ProposedViewSize(width: cap, height: nil))
+        let width = min(cap, max(picture.width, wide.width, header?.width ?? 0))
+        let caption = captionView.sizeThatFits(ProposedViewSize(width: width, height: nil))
         return Self.geometry(picture: picture, caption: CGSize(width: min(width, caption.width), height: caption.height),
-                             cap: cap, pictureInset: pictureInset)
+                             header: header, cap: cap, pictureInset: pictureInset)
     }
 }
 
@@ -2948,6 +3381,8 @@ struct FileCard: View {
     let chatId: Id
     let fromUser: Bool
     var caption: String? = nil
+    /// "Forwarded from <name>" at the top of the card.
+    var forwardedFrom: String? = nil
 
     @State private var viewer: MediaViewerState?
 
@@ -2958,12 +3393,20 @@ struct FileCard: View {
     }
 
     var body: some View {
-        Button {
-            viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-        } label: {
-            // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
-            // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-            VStack(alignment: .leading, spacing: 0) {
+        // Only the card header opens the viewer. A video's description bar sits
+        // outside that button so long-pressing the text shows Edit / Reply
+        // instead of opening the video ([feedback app-01M5TK984G6NY5A66K75RR5PWJ]).
+        VStack(alignment: .leading, spacing: 0) {
+            if let forwardedFrom {
+                ForwardedHeader(by: forwardedFrom, color: fromUser ? theme.userText : theme.text)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.top, Theme.bubbleVPad)
+            }
+            Button {
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            } label: {
+                // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
+                // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
                 HStack(spacing: 14) {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .fill(FileCard.kindColor(item, theme: theme))
@@ -2977,23 +3420,25 @@ struct FileCard: View {
                 .padding(.leading, 15)
                 .padding(.trailing, Theme.bubbleHPad + 4)
                 .padding(.vertical, 13)
-                if let captionText {
-                    Text(captionText)
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(fromUser ? theme.userText : theme.text)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.bottom, Theme.bubbleVPad)
-                        .padding(.top, 2)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .disabled(item.blobRef == nil)
+            .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
+            if let captionText {
+                Text(captionText)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(fromUser ? theme.userText : theme.text)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.bottom, Theme.bubbleVPad)
+                    .padding(.top, 2)
+                    .accessibilityLabel("Description")
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(item.blobRef == nil)
-        .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)

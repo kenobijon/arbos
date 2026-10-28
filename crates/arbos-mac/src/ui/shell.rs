@@ -29,6 +29,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::chart_viewer;
 use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
+use crate::ui::connect_agent;
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -38,7 +39,6 @@ use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
 use crate::ui::member_menu;
@@ -55,6 +55,7 @@ use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
+use crate::ui::sf_symbols;
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
@@ -240,6 +241,8 @@ pub struct Shell {
     pub(crate) create_picker: avatar_picker::Picker,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
+    /// Connect an agent (#2141): the transport picked on the Create screen.
+    pub(crate) connect_transport: create_entity::Transport,
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
     /// the pending choice.
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
@@ -663,6 +666,7 @@ impl Shell {
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
+            crate::ui::working::WorkingClock::set_window_active(cx, active);
             this.state
                 .update(cx, |s, cx| s.set_window_active(active, cx));
         })
@@ -695,6 +699,15 @@ impl Shell {
                     this.state
                         .update(cx, |s, cx| s.guide(text, reply_to, mentions, cx));
                 }
+                ComposerEvent::Edit { message_id, text } => {
+                    let message_id = message_id.clone();
+                    let text = text.clone();
+                    let Some(chat_id) = this.state.read(cx).active_chat_id() else {
+                        return;
+                    };
+                    this.state
+                        .update(cx, |s, cx| s.edit_message(chat_id, message_id, text, cx));
+                }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
         )
@@ -723,6 +736,8 @@ impl Shell {
                     let _ = weak.update(cx, |this, cx| {
                         let kind = if this.create_group_open {
                             CreateKind::Group
+                        } else if this.state.read(cx).connect_open {
+                            CreateKind::Connect
                         } else {
                             CreateKind::Agent
                         };
@@ -1070,6 +1085,7 @@ impl Shell {
             new_agent_color: None,
             create_picker,
             create_group_open,
+            connect_transport: create_entity::Transport::default(),
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
@@ -1658,6 +1674,26 @@ impl Shell {
         });
     }
 
+    /// "Connect an agent" in the New Message sheet (#2141): the Create screen in its connect
+    /// form (name + transport), then the key reveal.
+    pub(crate) fn open_connect_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_create_picture(cx);
+        self.create_group_open = false;
+        self.connect_transport = create_entity::Transport::default();
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = false;
+            s.connect_open = true;
+            cx.notify();
+        });
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Connect.placeholder());
+            input.clear(cx);
+        });
+        let handle = self.project_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// Open the Create group screen (step 1) over the New Message backdrop.
     pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_group_open = true;
@@ -1684,6 +1720,23 @@ impl Shell {
     ) {
         match kind {
             CreateKind::Agent => self.submit_project(window, cx),
+            CreateKind::Connect => {
+                let name = self.project_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let transport = self.connect_transport;
+                self.project_input.update(cx, |input, cx| input.clear(cx));
+                let color = self.new_agent_color.take();
+                // The picture options are drawn but a connected agent starts with the neutral
+                // initial; a picture can be set from its profile like any agent.
+                let _ = self.take_create_picture(cx);
+                self.state.update(cx, |s, cx| {
+                    s.close_new_chat(cx);
+                    s.connect_agent(name, transport.wire(), color, cx);
+                });
+                Composer::focus(&self.composer, window, cx);
+            }
             CreateKind::Group => {
                 let name = self.project_input.read(cx).text().trim().to_string();
                 if name.is_empty() {
@@ -1728,6 +1781,10 @@ impl Shell {
     ) {
         match kind {
             CreateKind::Agent | CreateKind::Group => self.close_new_chat_sheet(window, cx),
+            CreateKind::Connect => {
+                self.state.update(cx, |s, _| s.connect_open = false);
+                self.close_new_chat_sheet(window, cx);
+            }
             CreateKind::Server => self.close_server_sheet(window, cx),
         }
     }
@@ -3183,7 +3240,11 @@ impl Shell {
                     highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
+                .child(sf_symbols::glyph(
+                    "icloud.and.arrow.down",
+                    sidebar::FOOTER_DISC_GLYPH,
+                    glyph,
+                ))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !busy {
                         this.state.update(cx, |s, cx| s.install_update(cx));
@@ -3530,8 +3591,11 @@ impl Shell {
         // 876, which put the bubble 21–28 pt right of the pill's edge
         // ([feedback agent-bubble-inset-2026-10-22]). The pill itself has
         // not moved.
-        // Wheel over the input (sibling of the list) still scrolls the chat —
-        // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+        // Wheel over a short input (sibling of the list) still scrolls the
+        // chat — same as dragging over a bubble ([feedback
+        // app-01M5PDB3QYAPBPA4FJXZE1FFD0]). A tall overflowing field handles
+        // the wheel itself and stops propagation so the transcript stays put
+        // ([feedback app-01M5WNET9M9JY4D7W5YAZG2685]).
         let composer_slot: AnyElement = match &blocked_peer {
             Some(person) => self.blocked_composer(person, &theme, cx),
             None => self.composer.clone().into_any_element(),
@@ -4513,7 +4577,7 @@ impl Shell {
                     .gap(px(12.0))
                     .child(
                         glass::circle("notify-glyph", 40.0, &theme)
-                            .child(icon("bell", 17.0, theme.text)),
+                            .child(sf_symbols::glyph("bell", 17.0, theme.text)),
                     )
                     .child(
                         div()
@@ -4621,7 +4685,7 @@ impl Shell {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.7))
-                            .child(icon("xmark", 12.0, theme.text_muted))
+                            .child(sf_symbols::glyph("xmark", 12.0, theme.text_muted))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, cx| {
                                     s.dismiss_all_notices();
@@ -4765,7 +4829,7 @@ pub(crate) fn fmt_uptime(ms: u64) -> String {
     }
 }
 
-fn cards_spinner(theme: &Theme, cx: &App) -> Div {
+fn cards_spinner(theme: &Theme, cx: &mut App) -> Div {
     crate::ui::cards::spinner(theme, cx)
 }
 
@@ -5257,6 +5321,8 @@ impl Render for Shell {
             // (a group goes on to the member picker as step 2).
             if self.state.read(cx).new_project_open {
                 root = root.child(create_entity::sheet(self, CreateKind::Agent, cx));
+            } else if self.state.read(cx).connect_open {
+                root = root.child(create_entity::sheet(self, CreateKind::Connect, cx));
             } else if self.create_group_open {
                 root = root.child(create_entity::sheet(self, CreateKind::Group, cx));
             } else {
@@ -5268,6 +5334,9 @@ impl Render for Shell {
                 ServerSheet::NewServer => create_entity::sheet(self, CreateKind::Server, cx),
                 other => servers::sheet(self, &other, cx),
             });
+        }
+        if let Some(reveal) = self.state.read(cx).connect_reveal.clone() {
+            root = root.child(connect_agent::reveal_sheet(self, &reveal, cx));
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
@@ -5288,25 +5357,37 @@ impl Render for Shell {
             } else if search.is_focused(window) {
                 window.focus(&self.viewer_focus, cx);
             }
+            // Inline video: keep the native AVPlayerView over the picture area
+            // (or tear it down when Play has not started / we paged away).
+            let playing = self
+                .state
+                .read(cx)
+                .media_viewer
+                .as_ref()
+                .and_then(|v| v.playing.clone());
+            crate::ui::video_player::sync(window, playing.as_deref());
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if chart_viewer_open {
-            // Esc closes; focus moves into the overlay once per opening.
-            if self.chart_viewer_focused_generation != chart_viewer_generation {
-                self.chart_viewer_focused_generation = chart_viewer_generation;
-                window.focus(&self.viewer_focus, cx);
+        } else {
+            crate::ui::video_player::sync(window, None);
+            if chart_viewer_open {
+                // Esc closes; focus moves into the overlay once per opening.
+                if self.chart_viewer_focused_generation != chart_viewer_generation {
+                    self.chart_viewer_focused_generation = chart_viewer_generation;
+                    window.focus(&self.viewer_focus, cx);
+                }
+                root = root.child(chart_viewer::overlay(self, &self.viewer_focus, cx));
+            } else if self.state.read(cx).forward_message.is_none()
+                && (self.viewer_focus.is_focused(window)
+                    || self
+                        .viewer_search
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window))
+            {
+                // Closed by × / the backdrop / Forward: typing goes back to the
+                // composer (unless the bubble menu's picker owns the field now).
+                Composer::focus(&self.composer, window, cx);
             }
-            root = root.child(chart_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if self.state.read(cx).forward_message.is_none()
-            && (self.viewer_focus.is_focused(window)
-                || self
-                    .viewer_search
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window))
-        {
-            // Closed by × / the backdrop / Forward: typing goes back to the
-            // composer (unless the bubble menu's picker owns the field now).
-            Composer::focus(&self.composer, window, cx);
         }
         // The command palette: the topmost modal (over sheets and the viewer).
         let palette_scroll = self.palette_scroll.clone();

@@ -711,7 +711,7 @@ pub(crate) fn settings_chat(
     Ok((me, cm))
 }
 
-fn handle_of(state: &AppState, user_id: &str) -> String {
+pub fn handle_of(state: &AppState, user_id: &str) -> String {
     state
         .db
         .user_card(user_id)
@@ -1685,6 +1685,7 @@ pub async fn agent_add(
     // The notice row goes out first (ARB-393): every device in the room sees "<me> added
     // <agent>" as soon as the membership row exists, before the box wake, the pushes and the
     // Matrix mirror have had their turn.
+    crate::outside::on_membership(&state, &project.id, &id, true);
     let line = notices::added_line(
         &notices::person_name(&state, &me),
         std::slice::from_ref(&project.name),
@@ -1889,6 +1890,7 @@ pub async fn agent_remove(
             by_handle: handle_of(&state, &me),
         }),
     );
+    crate::outside::on_membership(&state, &project_id, &id, false);
     let line = notices::removed_line(
         &notices::person_name(&state, &me),
         &[notices::agent_name(&state, &project_id)],
@@ -2075,6 +2077,7 @@ pub async fn member_add(
         }
         names.push(project.name.clone());
         subjects.push(notices::subject_agent(&project.id));
+        crate::outside::on_membership(&state, &project.id, &id, true);
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
@@ -3721,6 +3724,8 @@ pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxe
         .members
         .iter()
         .filter_map(|m| m.project_id())
+        // Outside agents are served by the relay, not by a box (#2140).
+        .filter(|pid| !crate::outside::is_outside(state, pid))
         .filter_map(|pid| state.db.project(pid).ok().flatten())
         .map(|p| crate::boxes::ServingAgent {
             project_id: p.id,
@@ -3813,17 +3818,24 @@ pub fn on_room_push(
         }
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
-    let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
-        chat_id: chat_id.to_owned(),
-        from: format!("user:{user_id}"),
-        from_handle: handle_of(state, user_id),
-        seq: head + 1,
-        sender: crate::notify::Sender::user(state, user_id).dto(),
-        project_id: None,
-        text: None,
-    });
+    let sender_dto = crate::notify::Sender::user(state, user_id).dto();
+    let from_handle = handle_of(state, user_id);
     let chat_ref = crate::notify::ChatRef::people(chat_id);
     for other in humans.iter().filter(|u| *u != user_id) {
+        // Group name per recipient (an untitled group is the *other* members' handles).
+        let meta = crate::notify::chat_meta(state, &chat_ref, other);
+        let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
+            chat_id: chat_id.to_owned(),
+            from: format!("user:{user_id}"),
+            from_handle: from_handle.clone(),
+            seq: head + 1,
+            sender: sender_dto.clone(),
+            project_id: None,
+            text: None,
+            chat_kind: Some(meta.kind.to_owned()),
+            chat_title: meta.title,
+            chat_image_key: meta.image_key,
+        });
         // A member who blocked the sender hears nothing of this row (hidden for them alone).
         if state.db.blocks(other, user_id).unwrap_or(false) {
             continue;

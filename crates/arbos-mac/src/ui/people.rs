@@ -17,9 +17,9 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -156,7 +156,7 @@ pub fn new_chat_sheet(
         .border(px(0.5))
         .border_color(theme.field_border)
         .cursor_text()
-        .child(icon("search", 11.5, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 11.5, theme.text_muted))
         .child(
             div()
                 .flex_1()
@@ -228,7 +228,7 @@ pub fn new_chat_sheet(
                 .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     glass::circle("new-agent-glyph", ROW_GLYPH, &theme)
-                        .child(icon("sparkles", 17.0, theme.text)),
+                        .child(sf_symbols::glyph("sparkles", 17.0, theme.text)),
                 )
                 .child(
                     div()
@@ -249,7 +249,7 @@ pub fn new_chat_sheet(
                                 .child("Its own workspace on your machine"),
                         ),
                 )
-                .child(icon("chevron-right", 13.0, theme.text_faint))
+                .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                 // D93: opens the Create screen (`create_entity::sheet`) in place of this one.
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_create_agent(cx);
@@ -266,8 +266,11 @@ pub fn new_chat_sheet(
                 .cursor_pointer()
                 .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
-                    glass::circle("new-group-glyph", ROW_GLYPH, &theme)
-                        .child(icon("people", 17.0, theme.text)),
+                    glass::circle("new-group-glyph", ROW_GLYPH, &theme).child(sf_symbols::glyph(
+                        "person.2.fill",
+                        17.0,
+                        theme.text,
+                    )),
                 )
                 .child(
                     div()
@@ -288,15 +291,51 @@ pub fn new_chat_sheet(
                                 .child("People and agents in one chat"),
                         ),
                 )
-                .child(icon("chevron-right", 13.0, theme.text_faint))
+                .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                 // D93: step 1 is the Create screen (picture + name); the picker below is step 2.
                 .on_click(cx.listener(|this, _, window, cx| this.open_create_group(window, cx)));
+            // Connect an agent (#2141): an agent that runs elsewhere joins as a member.
+            let connect_row = div()
+                .id("connect-agent")
+                .flex()
+                .items_center()
+                .gap(px(ROW_GAP))
+                .px(px(ROW_PADDING_X))
+                .py(px(10.0))
+                .cursor_pointer()
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
+                .child(
+                    glass::circle("connect-agent-glyph", ROW_GLYPH, &theme)
+                        .child(sf_symbols::glyph("link", 17.0, theme.text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("Connect an agent"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("Claude Code, Grok or your own bot, with a key"),
+                        ),
+                )
+                .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
+                .on_click(cx.listener(|this, _, window, cx| this.open_connect_agent(window, cx)));
             // Inside the scrolling body the card must keep its height, or the
             // expanded form is squeezed and clipped once the list below is long.
             let mut group = glass::group(&theme)
                 .flex_shrink_0()
                 .mx(px(CARD_INSET))
                 .child(agent_row);
+            group = group.child(kit::divider(&theme)).child(connect_row);
             group = group.child(kit::divider(&theme)).child(group_row);
             // D88 rule 8: servers, when this relay runs them.
             if servers_available {
@@ -320,7 +359,7 @@ pub fn new_chat_sheet(
                                 ROW_GLYPH,
                                 &theme,
                             )
-                            .child(icon(glyph, 17.0, theme.text)),
+                            .child(sf_symbols::glyph(glyph, 17.0, theme.text)),
                         )
                         .child(
                             div()
@@ -341,14 +380,14 @@ pub fn new_chat_sheet(
                                         .child(line),
                                 ),
                         )
-                        .child(icon("chevron-right", 13.0, theme.text_faint))
+                        .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_server_sheet(sheet.clone(), window, cx);
                         }))
                 };
                 group = group.child(kit::divider(&theme)).child(server_row(
                     "new-server",
-                    "hash",
+                    "number",
                     "New server",
                     "Channels for a crowd, with an invite link",
                     crate::app::ServerSheet::NewServer,
@@ -584,7 +623,7 @@ pub fn member_chip(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .child(icon("xmark", 8.0, theme.text_muted))
+                .child(sf_symbols::glyph("xmark", 8.0, theme.text_muted))
                 .on_click(on_remove),
         )
 }
@@ -893,7 +932,7 @@ fn pick_mark(selected: bool, theme: &Theme) -> Div {
             .flex()
             .items_center()
             .justify_center()
-            .child(icon("check", 12.0, theme.bg))
+            .child(sf_symbols::glyph("checkmark", 12.0, theme.bg))
     } else {
         div()
             .size(px(22.0))

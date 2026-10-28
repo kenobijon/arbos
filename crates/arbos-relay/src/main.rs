@@ -45,7 +45,9 @@ mod migrate;
 mod moderation;
 mod notices;
 mod notify;
+mod outside;
 mod people;
+mod perf;
 mod proxy;
 mod push;
 mod releases;
@@ -57,6 +59,7 @@ mod secrets;
 mod settings_audit;
 mod shell_grants;
 mod signin;
+mod site_icons;
 mod sites;
 mod skills;
 mod smoke;
@@ -334,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
         decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+        decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
@@ -407,6 +411,7 @@ async fn main() -> anyhow::Result<()> {
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
+    outside::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     images::spawn_health_probe(state.clone());
     matrix::worker::spawn(state.clone());
@@ -581,6 +586,19 @@ async fn main() -> anyhow::Result<()> {
             post(notify::register_push).delete(notify::unregister_push),
         )
         .route("/chats/{id}/notify", post(notify::notify_people_chat))
+        // Outside agents (#2140): owner side …
+        .route("/outside-agents", get(outside::list).post(outside::create))
+        .route(
+            "/outside-agents/{id}",
+            get(outside::get).delete(outside::revoke),
+        )
+        .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        // … and the agent side (bearer arbk_ key).
+        .route("/asp/me", get(outside::me))
+        .route("/asp/inbox", get(outside::inbox))
+        .route("/asp/events", post(outside::events))
+        .route("/asp/socket", get(outside::socket))
+        .route("/asp/connect/{id}", get(outside::connect_page))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
@@ -844,6 +862,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
+        .route("/unfurl/icon", get(site_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
@@ -851,6 +870,10 @@ async fn main() -> anyhow::Result<()> {
             "/box/feedback/capture/{id}",
             get(feedback::box_capture_status),
         )
+        .route("/perf/report", post(perf::submit))
+        .route("/admin/perf", get(perf::admin_list))
+        .route("/admin/perf/summary", get(perf::admin_summary))
+        .route("/admin/perf/{id}", get(perf::admin_item))
         .route("/admin/feedback", get(feedback::admin_list))
         .route("/admin/feedback/{id}/image", get(feedback::admin_image))
         .route(

@@ -14,11 +14,11 @@
 //! Pure functions here (rows, gauges, levels, copy, the poll step) are what the tests pin;
 //! `me.rs` draws them.
 
-use gpui::{div, prelude::*, px, AnyElement, Div};
+use gpui::{div, prelude::*, px, AnyElement, App, Div};
 
 use crate::model::{duration_s, size_mb, BoxReport, BoxWorkspace, Machine, MachineState};
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Used share at which a gauge turns amber and the warning card appears — agentd's own disk
@@ -479,12 +479,11 @@ pub fn warning_row(w: &Warning, theme: &Theme) -> Div {
         .gap(px(12.0))
         .px(px(kit::INSET))
         .py(px(10.0))
-        .child(
-            div()
-                .flex_shrink_0()
-                .mt(px(1.0))
-                .child(icon("exclamation", 22.0, theme.warn)),
-        )
+        .child(div().flex_shrink_0().mt(px(1.0)).child(sf_symbols::glyph(
+            "exclamationmark.circle",
+            22.0,
+            theme.warn,
+        )))
         .child(
             div()
                 .flex_1()
@@ -510,7 +509,9 @@ pub fn warning_row(w: &Warning, theme: &Theme) -> Div {
 }
 
 /// One workspace in the breakdown: picture, name over its status, CPU over memory · disk.
-pub fn agent_row(picture: AnyElement, w: &BoxWorkspace, theme: &Theme) -> Div {
+/// A running workspace leads its status with the working spinner (`ui::working`, the
+/// sidebar rows' one — Jacob, 2026-10-27).
+pub fn agent_row(picture: AnyElement, w: &BoxWorkspace, theme: &Theme, cx: &mut App) -> Div {
     div()
         .relative()
         .flex()
@@ -537,10 +538,20 @@ pub fn agent_row(picture: AnyElement, w: &BoxWorkspace, theme: &Theme) -> Div {
                 )
                 .child(
                     div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .truncate()
-                        .child(agent_status(w)),
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .when(w.running, |el| {
+                            el.child(crate::ui::working::glyph(theme, cx))
+                        })
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .truncate()
+                                .child(agent_status(w)),
+                        ),
                 ),
         )
         .child(

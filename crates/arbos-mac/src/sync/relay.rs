@@ -39,6 +39,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::avatar_master::Master;
+use super::chat_send_queue::ChatSendQueue;
 use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
@@ -52,7 +53,8 @@ use super::dto::{
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
 use super::{
-    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+    ClientCommand, CopyBlob, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent,
+    SyncSource,
 };
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
@@ -273,6 +275,8 @@ struct Shared {
     /// When the Matrix session was last (re)started: a rejected token restarts it at most
     /// once a minute.
     matrix_started_at: Mutex<Option<Instant>>,
+    /// Per-chat ordered network sends (photo then text must stay in push order).
+    send_queue: ChatSendQueue,
 }
 
 /// Blob slot prefix of a people chat (`people:<chat_id>`, people-chats API §2).
@@ -515,6 +519,7 @@ impl Shared {
 
     /// Forget the tokens and show the sign-in screen.
     fn sign_out_locally(&self) {
+        self.send_queue.clear();
         credentials::clear(&self.http_url);
         self.stop_matrix();
         self.drop_store(true);
@@ -846,6 +851,16 @@ impl SyncSource for RelaySource {
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
                 matrix_started_at: Mutex::new(None),
+                send_queue: {
+                    let events = events.clone();
+                    ChatSendQueue::new(move |chat_id, message_id| {
+                        let _ = events.send(SyncEvent::MessageSendFailed {
+                            chat_id,
+                            message_id,
+                            error: UserError::from_text("send your message", "timed out"),
+                        });
+                    })
+                },
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -2529,6 +2544,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 continue;
             }
         };
+        // Outside agents (#2141): an extra key beside the DTO.
+        let outside: Option<crate::model::OutsideInfo> = detail_val
+            .get("outside")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok());
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
             Err(err) => {
@@ -2555,6 +2575,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
+        project.outside = outside;
         // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
         project.image_url = project_image_url(
             &shared.http_url,
@@ -4360,6 +4381,11 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
         mime: att.mime,
         kind: att.kind.map(attachment_kind_str),
         blob_ref: att.blob_ref,
+        source: att.source.map(|s| arbos_core::doc::AttachmentSource {
+            provider: s.provider,
+            id: s.id,
+            page_url: s.page_url,
+        }),
     }
 }
 
@@ -4375,6 +4401,42 @@ enum Outgoing {
 
 fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
     paths.into_iter().map(Outgoing::Path).collect()
+}
+
+/// Push a network send onto this chat's ordered queue (local echo is already done).
+#[allow(clippy::too_many_arguments)]
+fn enqueue_send(
+    shared: &Arc<Shared>,
+    chat_id: Id,
+    message_id: Id,
+    text: String,
+    attachments: Vec<Outgoing>,
+    voice_wav: Option<Arc<Vec<u8>>>,
+    command: &'static str,
+    answer: Option<(String, serde_json::Value)>,
+    reply_to: Option<String>,
+    forwarded: Option<Forwarded>,
+    reply_ref: Option<ReplyRef>,
+    mentions: Vec<String>,
+) {
+    shared.send_queue.push(
+        chat_id.clone(),
+        message_id.clone(),
+        send_message(
+            shared.clone(),
+            chat_id,
+            message_id,
+            text,
+            attachments,
+            voice_wav,
+            command,
+            answer,
+            reply_to,
+            forwarded,
+            reply_ref,
+            mentions,
+        ),
+    );
 }
 
 /// Put one outgoing attachment under `blob_slot` (a file read from disk, or a
@@ -4450,6 +4512,7 @@ async fn upload_outgoing(
         mime,
         kind,
         blob_ref,
+        source: None,
     }
 }
 
@@ -4774,6 +4837,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             kind: Some(AttachmentKind::Audio),
             title: None,
             chart_part: None,
+            source: None,
         },
     }
 }
@@ -4928,8 +4992,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             wav,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -4941,7 +5005,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Transcribe {
             project_id,
@@ -5736,8 +5800,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_ref,
             mentions,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5749,7 +5813,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 reply_ref,
                 mentions,
-            ));
+            );
         }
         ClientCommand::Forward {
             chat_id,
@@ -5758,8 +5822,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             attachment,
             text,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5774,7 +5838,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::ForwardMessage {
             chat_id,
@@ -5792,8 +5856,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     attachment,
                 })
                 .collect();
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5809,7 +5873,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }),
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Steer {
             chat_id,
@@ -5817,8 +5881,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             reply_to,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5830,7 +5894,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Answer {
             chat_id,
@@ -5840,8 +5904,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             value,
         } => {
             let answer = question_id.map(|qid| (qid, value.unwrap_or(json!(null))));
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5853,7 +5917,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Stop { chat_id } => {
             let docs = shared.docs.lock().unwrap();
@@ -5903,15 +5967,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{}", shared.me_id());
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
+                let base = arbos_core::doc::normalize_reaction_emoji(&emoji);
                 let already = doc
                     .index_of(&message_id)
                     .and_then(|ix| doc.read_message(ix))
                     .map(|m| {
-                        m.reactions
-                            .get(&emoji)
-                            .and_then(|bucket| bucket.get(&me))
-                            .copied()
-                            .unwrap_or(false)
+                        m.reactions.iter().any(|(e, bucket)| {
+                            arbos_core::doc::normalize_reaction_emoji(e) == base
+                                && bucket.get(&me).copied().unwrap_or(false)
+                        })
                     })
                     .unwrap_or(false);
                 let on = !already;
@@ -5997,6 +6061,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.fail_with(error);
                 }
             });
+        }
+        ClientCommand::EditMessage {
+            chat_id,
+            message_id,
+            text,
+        } => {
+            // Same path as the iPhone: write `edit_message_text` into the local
+            // chat doc; peers see the body via room sync (no HTTP edit).
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                if let Err(e) = doc
+                    .core
+                    .transact(|d| d.edit_message_text(&message_id, &text))
+                {
+                    eprintln!("relay: edit message: {e:#}");
+                }
+            }
         }
         ClientCommand::Approve {
             chat_id,
@@ -6282,8 +6363,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             chat: chat.clone(),
                         });
                         for ((real_id, _), q) in targets.into_iter().zip(queued) {
-                            tokio::spawn(send_message(
-                                shared.clone(),
+                            enqueue_send(
+                                &shared,
                                 real_id,
                                 q.message_id,
                                 q.text,
@@ -6295,7 +6376,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.forwarded,
                                 q.reply_ref,
                                 q.mentions,
-                            ));
+                            );
                         }
                     }
                     Err(err) => {
@@ -7153,6 +7234,117 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::ConnectAgent {
+            name,
+            transport,
+            avatar_color_index,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "name": name, "transport": transport });
+                if let Some(i) = avatar_color_index {
+                    body["avatar_color_index"] = json!(i);
+                }
+                match shared.post_json("/outside-agents", body).await {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: v["agent"]["project_id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            name: v["agent"]["name"].as_str().unwrap_or(&name).to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or(&transport)
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: v["chat_id"].as_str().map(str::to_owned),
+                            rotated: false,
+                        });
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => shared.fail("connect the agent", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentStatus { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRotate { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(&format!("/outside-agents/{project_id}/rotate"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: project_id.clone(),
+                            name: v["agent"]["name"].as_str().unwrap_or_default().to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: None,
+                            rotated: true,
+                        });
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                        }
+                    }
+                    Err(err) => shared.fail("rotate the key", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRevoke { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    shared.fail("revoke the agent's access", &err);
+                    return;
+                }
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
         ClientCommand::DeleteProject { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -7375,6 +7567,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::FetchCopyBlobs {
+            project_id,
+            request,
+            keys,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every blob at once; one that fails leaves a hole, the rest still copy.
+                let fetches = keys.iter().map(|key| {
+                    let shared = shared.clone();
+                    let project_id = project_id.clone();
+                    let key = key.clone();
+                    async move {
+                        let mut attempt = 0u32;
+                        loop {
+                            match fetch_blob_bytes(&shared, &project_id, &key).await {
+                                Ok((mime, bytes)) => {
+                                    break Some(CopyBlob {
+                                        key,
+                                        mime,
+                                        bytes: Arc::new(bytes),
+                                    })
+                                }
+                                Err(err) => {
+                                    let text = format!("{err:#}");
+                                    if diagnostics::is_transient(&text) && attempt < 2 {
+                                        attempt += 1;
+                                        sleep(Duration::from_millis(400 * u64::from(attempt)))
+                                            .await;
+                                        continue;
+                                    }
+                                    shared.diagnostic("copy", format!("{key}: {text}"));
+                                    break None;
+                                }
+                            }
+                        }
+                    }
+                });
+                let blobs = futures::future::join_all(fetches).await;
+                let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
+            });
+        }
         ClientCommand::DownloadAttachment {
             project_id,
             key,
@@ -7409,13 +7643,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
+                let mut opened_path = None;
                 match fetch_blob_bytes(&shared, &project_id, &key).await {
                     Ok((_, bytes)) => {
                         let dir = std::env::temp_dir().join("arbos-media");
                         let _ = tokio::fs::create_dir_all(&dir).await;
                         let path = dir.join(safe_name(&name));
                         match tokio::fs::write(&path, &bytes).await {
-                            Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                            Ok(()) => {
+                                // Videos play inline on macOS (AVPlayerView); Quick Look
+                                // and non-mac always hand the file to the system.
+                                let open_external = quick_look || !cfg!(target_os = "macos");
+                                if open_external {
+                                    crate::ui::attachments::open_with_system(&path, quick_look);
+                                }
+                                opened_path = Some(path);
+                            }
                             Err(err) => shared.fail(&format!("open {name}"), &err),
                         }
                     }
@@ -7424,7 +7667,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.fail(&format!("open {name}"), &err);
                     }
                 }
-                let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+                let _ = shared.events.send(SyncEvent::AttachmentOpened {
+                    key,
+                    path: opened_path,
+                });
             });
         }
         ClientCommand::RefreshConnectors => {

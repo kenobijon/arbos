@@ -28,9 +28,10 @@ use crate::search;
 use crate::ui::glass;
 use crate::ui::groups;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
+use crate::ui::link_tile;
 use crate::ui::modal;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar;
 use crate::ui::theme::Theme;
@@ -136,6 +137,22 @@ pub fn overlay(
         arrange(entries, query.is_empty())
     };
     let rows = flatten(&arranged);
+    // The links section's tiles want the relay's icon for hosts without a bundled brand mark
+    // ([feedback link-icons-mac-adopt-2026-10-27]); asked once per host per session.
+    let wants: Vec<String> = rows
+        .iter()
+        .filter_map(|e| match &e.target {
+            Target::Link(url) if link_tile::Brand::for_url(url).is_none() => {
+                Some(crate::ui::profiles::link_icon_host(url))
+            }
+            _ => None,
+        })
+        .collect();
+    shell.state.update(cx, |s, _| {
+        for host in wants {
+            s.want_link_icon(host);
+        }
+    });
     if shell.palette.last_query != query {
         shell.palette.last_query = query.clone();
         // Typing resets the highlight to the top; the very first frame keeps
@@ -179,7 +196,11 @@ pub fn overlay(
         .gap(px(FIELD_GAP))
         .cursor_text()
         .debug_selector(|| "palette-field".into())
-        .child(icon("search", FIELD_GLYPH, theme.text_muted))
+        .child(sf_symbols::glyph(
+            "magnifyingglass",
+            FIELD_GLYPH,
+            theme.text_muted,
+        ))
         .child(
             div()
                 .flex_1()
@@ -422,7 +443,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             .flex()
             .items_center()
             .justify_center()
-            .child(icon(glyph, AVATAR * 0.58, theme.text_muted))
+            .child(sf_symbols::glyph(glyph, AVATAR * 0.58, theme.text_muted))
     };
     match &entry.target {
         Target::Setting(setting) => {
@@ -437,7 +458,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
         }
         Target::Space(id) | Target::Message { space_id: id, .. } => {
             let Some(space) = state.project(id) else {
-                return tile("person").into_any_element();
+                return tile("person.fill").into_any_element();
             };
             if let Some(person) = space
                 .person()
@@ -451,10 +472,10 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
         }
         Target::Server(id) | Target::Channel { server_id: id, .. } => {
             let Some(server) = state.server(id) else {
-                return tile("hash").into_any_element();
+                return tile("number").into_any_element();
             };
             if entry.kind == Kind::Channel {
-                tile("hash").into_any_element()
+                tile("number").into_any_element()
             } else {
                 sidebar::server_picture(server, state, AVATAR, theme).into_any_element()
             }
@@ -499,7 +520,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
                 .into_any_element(),
             }
         }
-        Target::ChannelMessage { .. } => tile("hash").into_any_element(),
+        Target::ChannelMessage { .. } => tile("number").into_any_element(),
         Target::Person(handle) => {
             // A person met in a group or the directory: their photo / initials
             // disc, as the member list draws it.
@@ -515,10 +536,16 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
                     let image = state.avatar(&p.avatar_url);
                     people::avatar(image, &p, AVATAR, theme).into_any_element()
                 }
-                None => tile("person").into_any_element(),
+                None => tile("person.fill").into_any_element(),
             }
         }
-        Target::Link(_) => tile("link").into_any_element(),
+        Target::Link(url) => {
+            // The one link tile: brand mark, the relay's icon, or the host's letter.
+            let icon_host = crate::ui::profiles::link_icon_host(url);
+            let host = crate::ui::profiles::link_host(url);
+            let icon = link_tile::icon_for(url, &host, state.link_icon(&icon_host));
+            link_tile::tile(icon, AVATAR, theme).into_any_element()
+        }
     }
 }
 
@@ -613,7 +640,11 @@ mod tests {
                     .items_center()
                     .gap(px(FIELD_GAP))
                     .debug_selector(|| "palette-field".into())
-                    .child(icon("search", FIELD_GLYPH, theme.text_muted))
+                    .child(sf_symbols::glyph(
+                        "magnifyingglass",
+                        FIELD_GLYPH,
+                        theme.text_muted,
+                    ))
                     .child(
                         div()
                             .flex_1()

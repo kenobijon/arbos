@@ -18,7 +18,7 @@ use gpui::{
 use crate::app::{AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
 use crate::ui::highlight;
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 
 /// What a card click does: open the media viewer on this attachment.
@@ -109,7 +109,7 @@ fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful
         .cursor_pointer()
         // hover-fill: exception overlay
         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.75)))
-        .child(icon("arrow-down", 12.0, fg))
+        .child(sf_symbols::glyph("arrow.down", 12.0, fg))
 }
 
 /// The card element for one attachment row. `forwarded_from` is the message's
@@ -196,7 +196,7 @@ fn picture_bubble(
                 .flex_col()
                 .items_center()
                 .gap(px(6.0))
-                .child(icon("photo", 22.0, theme.text_faint))
+                .child(sf_symbols::glyph("photo", 22.0, theme.text_faint))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -242,7 +242,28 @@ fn picture_bubble(
             crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
         ));
     }
-    out.child(bubble).into_any_element()
+    out = out.child(bubble);
+    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): a small
+    // "via <provider>" under the picture opens the source page. Nothing sets
+    // `source` yet; when a later picker does, this is where it shows.
+    if let Some(src) = attachment.source.clone() {
+        let label = format!("via {}", src.provider);
+        let url = src.page_url.clone();
+        out = out.child(
+            div()
+                .id(SharedString::from(format!("{row_id}-via")))
+                .pl(px(6.0))
+                .max_w(px(w))
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    cx.open_url(&url);
+                })
+                .child(label),
+        );
+    }
+    out.into_any_element()
 }
 
 /// Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB";
@@ -277,9 +298,9 @@ fn file_card(
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(
+        .child(sf_symbols::glyph(
             match kind {
-                AttachmentKind::Video => "play",
+                AttachmentKind::Video => "play.fill",
                 AttachmentKind::Audio => "waveform",
                 _ => "doc",
             },
@@ -376,7 +397,9 @@ pub fn reveal(path: &Path) {
 }
 
 /// Hand a fetched file to macOS: Quick Look (`qlmanage -p`) for documents, the
-/// default app for the rest (QuickTime Player for video). Elsewhere `xdg-open`.
+/// default app for the rest. Videos in the media viewer play inline instead
+/// ([feedback app-01M6147S9TPNBQA7KSDEY0K8C4]); this path is for Quick Look
+/// and non-mac fallbacks. Elsewhere `xdg-open`.
 pub fn open_with_system(path: &Path, quick_look: bool) {
     #[cfg(target_os = "macos")]
     let spawned = if quick_look {

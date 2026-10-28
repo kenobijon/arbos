@@ -10,8 +10,8 @@ use gpui::{
 
 use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Drag this region to move the window.
@@ -122,7 +122,7 @@ pub fn control_disc(
         .justify_center()
         .cursor_pointer()
         .map(|el| highlight::washed(el, theme.surface_2, theme))
-        .child(icon(glyph, glyph_size, theme.text))
+        .child(sf_symbols::glyph(glyph, glyph_size, theme.text))
 }
 
 /// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
@@ -352,7 +352,7 @@ pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, size * 0.5, gpui::white()))
+        .child(sf_symbols::glyph(glyph, size * 0.5, gpui::white()))
 }
 
 /// Segmented choice inside a row: `[Dark] Light`.
@@ -401,10 +401,18 @@ pub const MENU_ROW_RADIUS: f32 = PANEL_RADIUS - MENU_CARD_PADDING;
 pub const MENU_CARD_BORDER: f32 = 1.0;
 pub const MENU_DIVIDER_HEIGHT: f32 = 9.0;
 
-/// Menu row (the "…" menu): glyph, label, optional trailing value.
+/// Every menu glyph is a system SF Symbol at the label's point size
+/// (`TEXT_SMALL`), regular weight, in a fixed slot so rows align — the same
+/// names the iPhone passes to `Image(systemName:)` ([feedback
+/// menu-sf-symbols-2026-10-27]; `sf_symbols` for the rendering path).
+pub const MENU_SYMBOL_PT: f32 = TEXT_SMALL;
+pub const MENU_SYMBOL_SLOT: f32 = 20.0;
+
+/// Menu row (the "…" menu): `symbol` is an SF Symbol name registered in
+/// `sf_symbols::FALLBACKS`, then the label.
 pub fn menu_row(
     id: impl Into<ElementId>,
-    glyph: &str,
+    symbol: &'static str,
     label: impl Into<SharedString>,
     danger: bool,
     theme: &Theme,
@@ -414,7 +422,7 @@ pub fn menu_row(
         .id(id)
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .h(px(MENU_ROW_HEIGHT))
         .px(px(12.0))
         .rounded(px(MENU_ROW_RADIUS))
@@ -422,7 +430,13 @@ pub fn menu_row(
         .text_color(color)
         .cursor_pointer()
         .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
-        .child(icon(glyph, 15.0, color))
+        .child(sf_symbols::symbol(
+            symbol,
+            MENU_SYMBOL_PT,
+            sf_symbols::Weight::Regular,
+            MENU_SYMBOL_SLOT,
+            color,
+        ))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 

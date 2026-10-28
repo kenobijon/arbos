@@ -82,6 +82,10 @@ pub struct Project {
     /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
     #[serde(default)]
     pub machine_info: Option<ProjectMachine>,
+    /// A connected (outside) agent (#2141): its brain runs elsewhere, the relay hosts the
+    /// member. `GET /projects/{id}` carries this beside the DTO; `None` = a native agent.
+    #[serde(default)]
+    pub outside: Option<OutsideInfo>,
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
@@ -174,6 +178,63 @@ pub struct Voice {
     pub description: Option<String>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub sample_url: String,
+}
+
+/// The connection of an outside agent, as `GET /outside-agents/{id}` / the project detail
+/// report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideInfo {
+    /// `connected` | `away` | `never` | `revoked`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub connected: bool,
+    /// `acp` | `grok` | `custom`.
+    #[serde(default)]
+    pub transport: String,
+    /// `asp/1`.
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    #[serde(default)]
+    pub connected_at: Option<i64>,
+}
+
+impl OutsideInfo {
+    /// The transport as the Details pane names it.
+    pub fn transport_label(&self) -> &'static str {
+        match self.transport.as_str() {
+            "acp" => "ACP · on your Mac",
+            "grok" => "Grok · HTTPS",
+            _ => "Custom · HTTPS / WebSocket",
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
+    /// "Disconnected".
+    pub fn status_line(&self, now: i64) -> String {
+        let ago = |t: i64| {
+            let s = ((now - t).max(0) / 1000).max(0);
+            if s < 60 {
+                format!("{s} s ago")
+            } else if s < 3600 {
+                format!("{} min ago", s / 60)
+            } else if s < 86_400 {
+                format!("{} h ago", s / 3600)
+            } else {
+                format!("{} d ago", s / 86_400)
+            }
+        };
+        match (self.status.as_str(), self.last_seen_at) {
+            ("revoked", _) => "Disconnected".to_owned(),
+            ("connected", Some(t)) => format!("Connected · {}", ago(t)),
+            ("connected", None) => "Connected".to_owned(),
+            ("away", Some(t)) => format!("Away · {}", ago(t)),
+            ("away", None) => "Away".to_owned(),
+            _ => "Waiting for the first heartbeat".to_owned(),
+        }
+    }
 }
 
 /// API §9 `project.machine`.
@@ -1294,6 +1355,16 @@ impl AttachmentKind {
     }
 }
 
+/// Where a GIF / sticker came from. Written on the attachment as
+/// `{ provider, id, pageUrl }`; old messages and pastes have none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -1314,6 +1385,10 @@ pub struct Attachment {
     /// ([feedback chart-bubble-mac-2026-10-26]).
     #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
     pub chart_part: Option<String>,
+    /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
+    /// Boxed so [`Attachment`] stays small inside enums (Outgoing, library Entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<AttachmentSource>>,
 }
 
 impl Attachment {
@@ -1349,6 +1424,21 @@ impl Attachment {
     /// An image that should render as a picture in the transcript, not a file name.
     pub fn is_image(&self) -> bool {
         self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
+    }
+
+    /// The blob is still on its way up from this device (`local:` key): nothing
+    /// anyone can fetch from the relay yet.
+    pub fn is_uploading(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| k.starts_with("local:"))
+    }
+
+    /// The bytes can be fetched from the relay (`GET /blob/{slot}/{key}`).
+    pub fn is_on_relay(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
     }
 }
 
@@ -2312,31 +2402,45 @@ impl Message {
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
     /// alphabetically; emojis nobody holds any more are dropped.
+    /// Skin-tone variants of the same base merge into one chip.
     pub fn reaction_list(&self) -> Vec<(String, Vec<String>)> {
-        let senders = |emoji: &str| -> Vec<String> {
-            self.reactions
-                .get(emoji)
-                .map(|people| {
-                    people
-                        .iter()
-                        .filter(|(sid, on)| !sid.is_empty() && **on)
-                        .map(|(sid, _)| sid.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let mut out: Vec<(String, Vec<String>)> = REACTION_PALETTE
-            .iter()
-            .map(|e| (e.to_string(), senders(e)))
-            .filter(|(_, s)| !s.is_empty())
-            .collect();
-        out.extend(
-            self.reactions
-                .keys()
-                .filter(|e| !e.is_empty() && !REACTION_PALETTE.contains(&e.as_str()))
-                .map(|e| (e.clone(), senders(e)))
-                .filter(|(_, s)| !s.is_empty()),
-        );
+        use arbos_core::doc::normalize_reaction_emoji;
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut by_base: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (emoji, people) in &self.reactions {
+            if emoji.is_empty() {
+                continue;
+            }
+            let base = normalize_reaction_emoji(emoji);
+            if base.is_empty() {
+                continue;
+            }
+            let entry = by_base.entry(base).or_default();
+            for (sid, on) in people {
+                if *on && !sid.is_empty() {
+                    entry.insert(sid.clone());
+                }
+            }
+        }
+        let mut used = BTreeSet::new();
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        // Chip glyphs are the untoned base (matches core + iPhone orderedReactions).
+        for e in REACTION_PALETTE {
+            let base = normalize_reaction_emoji(e);
+            let Some(people) = by_base.get(&base) else {
+                continue;
+            };
+            if people.is_empty() || !used.insert(base.clone()) {
+                continue;
+            }
+            out.push((base, people.iter().cloned().collect()));
+        }
+        for (base, people) in &by_base {
+            if people.is_empty() || used.contains(base) {
+                continue;
+            }
+            out.push((base.clone(), people.iter().cloned().collect()));
+        }
         out
     }
 

@@ -417,6 +417,7 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                source: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -438,6 +439,9 @@ pub struct MediaViewer {
     pub forward_open: bool,
     /// Blob key being fetched for Play / Quick Look (one at a time).
     pub busy: Option<String>,
+    /// Temp file of the video playing inline in the viewer (macOS AVPlayerView;
+    /// [feedback app-01M6147S9TPNBQA7KSDEY0K8C4]). Cleared on close / page.
+    pub playing: Option<std::path::PathBuf>,
 }
 
 impl MediaViewer {
@@ -465,6 +469,14 @@ pub struct ForwardMessage {
     pub message_id: Id,
     /// The original sender's display name ("Forwarded from <by>").
     pub by: String,
+}
+
+/// A Copy whose attachment bytes are being fetched
+/// ([feedback copy-image-messages-mac-2026-10-27]): the body to lay out once they land.
+#[derive(Clone, Debug, PartialEq)]
+struct CopyRequest {
+    id: u64,
+    body: MessageBody,
 }
 
 /// The parts the optimistic row in the destination draws before the relay
@@ -573,10 +585,32 @@ pub struct ChatUi {
     /// Reply in DM: the message in another chat the next send here answers
     /// (its address + snapshot, written as `replyRef`). Exclusive with `reply_to`.
     pub reply_ref: Option<ReplyRef>,
+    /// Own message whose text is in the composer for an in-place edit
+    /// (iPhone `ChatView.editing`). Exclusive with `reply_to` / `reply_ref`.
+    pub editing: Option<Id>,
 }
 
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
+
+/// The reveal sheet after Connect an agent (#2141): the key, shown once, and the live
+/// connection while the sheet is up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectReveal {
+    pub project_id: Id,
+    pub name: String,
+    /// `acp` | `grok` | `custom`.
+    pub transport: String,
+    pub key: String,
+    pub link: String,
+    pub relay_url: String,
+    pub chat_id: Option<Id>,
+    /// After Rotate key…: the sheet says so instead of the first-time words.
+    pub rotated: bool,
+    pub status: Option<crate::model::OutsideInfo>,
+    /// Which Copy was pressed last ("key" | "link"), for the "Copied" tick.
+    pub copied: Option<&'static str>,
+}
 
 /// What the Create group screen (step 1) hands to the member picker (step 2).
 #[derive(Clone, Debug, PartialEq)]
@@ -716,6 +750,11 @@ pub struct AppState {
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// The Copy whose attachment bytes are on their way
+    /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
+    /// older answer is dropped by its `request` number.
+    copy_request: Option<CopyRequest>,
+    copy_request_seq: u64,
     pub notices: Vec<Notice>,
     /// Rooms whose pushes were refused (`not_available` / `blocked`) and why; the chat-level
     /// note draws the sentence. Cleared when that room's next ACK arrives.
@@ -775,6 +814,10 @@ pub struct AppState {
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
     pub forward_message: Option<ForwardMessage>,
     pub new_project_open: bool,
+    /// Connect an agent (#2141): the Create screen in its connect form is up.
+    pub connect_open: bool,
+    /// Connect an agent: the key reveal sheet, after the relay answered.
+    pub connect_reveal: Option<ConnectReveal>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -880,6 +923,10 @@ pub struct AppState {
     pending_relaunch: Option<arbos_update::client::Install>,
     /// Last composer keystroke (any chat): the "never mid-typing" guard for the relaunch.
     last_input_at: u64,
+    /// When the window last became focused. Auto-relaunch only counts time spent in
+    /// Arbos (D85 "while you are in Arbos" / "when you pause"), so a Spaces swipe
+    /// back after idle cannot be the restart edge.
+    became_active_at: u64,
     /// A version the automatic install already failed on: offer it in the rail, do not loop.
     auto_update_failed: Option<String>,
     /// Settings → This Mac (F9).
@@ -895,7 +942,7 @@ pub struct AppState {
     /// reason; the speaker row under that reply offers a retry. Scoped to the
     /// message, never shown as an app-wide banner.
     pub speech_failed: HashMap<Id, String>,
-    awaiting_new_project: bool,
+    pub awaiting_new_project: bool,
     /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
     pub calls_in_chat: HashMap<Id, Call>,
     /// Someone is calling me (ringing): the call and who started it.
@@ -1207,6 +1254,8 @@ impl AppState {
             link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            copy_request: None,
+            copy_request_seq: 0,
             notices: Vec::new(),
             push_refused: HashMap::new(),
             selected_project: None,
@@ -1234,6 +1283,8 @@ impl AppState {
             chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
+            connect_open: false,
+            connect_reveal: None,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1281,6 +1332,7 @@ impl AppState {
             update: update_state,
             pending_relaunch: None,
             last_input_at: 0,
+            became_active_at: now_ms(),
             auto_update_failed: None,
             local: LocalView::default(),
             voice_mode: false,
@@ -1480,7 +1532,8 @@ impl AppState {
 
     /// Is this a moment the app may restart itself? Never in a call, right after a keystroke, or
     /// while another app has focus (relaunch would steal it). When Arbos is focused: after a pause
-    /// with no typing, or when the countdown is over.
+    /// with no typing, or when the countdown is over — both measured only for continuous focus,
+    /// so swiping back to an idle window is not the restart.
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
@@ -1492,8 +1545,13 @@ impl AppState {
         if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
             return false;
         }
+        let focused_for = now.saturating_sub(self.became_active_at);
         let countdown_over = match &self.update.phase {
-            UpdatePhase::Installed { deadline_ms, .. } => now >= *deadline_ms,
+            UpdatePhase::Installed { deadline_ms, .. } => {
+                // Wall deadline alone used to fire on the focus-regain edge after time away.
+                // Require a full minute of continuous focus too ("while you are in Arbos").
+                now >= *deadline_ms && focused_for >= update::RELAUNCH_COUNTDOWN_MS
+            }
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
@@ -1501,9 +1559,11 @@ impl AppState {
             | UpdatePhase::Downloading { .. }
             | UpdatePhase::Installing(_)
             | UpdatePhase::Restarting(_)
-            | UpdatePhase::Failed { .. } => true,
+            | UpdatePhase::Failed { .. } => focused_for >= update::RELAUNCH_COUNTDOWN_MS,
         };
-        now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS || countdown_over
+        let paused = now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
+            && focused_for >= update::IDLE_RELAUNCH_MS;
+        paused || countdown_over
     }
 
     /// Relaunch into the pending install when it is safe; true when the relaunch was started.
@@ -1654,6 +1714,45 @@ impl AppState {
             assert!(text != "panic!", "test poison event");
         }
         match event {
+            SyncEvent::OutsideAgentKey {
+                project_id,
+                name,
+                transport,
+                key,
+                link,
+                relay_url,
+                chat_id,
+                rotated,
+            } => {
+                self.awaiting_new_project = false;
+                self.connect_reveal = Some(ConnectReveal {
+                    project_id: project_id.clone(),
+                    name,
+                    transport,
+                    key,
+                    link,
+                    relay_url,
+                    chat_id,
+                    rotated,
+                    status: None,
+                    copied: None,
+                });
+                self.poll_connect_status(cx);
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentStatus { project_id, info } => {
+                if let Some(r) = self
+                    .connect_reveal
+                    .as_mut()
+                    .filter(|r| r.project_id == project_id)
+                {
+                    r.status = Some(info.clone());
+                }
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+                    p.outside = Some(info);
+                }
+                cx.notify();
+            }
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
                     .pairing
@@ -2006,15 +2105,27 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::CopyBlobs { request, blobs } => {
+                self.finish_copy(request, blobs, cx);
+            }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
                 crate::ui::attachments::reveal(&path);
                 cx.notify();
             }
-            SyncEvent::AttachmentOpened { key } => {
+            SyncEvent::AttachmentOpened { key, path } => {
                 if let Some(viewer) = self.media_viewer.as_mut() {
                     if viewer.busy.as_ref() == Some(&key) {
                         viewer.busy = None;
+                        // Video Play on macOS: keep the temp file and show it
+                        // inline (AVPlayerView) instead of handing off to QuickTime.
+                        if let Some(path) = path.filter(|_| {
+                            viewer
+                                .current()
+                                .is_some_and(|i| i.attachment.kind() == AttachmentKind::Video)
+                        }) {
+                            viewer.playing = Some(path);
+                        }
                     }
                 }
                 cx.notify();
@@ -4209,6 +4320,7 @@ impl AppState {
         let ui = self.chat_ui.entry(chat_id).or_default();
         ui.reply_to = Some(message_id);
         ui.reply_ref = None;
+        ui.editing = None;
         cx.notify();
     }
 
@@ -4217,6 +4329,23 @@ impl AppState {
         if let Some(ui) = self.chat_ui.get_mut(chat_id) {
             ui.reply_to = None;
             ui.reply_ref = None;
+        }
+        cx.notify();
+    }
+
+    /// Bubble menu → Edit: put this own message's text in the composer.
+    pub fn begin_edit(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let ui = self.chat_ui.entry(chat_id).or_default();
+        ui.editing = Some(message_id);
+        ui.reply_to = None;
+        ui.reply_ref = None;
+        cx.notify();
+    }
+
+    /// Clear the Editing chip above the composer.
+    pub fn clear_editing(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(ui) = self.chat_ui.get_mut(chat_id) {
+            ui.editing = None;
         }
         cx.notify();
     }
@@ -4363,6 +4492,7 @@ impl AppState {
         self.pending_dm_reply = None;
         let ui = self.chat_ui.entry(dm_chat).or_default();
         ui.reply_to = None;
+        ui.editing = None;
         ui.reply_ref = Some(r);
         cx.notify();
     }
@@ -4432,6 +4562,7 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
+            ui.editing = None;
             // A cross-chat reply never carries an in-chat `replyTo` as well.
             ui.reply_ref.take().filter(|_| reply_to.is_none())
         };
@@ -4467,6 +4598,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4493,6 +4625,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 },
             });
         }
@@ -4507,6 +4640,7 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    source: None,
                 },
             });
         }
@@ -5279,6 +5413,7 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
+            ui.editing = None;
         }
         let me = self.me_member();
         let handle = self.me_handle();
@@ -6230,6 +6365,30 @@ impl AppState {
         cx.notify();
     }
 
+    /// Save an in-place edit of an own message's text (no new send). Peers see
+    /// the updated body via room sync, same as the iPhone's `editMessage`.
+    pub fn edit_message(
+        &mut self,
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let trimmed = text.trim().to_string();
+        if message_id.is_empty() || trimmed.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::EditMessage {
+            chat_id: chat_id.clone(),
+            message_id,
+            text: trimmed,
+        });
+        if let Some(ui) = self.chat_ui.get_mut(&chat_id) {
+            ui.editing = None;
+        }
+        cx.notify();
+    }
+
     /// Bubble ⋯ / the card's × → Remove preview: the relay drops the message's link preview
     /// for everyone (`preview: "off"`); the card goes at once here, the row follows.
     pub fn remove_link_preview(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
@@ -6830,6 +6989,13 @@ impl AppState {
             _ => None,
         };
         if let ProfilePage::Agent { project_id } = &page {
+            // A connected agent's Details: a fresh "Connected · N s ago" (#2141).
+            if self
+                .project(project_id)
+                .is_some_and(|p| p.outside.is_some())
+            {
+                self.refresh_outside_status(project_id.clone());
+            }
             self.command(ClientCommand::ShellGrantsRefresh {
                 project_id: project_id.clone(),
             });
@@ -7337,6 +7503,7 @@ impl AppState {
             slot: self.selected_project.clone().unwrap_or_default(),
             forward_open: false,
             busy: None,
+            playing: None,
         });
         self.media_viewer_generation += 1;
         cx.notify();
@@ -7376,6 +7543,7 @@ impl AppState {
             slot,
             forward_open: false,
             busy: None,
+            playing: None,
         });
         self.media_viewer_generation += 1;
         self.ensure_viewer_pictures();
@@ -7398,6 +7566,7 @@ impl AppState {
         let last = viewer.items.len() as i32 - 1;
         let next = (viewer.index as i32 + delta).clamp(0, last.max(0));
         if next as usize != viewer.index {
+            viewer.playing = None;
             viewer.index = next as usize;
             self.ensure_viewer_pictures();
             cx.notify();
@@ -7457,8 +7626,47 @@ impl AppState {
         cx.notify();
     }
 
-    /// Viewer → Play / Quick Look: fetch the bytes to a temp file and hand them
-    /// to macOS (`qlmanage -p` for files, `open` for video → QuickTime Player).
+    /// A Library row's Copy ([feedback copy-image-messages-mac-2026-10-27]): the
+    /// picture or file of that row, from the slot its chat's blobs live in (its
+    /// project, or the people chat itself; a channel row falls back to the selected space).
+    pub fn copy_viewer_item(&mut self, item: &ViewerItem, cx: &mut Context<Self>) {
+        let known = self
+            .chats
+            .values()
+            .any(|tabs| tabs.iter().any(|c| c.id == item.chat_id));
+        let slot = if known {
+            self.space_of_chat(&item.chat_id)
+        } else {
+            match self.selected_project.clone() {
+                Some(p) => p,
+                None => return,
+            }
+        };
+        let attachment = item.attachment.clone();
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
+    /// Viewer → Copy (the pill, or ⌘C while the viewer is up): the open picture or
+    /// file on the pasteboard, original bytes under their own type
+    /// ([feedback copy-image-messages-mac-2026-10-27]).
+    pub fn media_viewer_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index) else {
+            return;
+        };
+        if item.picture_url.is_some() || viewer.forward_open {
+            return;
+        }
+        let (slot, attachment) = (viewer.slot.clone(), item.attachment.clone());
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
+    /// Viewer → Play / Quick Look: fetch the bytes to a temp file. Files open
+    /// in Quick Look; videos play inline in the viewer on macOS (AVPlayerView)
+    /// instead of handing off to QuickTime ([feedback
+    /// app-01M6147S9TPNBQA7KSDEY0K8C4]).
     pub fn media_viewer_open_external(&mut self, cx: &mut Context<Self>) {
         let Some(viewer) = self.media_viewer.as_mut() else {
             return;
@@ -7472,10 +7680,14 @@ impl AppState {
         if key.starts_with("local:") || viewer.busy.is_some() {
             return;
         }
+        if viewer.playing.is_some() && item.attachment.kind() == AttachmentKind::Video {
+            return;
+        }
         let quick_look = item.attachment.kind() != AttachmentKind::Video;
         let name = item.attachment.name.clone();
         let project_id = viewer.slot.clone();
         viewer.busy = Some(key.clone());
+        viewer.playing = None;
         self.command(ClientCommand::OpenAttachment {
             project_id,
             key,
@@ -7853,6 +8065,39 @@ impl AppState {
         let Some(project) = self.project(&project_id) else {
             return;
         };
+        // A message in a group (people group, shared project chat): the banner is titled
+        // with the group and the sender moves into the body — "Arbonites" / "Doug: Five." —
+        // with the group's picture; the same shape as the iPhone and the relay's APNs payload
+        // (Jacob 2026-10-27: "cannot tell which group a message came from"). A DM keeps the
+        // sender as the title.
+        let group = (kind.is_message() && project.is_groupish() && sender.is_some()).then(|| {
+            (
+                project.name.clone(),
+                project
+                    .image_url
+                    .as_deref()
+                    .and_then(|u| self.person_notification_png(u))
+                    .or_else(|| {
+                        crate::ui::avatars::notification_png(
+                            &project.id,
+                            &project.name,
+                            project.avatar_color_index,
+                            crate::ui::theme::system_is_dark(),
+                        )
+                    }),
+            )
+        });
+        let (detail, sender, image) = match group {
+            Some((group_name, group_image)) => {
+                let (title, body) = notify::group_frame(
+                    &group_name,
+                    sender.as_deref().unwrap_or_default(),
+                    &detail,
+                );
+                (body, Some(title), group_image.or(image))
+            }
+            None => (detail, sender, image),
+        };
         let mut event = NotifyEvent::new(project.id.clone(), project.name.clone(), kind, detail);
         event.chat_id = chat_id.map(str::to_string);
         event.sender = sender;
@@ -8183,16 +8428,16 @@ impl AppState {
         } else {
             format!("@{}", sender.handle)
         };
+        // Same shape as a group banner: title = where ("Server › #channel"), body = "Sender: text".
+        let (banner_title, body) = notify::channel_frame(server_name, channel_name, &title, text);
         let mut event = NotifyEvent::new(
             key,
             server_name.to_string(),
             NotifyKind::DirectMessage,
-            text.filter(|t| !t.is_empty())
-                .map(|t| format!("#{channel_name}: {t}"))
-                .unwrap_or_else(|| format!("#{channel_name}: new message")),
+            body,
         );
         event.chat_id = Some(room_id.to_string());
-        event.sender = Some(title);
+        event.sender = Some(banner_title);
         event.image = if sender.kind == "agent" {
             crate::ui::avatars::notification_png(
                 &sender.id,
@@ -8300,6 +8545,9 @@ impl AppState {
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.window_active != active {
             self.window_active = active;
+            if active {
+                self.became_active_at = now_ms();
+            }
             self.sync_focus();
             if active {
                 if let Some(room_id) = self
@@ -9616,6 +9864,84 @@ impl AppState {
         cx.notify();
     }
 
+    /// Connect an outside agent (#2141): the relay makes the project and mints the key; the
+    /// reveal sheet opens on [`SyncEvent::OutsideAgentKey`].
+    pub fn connect_agent(
+        &mut self,
+        name: String,
+        transport: &str,
+        avatar_color_index: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        self.connect_open = false;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::ConnectAgent {
+            name,
+            transport: transport.to_owned(),
+            avatar_color_index,
+        });
+        self.push_notice("Connecting…");
+        cx.notify();
+    }
+
+    /// While the reveal sheet is up, ask the relay every 3 s whether the agent has checked in.
+    fn poll_connect_status(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.connect_reveal.as_ref().map(|r| r.project_id.clone()) else {
+            return;
+        };
+        self.command(ClientCommand::OutsideAgentStatus {
+            project_id: project_id.clone(),
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let go = this.update(cx, |state, _| match state.connect_reveal.as_ref() {
+                Some(r) if r.project_id == project_id => {
+                    state.command(ClientCommand::OutsideAgentStatus {
+                        project_id: project_id.clone(),
+                    });
+                    true
+                }
+                _ => false,
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Done / × on the reveal sheet: the key is gone from the screen; open the agent's chat.
+    pub fn close_connect_reveal(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.connect_reveal.take() {
+            if !r.rotated {
+                if let Some(p) = self.projects.iter().find(|p| p.id == r.project_id) {
+                    let id = p.id.clone();
+                    self.select_project(id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Details pane → Key → Rotate key…: a fresh key, the old one stops at once.
+    pub fn rotate_outside_key(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRotate { project_id });
+        cx.notify();
+    }
+
+    /// Details pane → Key → Revoke access.
+    pub fn revoke_outside_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRevoke { project_id });
+        cx.notify();
+    }
+
+    /// Details pane: refresh the connection line when the pane opens on an outside agent.
+    pub fn refresh_outside_status(&mut self, project_id: Id) {
+        self.command(ClientCommand::OutsideAgentStatus { project_id });
+    }
+
     /// Grok / iPhone "Fork": a new agent with the same look and workspace
     /// context (files + memory). Own agents only; chat history stays empty.
     pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -9814,6 +10140,135 @@ impl AppState {
             key,
             save,
         });
+        cx.notify();
+    }
+
+    /// Copy of a whole message — the bubble menu, control-click, ⌘C on a whole
+    /// bubble ([feedback copy-image-messages-mac-2026-10-27]): its body
+    /// (`Message::body`, the accessor Forward reads too) as [`crate::pasteboard`] lays
+    /// it out. Words alone land at once; a message with pictures or files first fetches
+    /// their original bytes from the relay (never the thumbnail) and writes the
+    /// pasteboard when they are in. Says what happened when nothing could be copied.
+    pub fn copy_message(&mut self, chat_id: &Id, message_id: &Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == *message_id))
+        else {
+            return;
+        };
+        let Some(body) = message.body() else {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        };
+        let slot = self.space_of_chat(chat_id);
+        self.copy_body(slot, body, cx);
+    }
+
+    /// Copy of one attachment on its own — the media viewer's Copy, the Library's
+    /// row menu: the picture (or file) without the message's words.
+    pub fn copy_attachment(&mut self, slot: Id, attachment: &Attachment, cx: &mut Context<Self>) {
+        if !attachment.is_on_relay() {
+            self.push_notice(if attachment.is_uploading() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        }
+        let body = MessageBody {
+            text: String::new(),
+            attachments: vec![attachment.clone()],
+            charts: Vec::new(),
+        };
+        self.copy_body(slot, body, cx);
+    }
+
+    fn copy_body(&mut self, slot: Id, body: MessageBody, cx: &mut Context<Self>) {
+        if body.attachments.is_empty() {
+            let items =
+                crate::pasteboard::plan(&body.text, &[], &crate::pasteboard::copied_files_dir());
+            crate::pasteboard::write(&items, cx);
+            self.copy_request = None;
+            return;
+        }
+        self.copy_request_seq += 1;
+        let request = self.copy_request_seq;
+        let keys: Vec<String> = body
+            .attachments
+            .iter()
+            .filter_map(|a| a.blob_ref.clone())
+            .collect();
+        self.copy_request = Some(CopyRequest { id: request, body });
+        self.command(ClientCommand::FetchCopyBlobs {
+            project_id: slot,
+            request,
+            keys,
+        });
+        cx.notify();
+    }
+
+    /// The blobs of a Copy came back: lay the items out and write the pasteboard.
+    fn finish_copy(
+        &mut self,
+        request: u64,
+        blobs: Vec<Option<crate::sync::CopyBlob>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.copy_request.take_if(|p| p.id == request) else {
+            return;
+        };
+        let fetched: Vec<crate::pasteboard::Fetched> = pending
+            .body
+            .attachments
+            .iter()
+            .zip(blobs)
+            .filter_map(|(attachment, blob)| {
+                let blob = blob?;
+                // The relay's content-type unless it is the generic one; then the row's.
+                let generic =
+                    blob.mime.is_empty() || blob.mime.starts_with("application/octet-stream");
+                Some(crate::pasteboard::Fetched {
+                    name: attachment.name.clone(),
+                    mime: if generic {
+                        attachment.mime.clone()
+                    } else {
+                        blob.mime.clone()
+                    },
+                    bytes: blob.bytes.as_ref().clone(),
+                })
+            })
+            .collect();
+        let missing = pending.body.attachments.len() - fetched.len();
+        let items = crate::pasteboard::plan(
+            &pending.body.text,
+            &fetched,
+            &crate::pasteboard::copied_files_dir(),
+        );
+        let written = crate::pasteboard::write(&items, cx);
+        if !written {
+            self.push_notice("Couldn't copy — the picture didn't download. Try again.");
+        } else if missing > 0 {
+            self.push_notice(if missing == 1 {
+                "Copied — one picture didn't download".to_owned()
+            } else {
+                format!("Copied — {missing} pictures didn't download")
+            });
+        } else {
+            let pictures = fetched.len();
+            self.push_notice(match (pictures, pending.body.text.is_empty()) {
+                (1, true) => "Copied the picture".to_owned(),
+                (1, false) => "Copied the picture and its text".to_owned(),
+                (n, true) => format!("Copied {n} pictures"),
+                (n, false) => format!("Copied {n} pictures and the text"),
+            });
+        }
         cx.notify();
     }
 
@@ -11205,14 +11660,19 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → BGRA frame for GPUI (`RenderImage` is BGRA).
+/// PNG/JPEG/GIF/WebP/ICO → BGRA frame(s) for GPUI (`RenderImage` is BGRA).
+/// GIF and animated WebP keep every frame (capped); other formats stay one frame.
 pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
-    decode_rgba(bytes).and_then(bgra_frame)
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => bgra_frames(frames),
+        DecodedPixels::Still(rgba) => bgra_frame(rgba),
+    }
 }
 
 /// Decode `bytes` for a small tile: the longer side shrinks to `max_side`
 /// device pixels (never enlarged). The composer's staged thumbnails use it so
 /// a pasted Retina screenshot does not sit in GPU memory at full size.
+/// Animated GIF/WebP use the first frame only (the tile does not animate).
 pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
     let img = decode_rgba(bytes)?;
     // A macOS window capture (⌘⇧4 + space, "Copy") is the window plus its
@@ -11288,13 +11748,22 @@ pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
 /// must not become a white band in the bubble). The viewer shows the untrimmed
 /// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
 /// scroll without holding full-resolution textures.
+/// Animated GIF/WebP skip the trim (every frame must stay aligned) and return
+/// a multi-frame [`RenderImage`].
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
-    let rgba = decode_rgba(bytes)?;
-    let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
-        .map(downscale_for_chat);
-    let full = bgra_frame(downscale_for_chat(rgba))?;
-    Some((full, trimmed.and_then(bgra_frame)))
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => {
+            let full = bgra_frames(frames)?;
+            Some((full, None))
+        }
+        DecodedPixels::Still(rgba) => {
+            let trimmed = trim_rect(&rgba)
+                .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+                .map(downscale_for_chat);
+            let full = bgra_frame(downscale_for_chat(rgba))?;
+            Some((full, trimmed.and_then(bgra_frame)))
+        }
+    }
 }
 
 /// Where the content of `img` sits once a uniform border is removed:
@@ -11362,20 +11831,120 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
     Some((left, top, cw, ch))
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels.
+/// Cap on GIF/WebP frames kept for a chat bubble (feedback
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG). Past this, only the first frame is shown.
+pub const ANIM_MAX_FRAMES: usize = 300;
+/// Cap on decoded RGBA bytes across all frames. Past this, only the first frame.
+pub const ANIM_MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
+
+/// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
+enum DecodedPixels {
+    Still(image::RgbaImage),
+    Animated(Vec<image::Frame>),
+}
+
+/// GIF87a / GIF89a magic.
+fn looks_like_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF8")
+}
+
+/// RIFF....WEBP magic.
+fn looks_like_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+}
+
+/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels (first / only frame). Used by thumbnails
+/// and the still path for formats that are not GIF/WebP.
 fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     Some(image::load_from_memory(bytes).ok()?.into_rgba8())
 }
 
-/// RGBA pixels → the BGRA frame GPUI draws.
-fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+/// Decode `bytes`: multi-frame for GIF/animated WebP, still otherwise.
+fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    if looks_like_gif(bytes) || looks_like_webp(bytes) {
+        // A still WebP (or a GIF the animation decoder rejects) falls back to
+        // the single-frame path so the bubble still shows something.
+        return decode_animation_pixels(bytes)
+            .or_else(|| decode_rgba(bytes).map(DecodedPixels::Still));
+    }
+    Some(DecodedPixels::Still(decode_rgba(bytes)?))
+}
+
+/// All frames of a GIF or WebP, each scaled to [`CHAT_IMAGE_MAX_SIDE`]. A still
+/// WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`]. Over the
+/// frame or memory cap → first frame only.
+fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    let frames_iter: Box<dyn Iterator<Item = image::ImageResult<image::Frame>>> =
+        if looks_like_gif(bytes) {
+            let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        } else {
+            let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        };
+
+    let mut frames: Vec<image::Frame> = Vec::new();
+    let mut decoded_bytes: usize = 0;
+    for result in frames_iter {
+        let frame = result.ok()?;
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let scaled = downscale_for_chat(frame.into_buffer());
+        let (w, h) = scaled.dimensions();
+        let frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if frames.len() >= ANIM_MAX_FRAMES
+            || decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES
+        {
+            // Cap hit: keep only the first frame as a still.
+            return frames
+                .into_iter()
+                .next()
+                .map(|f| DecodedPixels::Still(f.into_buffer()))
+                .or(Some(DecodedPixels::Still(scaled)));
+        }
+        decoded_bytes += frame_bytes;
+        frames.push(image::Frame::from_parts(scaled, left, top, delay));
+    }
+    match frames.len() {
+        0 => None,
+        1 => Some(DecodedPixels::Still(
+            frames.into_iter().next()?.into_buffer(),
+        )),
+        _ => Some(DecodedPixels::Animated(frames)),
+    }
+}
+
+/// RGBA pixels → BGRA (swap R/B in place).
+fn rgba_to_bgra(img: image::RgbaImage) -> Option<image::RgbaImage> {
     let (w, h) = img.dimensions();
     let mut raw = img.into_raw();
     for px in raw.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    let buffer = image::RgbaImage::from_raw(w, h, raw)?;
+    image::RgbaImage::from_raw(w, h, raw)
+}
+
+/// RGBA pixels → the BGRA frame GPUI draws.
+fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+    let buffer = rgba_to_bgra(img)?;
     Some(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+/// Many RGBA frames → one multi-frame BGRA [`RenderImage`] (delays kept).
+fn bgra_frames(frames: Vec<image::Frame>) -> Option<RenderImage> {
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let buffer = rgba_to_bgra(frame.into_buffer())?;
+        out.push(image::Frame::from_parts(buffer, left, top, delay));
+    }
+    Some(RenderImage::new(out))
 }
 
 fn same_shape(a: &Message, b: &Message) -> bool {
@@ -12040,6 +12609,105 @@ mod chat_image_scale_tests {
         // Aspect ≈ 3024/1964.
         let ratio = w as f32 / h as f32;
         assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod animated_image_tests {
+    //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+    use super::{decode_image, decode_image_pair, ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    fn three_color_frames() -> Vec<Frame> {
+        [
+            ([255, 0, 0, 255], 100u32),
+            ([0, 255, 0, 255], 100),
+            ([0, 0, 255, 255], 100),
+        ]
+        .into_iter()
+        .map(|(c, ms)| {
+            Frame::from_parts(
+                RgbaImage::from_pixel(8, 8, Rgba(c)),
+                0,
+                0,
+                Delay::from_numer_denom_ms(ms, 1),
+            )
+        })
+        .collect()
+    }
+
+    fn encode_gif(frames: Vec<Frame>) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(Cursor::new(&mut out));
+            enc.encode_frames(frames).expect("gif encode");
+        }
+        out
+    }
+
+    fn encode_webp_anim(frames: Vec<Frame>) -> Vec<u8> {
+        // image::codecs::webp::WebPEncoder is still-only; build via the
+        // `image-webp` path used by the decoder tests — encode a GIF and
+        // re-wrap is not WebP. Use the fixture bytes for WebP instead.
+        let _ = frames;
+        include_bytes!("../../arbos-core/fixtures/anim_three.webp").to_vec()
+    }
+
+    #[test]
+    fn a_three_frame_gif_keeps_every_frame() {
+        let bytes = encode_gif(three_color_frames());
+        let image = decode_image(&bytes).expect("gif decodes");
+        assert_eq!(image.frame_count(), 3);
+        let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
+        assert_eq!(full.frame_count(), 3);
+        assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn an_animated_webp_keeps_every_frame() {
+        let bytes = encode_webp_anim(three_color_frames());
+        let image = decode_image(&bytes).expect("webp decodes");
+        assert_eq!(image.frame_count(), 3);
+    }
+
+    #[test]
+    fn a_still_webp_and_a_png_are_one_frame() {
+        let still_webp = include_bytes!("../../arbos-core/fixtures/still.webp");
+        assert_eq!(
+            decode_image(still_webp).expect("still webp").frame_count(),
+            1
+        );
+        let png = include_bytes!("../../arbos-core/fixtures/anim_still.png");
+        assert_eq!(decode_image(png).expect("png").frame_count(), 1);
+    }
+
+    #[test]
+    fn past_the_frame_cap_falls_back_to_the_first_frame() {
+        // Many tiny frames: the decoder stops at ANIM_MAX_FRAMES and returns
+        // only the first as a still.
+        let delay = Delay::from_numer_denom_ms(20, 1);
+        let frames: Vec<Frame> = (0..(ANIM_MAX_FRAMES + 5))
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(2, 2, Rgba([c, 0, 0, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(
+            image.frame_count(),
+            1,
+            "over {ANIM_MAX_FRAMES} frames → first only"
+        );
+        // Memory cap is the sibling of the frame cap (same fallback path).
+        let _ = ANIM_MAX_DECODED_BYTES;
     }
 }
 

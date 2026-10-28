@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
-    ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point,
-    Render, RenderImage, Role as AriaRole, SharedString, Stateful, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, deferred, div, fill, img, point, prelude::*, px, relative, size, App, Bounds,
+    ClipboardEntry, ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PaintQuad, Pixels, Point, Render, RenderImage, Role as AriaRole, ScrollWheelEvent,
+    SharedString, Stateful, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -33,9 +34,9 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
     TEXT_SMALL, TEXT_TINY,
@@ -202,6 +203,11 @@ pub enum ComposerEvent {
         reply_to: Option<String>,
         mentions: Vec<String>,
     },
+    /// Save an in-place edit of an own message (no new bubble).
+    Edit {
+        message_id: String,
+        text: String,
+    },
     Stop,
 }
 
@@ -234,6 +240,10 @@ pub struct ComposerInput {
     chip_cursor: CursorStyle,
     /// Vertical scroll inside the box once it reaches `MAX_LINES`.
     scroll_y: f32,
+    /// Caret offset we last scrolled into view. Wheel scroll leaves this
+    /// alone so the user can read earlier lines without the caret yanking
+    /// the viewport back; the next caret move follows again.
+    last_followed_caret: Option<usize>,
     /// Prior text states for ⌘Z (paste, word-delete, typing, cut).
     undo_stack: Vec<EditSnapshot>,
     /// States undone by ⌘Z, waiting for ⌘⇧Z.
@@ -295,6 +305,7 @@ impl ComposerInput {
             #[cfg(test)]
             chip_cursor: CursorStyle::Arrow,
             scroll_y: 0.0,
+            last_followed_caret: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             on_submit: None,
@@ -534,6 +545,7 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.last_followed_caret = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
         cx.notify();
@@ -570,6 +582,7 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.last_followed_caret = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
         cx.notify();
@@ -1096,7 +1109,10 @@ impl ComposerInput {
     /// drop ([feedback desktop-paste-2026-10-23]). Fields without an owner
     /// hook (search, names, secrets) keep text only.
     pub(crate) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
+        // Every pasteboard item, pictures and text alike — gpui's reader stops at the
+        // first item's text, so a copied picture-with-caption pasted as words only
+        // ([feedback copy-image-messages-mac-2026-10-27]).
+        let Some(item) = crate::pasteboard::read(cx) else {
             return;
         };
         let pasted = Pasted::from_clipboard(&item);
@@ -1180,6 +1196,45 @@ impl ComposerInput {
         }
     }
 
+    /// Wheel / trackpad over a tall field: scroll the text. When the field is
+    /// not overflowing (or the gesture is already at the edge), leave the
+    /// event alone so the chat column can still scroll the transcript
+    /// ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let lh = px(INPUT_LINE_HEIGHT);
+        let total_h: f32 = layout
+            .lines
+            .iter()
+            .map(|(_, line)| f32::from(line.size(lh).height))
+            .sum();
+        let visible_h = f32::from(layout.bounds.size.height);
+        let max_scroll = (total_h - visible_h).max(0.0);
+        if max_scroll <= 0.0 {
+            return;
+        }
+        let dy = f32::from(event.delta.pixel_delta(lh).y);
+        if dy == 0.0 {
+            return;
+        }
+        // Positive delta = scroll up (toward earlier lines), same as the
+        // transcript wheel handler: lower scroll_y to reveal content above.
+        let next = (self.scroll_y - dy).clamp(0.0, max_scroll);
+        if (next - self.scroll_y).abs() < f32::EPSILON {
+            return;
+        }
+        self.scroll_y = next;
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.caret_downstream = false;
@@ -1201,9 +1256,19 @@ impl ComposerInput {
         let Some(layout) = self.layout.as_ref() else {
             return 0;
         };
+        // Paint shifts lines by -scroll_y; hit-test against that same origin
+        // so a click on the visible top line lands on the scrolled content,
+        // not on line 0 of the buffer.
+        let origin = Bounds::new(
+            point(
+                layout.bounds.left(),
+                layout.bounds.top() - px(self.scroll_y),
+            ),
+            layout.bounds.size,
+        );
         let ix = index_for_position(
             &layout.lines,
-            layout.bounds,
+            origin,
             position,
             self.content.len(),
             self.text_center,
@@ -1692,10 +1757,17 @@ impl EntityInputHandler for ComposerInput {
         } else {
             self.marked_range = None;
         }
+        // `new_selected_range_utf16` is relative to the newly marked text (Apple
+        // setMarkedText selectedRange), not the whole document. Map it onto the
+        // insertion in UTF-16, then convert to UTF-8 byte offsets.
+        let insertion_start_utf16 = self.offset_to_utf16(range.start);
+        let inserted_length_utf16 = new_text.encode_utf16().count();
         self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|selected| {
+                let start = insertion_start_utf16 + selected.start.min(inserted_length_utf16);
+                let end = insertion_start_utf16 + selected.end.min(inserted_length_utf16);
+                self.range_from_utf16(&(start..end))
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         cx.notify();
     }
@@ -1927,13 +1999,16 @@ impl Element for InputElement {
         }
 
         // Keep the caret inside the visible box once the text is taller than
-        // MAX_LINES; everything below is painted shifted by -scroll_y.
+        // MAX_LINES — but only when the caret moved. A wheel scroll must be
+        // able to leave the caret off-screen so the user can read and click
+        // earlier lines ([feedback app-01M5WNET9M9JY4D7W5YAZG2685]).
         let total_h: f32 = lines
             .iter()
             .map(|(_, l)| f32::from(l.size(lh).height))
             .sum();
         let visible_h = f32::from(bounds.size.height);
         let mut scroll_y = input.scroll_y;
+        let follow_caret = input.last_followed_caret != Some(cursor);
         let cursor_pos = if content.is_empty() {
             let ox = lines
                 .first()
@@ -1955,12 +2030,14 @@ impl Element for InputElement {
                 input.caret_downstream,
             )
         };
-        if let Some(p) = cursor_pos {
-            let cy = f32::from(p.y);
-            if cy < scroll_y {
-                scroll_y = cy;
-            } else if cy + f32::from(lh) > scroll_y + visible_h {
-                scroll_y = cy + f32::from(lh) - visible_h;
+        if follow_caret {
+            if let Some(p) = cursor_pos {
+                let cy = f32::from(p.y);
+                if cy < scroll_y {
+                    scroll_y = cy;
+                } else if cy + f32::from(lh) > scroll_y + visible_h {
+                    scroll_y = cy + f32::from(lh) - visible_h;
+                }
             }
         }
         scroll_y = scroll_y.clamp(0.0, (total_h - visible_h).max(0.0));
@@ -2233,6 +2310,9 @@ impl Element for InputElement {
                 chips: chip_rects,
             });
             input.scroll_y = scroll_y;
+            // Remember the caret we just (or previously) kept in view so a
+            // later wheel scroll is not undone on the next frame.
+            input.last_followed_caret = Some(input.cursor_offset());
         });
         // First layout after a width change, a big insert, or a programmatic
         // `set_text`: re-layout once more with the measured height. A notify is
@@ -2561,6 +2641,7 @@ impl Render for ComposerInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .line_height(px(INPUT_LINE_HEIGHT))
             .text_size(px(self.font_size))
             .child(InputElement { input: cx.entity() })
@@ -2801,6 +2882,26 @@ impl Composer {
                     cx.notify();
                     return;
                 }
+                // Editing an own message: save in place — no new bubble, no Guide.
+                let editing = self.state.read(cx).active_chat_id().and_then(|cid| {
+                    self.state
+                        .read(cx)
+                        .chat_ui
+                        .get(&cid)
+                        .and_then(|ui| ui.editing.clone())
+                });
+                if let Some(message_id) = editing {
+                    if text.is_empty() {
+                        self.nudge_at = Some(crate::model::now_ms());
+                        cx.notify();
+                        return;
+                    }
+                    self.attachments.clear();
+                    self.input.update(cx, |input, cx| input.clear(cx));
+                    cx.emit(ComposerEvent::Edit { message_id, text });
+                    cx.notify();
+                    return;
+                }
                 let running = self
                     .state
                     .read(cx)
@@ -2912,7 +3013,7 @@ impl Composer {
             .role(AriaRole::Button)
             .aria_label(STAGED_REMOVE_LABEL)
             .tooltip(|_, cx| cx.new(|_| TextTip(STAGED_REMOVE_LABEL.into())).into())
-            .child(icon("xmark", 9.0, gpui::white()))
+            .child(sf_symbols::glyph("xmark", 9.0, gpui::white()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.remove_attachment(i, cx);
@@ -2963,7 +3064,7 @@ impl Composer {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon(
+                        .child(sf_symbols::glyph(
                             if is_image_path(&staged.path) {
                                 "photo"
                             } else {
@@ -2996,7 +3097,10 @@ impl Composer {
                         ),
                 ),
         };
-        tile.child(ring).child(remove)
+        // Deferred: inside the Glass card's frosted paint layer every primitive
+        // shares one order and sprites draw over quads, so the picture would
+        // cover the ring and the disc; a deferred draw paints after the layer.
+        tile.child(deferred(ring)).child(deferred(remove))
     }
 
     /// Drop staged file `i`; the others and the typed text stay.
@@ -3580,9 +3684,9 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
-                .child(icon(
+                .child(sf_symbols::glyph(
                     glyph,
-                    if glyph == "stop" { 14.0 } else { 16.0 },
+                    if glyph == "stop.fill" { 14.0 } else { 16.0 },
                     if action == ButtonAction::StopMemo {
                         gpui::white()
                     } else if red {
@@ -3636,7 +3740,7 @@ impl Render for Composer {
                 theme.surface_2
             })
             .hover(|s| s.opacity(0.88))
-            .child(icon(
+            .child(sf_symbols::glyph(
                 "mic",
                 16.0,
                 if recording {
@@ -3676,7 +3780,7 @@ impl Render for Composer {
             .justify_center()
             .cursor_pointer()
             .map(|el| highlight::washed(el, theme.surface_2, &theme))
-            .child(icon("plus", 16.0, theme.text_muted))
+            .child(sf_symbols::glyph("plus", 16.0, theme.text_muted))
             .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
         let field_body = if recording {
@@ -3691,7 +3795,7 @@ impl Render for Composer {
                 .rounded_full()
                 .cursor_pointer()
                 .map(|el| highlight::button(el, &theme))
-                .child(icon("xmark", 11.0, theme.text_muted))
+                .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.update(cx, |v, cx| v.cancel_memo(cx));
                 }));
@@ -3704,7 +3808,10 @@ impl Render for Composer {
                 .gap(px(8.0))
                 .pl(px(6.0))
                 .child(discard)
-                .child(render_recording_row(self.voice.read(cx), &theme))
+                .child({
+                    let mark = crate::ui::working::glyph(&theme, cx);
+                    render_recording_row(self.voice.read(cx), &theme, mark)
+                })
         } else {
             div()
                 .flex_1()
@@ -3824,39 +3931,33 @@ impl Render for Composer {
                 this.delete_key_on_strip(cx);
             }));
 
-        // Reply preview (iPhone parity): set by the hover reply icon / the
-        // bubble menu on a message. Always one fixed-height row, whatever
-        // the quoted message's length ([feedback reply-preview-fixed-height]).
+        // Reply / Editing preview (iPhone parity): set by the hover reply icon
+        // or the bubble menu. Always one fixed-height row, whatever the quoted
+        // message's length ([feedback reply-preview-fixed-height]). Editing
+        // takes the same slot and wins over reply (ChatView.swift).
         if let Some(chat_id) = self.state.read(cx).active_chat_id() {
-            let (reply_id, reply_ref) = {
+            let (editing_id, reply_id, reply_ref) = {
                 let state = self.state.read(cx);
                 let ui = state.chat_ui.get(&chat_id);
                 (
+                    ui.and_then(|ui| ui.editing.clone()),
                     ui.and_then(|ui| ui.reply_to.clone()),
                     ui.and_then(|ui| ui.reply_ref.clone()),
                 )
             };
-            // Reply in DM arms a cross-chat reply: "Replying to Jacob in
-            // Arbonites" + the snapshot the row will carry (#1835).
-            let preview = match (reply_id, reply_ref) {
-                (_, Some(r)) => Some(ReplyPreview::for_reply_ref(&r)),
-                (Some(reply_id), None) => {
+            if let Some(editing_id) = editing_id {
+                let line = {
                     let state = self.state.read(cx);
-                    Some(
-                        state
-                            .messages
-                            .get(&chat_id)
-                            .and_then(|list| list.iter().find(|m| m.id == reply_id))
-                            .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
-                            .unwrap_or_else(ReplyPreview::missing),
-                    )
-                }
-                (None, None) => None,
-            };
-            if let Some(preview) = preview {
+                    state
+                        .messages
+                        .get(&chat_id)
+                        .and_then(|list| list.iter().find(|m| m.id == editing_id))
+                        .map(|m| transcript::message_line(m, REPLY_PREVIEW_CHARS))
+                        .unwrap_or_default()
+                };
                 let clear_chat = chat_id.clone();
                 let clear = div()
-                    .id("composer-reply-clear")
+                    .id("composer-edit-clear")
                     .size(px(18.0))
                     .flex_shrink_0()
                     .flex()
@@ -3865,12 +3966,49 @@ impl Render for Composer {
                     .rounded_full()
                     .cursor_pointer()
                     .map(|el| highlight::button(el, &theme))
-                    .child(icon("xmark", 10.0, theme.text_muted))
+                    .child(sf_symbols::glyph("xmark", 10.0, theme.text_muted))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state
-                            .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                            .update(cx, |s, cx| s.clear_editing(&clear_chat, cx));
                     }));
-                column = column.child(reply_preview_bar(&preview, &theme, clear));
+                column = column.child(edit_preview_bar(&line, &theme, clear));
+            } else {
+                // Reply in DM arms a cross-chat reply: "Replying to Jacob in
+                // Arbonites" + the snapshot the row will carry (#1835).
+                let preview = match (reply_id, reply_ref) {
+                    (_, Some(r)) => Some(ReplyPreview::for_reply_ref(&r)),
+                    (Some(reply_id), None) => {
+                        let state = self.state.read(cx);
+                        Some(
+                            state
+                                .messages
+                                .get(&chat_id)
+                                .and_then(|list| list.iter().find(|m| m.id == reply_id))
+                                .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
+                                .unwrap_or_else(ReplyPreview::missing),
+                        )
+                    }
+                    (None, None) => None,
+                };
+                if let Some(preview) = preview {
+                    let clear_chat = chat_id.clone();
+                    let clear = div()
+                        .id("composer-reply-clear")
+                        .size(px(18.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .map(|el| highlight::button(el, &theme))
+                        .child(sf_symbols::glyph("xmark", 10.0, theme.text_muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state
+                                .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                        }));
+                    column = column.child(reply_preview_bar(&preview, &theme, clear));
+                }
             }
         }
 
@@ -3949,9 +4087,9 @@ enum ButtonAction {
 impl ButtonAction {
     fn glyph(self) -> &'static str {
         match self {
-            ButtonAction::Send => "arrow-up",
+            ButtonAction::Send => "arrow.up",
             ButtonAction::Guide => "",
-            ButtonAction::Stop | ButtonAction::StopMemo => "stop",
+            ButtonAction::Stop | ButtonAction::StopMemo => "stop.fill",
             ButtonAction::Call => "phone",
         }
     }
@@ -4100,6 +4238,49 @@ impl ReplyPreview {
     }
 }
 
+/// Same height/shape as the reply preview: pencil, "Editing", one truncated
+/// line, × (iPhone `ChatView.editPreview`).
+pub fn edit_preview_bar(line: &str, theme: &Theme, clear: impl IntoElement) -> gpui::Stateful<Div> {
+    div()
+        .id("composer-edit")
+        .debug_selector(|| "composer-edit".into())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .w_full()
+        .h(px(REPLY_PREVIEW_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .px(px(14.0))
+        .rounded(px(14.0))
+        .bg(theme.bubble_assistant)
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(sf_symbols::glyph("pencil", 12.0, theme.text_muted)),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Editing"),
+        )
+        .child(
+            div()
+                .id("composer-edit-line")
+                .debug_selector(|| "composer-edit-line".into())
+                .flex_1()
+                .min_w_0()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text)
+                .truncate()
+                .child(line.to_owned()),
+        )
+        .child(clear)
+}
+
 /// The fixed-height reply preview row above the field: full composer width
 /// (same edges as the message field — Jacob, Oct 21; Grok keeps bars flush),
 /// [`REPLY_PREVIEW_HEIGHT`] tall, the quoted line on one line with the
@@ -4122,11 +4303,11 @@ pub fn reply_preview_bar(
         .px(px(14.0))
         .rounded(px(14.0))
         .bg(theme.bubble_assistant)
-        .child(
-            div()
-                .flex_shrink_0()
-                .child(icon("reply", 12.0, theme.text_muted)),
-        )
+        .child(div().flex_shrink_0().child(sf_symbols::glyph(
+            "arrowshape.turn.up.left",
+            12.0,
+            theme.text_muted,
+        )))
         .child(
             div()
                 .flex_shrink_0()
@@ -4415,7 +4596,7 @@ mod tests {
                 assert!(mic_mounted(has_text, true));
             }
         }
-        assert_eq!(ButtonAction::StopMemo.glyph(), "stop");
+        assert_eq!(ButtonAction::StopMemo.glyph(), "stop.fill");
     }
 
     #[test]
@@ -5825,6 +6006,18 @@ mod staged_tests {
         Entity<Composer>,
         &mut VisualTestContext,
     ) {
+        mount_on(crate::ui::theme::Surface::Matte, cx)
+    }
+
+    fn mount_on(
+        surface: crate::ui::theme::Surface,
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -5832,7 +6025,7 @@ mod staged_tests {
         let handle = rt.handle().clone();
         cx.update(|cx| {
             gpui_tokio::init_from_handle(cx, handle);
-            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            cx.set_global(Theme::dark(surface));
             if !cx.has_global::<PulseClock>() {
                 PulseClock::init(cx);
             }
@@ -5984,7 +6177,19 @@ mod staged_tests {
 
     #[gpui::test]
     fn the_strip_lays_the_tiles_out_as_pinned(cx: &mut TestAppContext) {
-        let (_rt, shell, composer, vcx) = mount(cx);
+        strip_layout_pins(crate::ui::theme::Surface::Matte, cx);
+    }
+
+    /// On Glass the card is a frosted paint layer; the ring and the disc are
+    /// deferred draws there (so they paint over the picture) and must still
+    /// land on the same pixels.
+    #[gpui::test]
+    fn the_strip_lays_the_tiles_out_as_pinned_on_glass(cx: &mut TestAppContext) {
+        strip_layout_pins(crate::ui::theme::Surface::Glass, cx);
+    }
+
+    fn strip_layout_pins(surface: crate::ui::theme::Surface, cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount_on(surface, cx);
         let (_dir, paths) = fixtures();
         stage(&composer, &paths, vcx);
         settle(&shell, vcx);

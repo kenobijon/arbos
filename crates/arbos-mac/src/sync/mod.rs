@@ -9,6 +9,7 @@
 
 pub mod agent_avatar;
 pub mod avatar_master;
+pub mod chat_send_queue;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -110,6 +111,25 @@ pub enum SyncEvent {
     /// No device token for this relay yet: show the pairing screen.
     NeedsPairing {
         relay_url: String,
+    },
+    /// An outside agent's key (#2141), shown once on the reveal sheet: after a connect or a
+    /// rotate.
+    OutsideAgentKey {
+        project_id: Id,
+        name: String,
+        transport: String,
+        key: String,
+        link: String,
+        relay_url: String,
+        /// The agent's 1:1 chat (connect only).
+        chat_id: Option<Id>,
+        rotated: bool,
+    },
+    /// The connection of an outside agent, polled while the reveal sheet is up and on the
+    /// Details pane.
+    OutsideAgentStatus {
+        project_id: Id,
+        info: crate::model::OutsideInfo,
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
@@ -349,14 +369,25 @@ pub enum SyncEvent {
     ThumbnailFailed {
         key: String,
     },
+    /// Copy of a message ([feedback copy-image-messages-mac-2026-10-27]): the original
+    /// bytes of every attachment `ClientCommand::FetchCopyBlobs` asked for, in the asked
+    /// order; a blob that could not be fetched is `None` in its slot. `request` is the
+    /// command's.
+    CopyBlobs {
+        request: u64,
+        blobs: Vec<Option<CopyBlob>>,
+    },
     /// An attachment landed in ~/Downloads (F10); the app reveals it.
     AttachmentSaved {
         path: PathBuf,
     },
     /// Play / Quick Look from the media viewer finished fetching `key` (handed
-    /// to macOS, or failed with a notice) — the viewer's spinner stops.
+    /// to macOS, or failed with a notice) — the viewer's spinner stops. `path`
+    /// is the temp file when the fetch wrote one (videos play from it inline
+    /// on macOS; [feedback app-01M6147S9TPNBQA7KSDEY0K8C4]).
     AttachmentOpened {
         key: String,
+        path: Option<PathBuf>,
     },
     /// Relay link state (S14), app-wide and coarse.
     Link(Link),
@@ -542,6 +573,15 @@ pub enum PictureSource {
     File(std::path::PathBuf),
     /// A blob the relay already stores under the project (a generated picture).
     Key(String),
+}
+
+/// One fetched attachment of a Copy (`SyncEvent::CopyBlobs`): the relay's `content-type`
+/// and the bytes as uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyBlob {
+    pub key: String,
+    pub mime: String,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -737,6 +777,12 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Replace an own message's text in the chat doc (`edit_message_text`).
+    EditMessage {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+    },
     /// Remove a message's link preview for everyone (`preview: "off"` on the row, the part
     /// dropped; the relay decides with the delete rule) ([feedback link-embeds-mac-2026-10-27]).
     RemoveLinkPreview {
@@ -891,6 +937,26 @@ pub enum ClientCommand {
     DeleteProject {
         project_id: Id,
     },
+    /// Connect an outside agent (#2141): `POST /outside-agents {name, transport}` →
+    /// [`SyncEvent::OutsideAgentKey`] (the key, shown once) and a registry refresh.
+    ConnectAgent {
+        name: String,
+        /// `acp` | `grok` | `custom`.
+        transport: String,
+        avatar_color_index: Option<u8>,
+    },
+    /// `GET /outside-agents/{id}` → [`SyncEvent::OutsideAgentStatus`].
+    OutsideAgentStatus {
+        project_id: Id,
+    },
+    /// `POST /outside-agents/{id}/rotate` → [`SyncEvent::OutsideAgentKey`] (fresh key).
+    OutsideAgentRotate {
+        project_id: Id,
+    },
+    /// `DELETE /outside-agents/{id}` (revoke the key; the agent stays) → status refresh.
+    OutsideAgentRevoke {
+        project_id: Id,
+    },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
     DeletePeopleChat {
         chat_id: Id,
@@ -964,6 +1030,15 @@ pub enum ClientCommand {
         project_id: Id,
         key: String,
     },
+    /// Copy of a message: the full original bytes of every attachment in `keys` (blob
+    /// slot `project_id`), answered together as `SyncEvent::CopyBlobs { request, .. }`
+    /// ([feedback copy-image-messages-mac-2026-10-27]). Never a thumbnail: the
+    /// pasteboard gets what the sender uploaded.
+    FetchCopyBlobs {
+        project_id: Id,
+        request: u64,
+        keys: Vec<String>,
+    },
     /// Fetch the site icon the bubbles draw before named links to `host`.
     FetchLinkIcon {
         host: String,
@@ -974,8 +1049,9 @@ pub enum ClientCommand {
         key: String,
         name: String,
     },
-    /// Media viewer: fetch `key` to a temp file and hand it to macOS — Quick
-    /// Look (`qlmanage -p`) for files, the default app (QuickTime Player) for video.
+    /// Media viewer: fetch `key` to a temp file. Files open in Quick Look
+    /// (`qlmanage -p`); videos play inline in the viewer on macOS (elsewhere
+    /// the default app) — [feedback app-01M6147S9TPNBQA7KSDEY0K8C4].
     OpenAttachment {
         project_id: Id,
         key: String,
