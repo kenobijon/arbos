@@ -227,6 +227,9 @@ struct ChatSession: View {
     /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
     @State private var confirmUnblock = false
     @State private var showSearch = false
+    /// The result row whose tap just closed the bar (one run-loop turn), so the transcript's
+    /// own close-on-tap steps aside ([feedback iphone-search-close-2026-10-28]).
+    @State private var searchResultTapped: Id?
     @State private var searchText = ""
     /// Group chats: pick members to call, or call everyone.
     @State private var showGroupCallPicker = false
@@ -407,7 +410,11 @@ struct ChatSession: View {
         searchFocused = false
         guard scrollToTail else { return }
         pinnedToBottom = true
-        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+        // After a zero-hit filter the stack was empty; let the unfiltered rows lay out
+        // before the jump to the tail, or the view stays parked at the top of nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        }
     }
 
     /// A tap on a search result ([feedback iphone-search-close-2026-10-28]): the bar and
@@ -415,6 +422,7 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
+        searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
     }
@@ -1958,8 +1966,20 @@ struct ChatSession: View {
             .onTapGesture {
                 composerFocused = false
                 searchFocused = false
-                if ChatSearchClose.tapOutsideCloses(open: showSearch) { closeSearch() }
             }
+            // Simultaneous, so a tap on a bubble (rows have gestures of their own) closes the
+            // bar too, not only a tap on empty chrome. Deferred one turn: a result row's own
+            // tap (`openSearchResult`) runs first and marks itself, and then this only
+            // closes when no result took the tap.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    guard ChatSearchClose.tapOutsideCloses(open: showSearch) else { return }
+                    DispatchQueue.main.async {
+                        if searchResultTapped == nil { closeSearch() }
+                        searchResultTapped = nil
+                    }
+                }
+            )
             // A swipe on the list with the bar open and nothing typed closes it too; with a
             // keyword the list IS the results, so scrolling them keeps the bar.
             .simultaneousGesture(

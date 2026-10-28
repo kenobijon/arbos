@@ -75,8 +75,10 @@ final class ChatSearchCloseUITests: XCTestCase {
         let field = app.textFields["chat-search-field"]
         field.tap()
         shot(app, "3-bar-open")
-        // Below the bar, above the composer: empty chrome / a row.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)).tap()
+        // A message bubble in the messages area (not empty chrome): the newest row.
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "landing page")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: settle), "a message row is on screen")
+        row.tap()
         barGone(app, "tap on the transcript")
         shot(app, "4-after-transcript-tap-closed")
     }
@@ -107,8 +109,12 @@ final class ChatSearchCloseUITests: XCTestCase {
         field.tap()
         field.typeText("zzqqxx")
         XCTAssertTrue(app.descendants(matching: .any)["chat-search-no-matches"].waitForExistence(timeout: settle))
+        shot(app, "7-no-matches-line")
         app.descendants(matching: .any)["chat-search-close"].firstMatch.tap()
         barGone(app, "✕ after no matches")
+        sleep(1)
+        shot(app, "8-after-x-from-no-matches")
+        XCTAssertFalse(app.descendants(matching: .any)["chat-search-no-matches"].exists, "the no-matches line went with the bar")
         // The newest row (the close re-pins the tail; older rows may sit outside the lazy stack).
         let newest = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "landing page")).firstMatch
         XCTAssertTrue(newest.waitForExistence(timeout: settle), "the messages are back")
