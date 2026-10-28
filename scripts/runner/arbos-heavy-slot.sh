@@ -212,7 +212,11 @@ acquire() {
   done
   ensure_dir || { echo "$(ts) heavy-slot: cannot create $SLOTS_DIR; running uncapped" >&2; echo "none"; return 0; }
   limit=$MAX_SLOTS
-  (( priority )) && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
+  # Release / TestFlight lanes count against the priority cap like gate halves (release.yml: "at most two of
+  # {gate Mac half, gate iOS half, TF archive, Mac release}"). Until 00:24 Oct 28 they used the base cap, so one
+  # gate half holding its slot kept a due release waiting for the whole half (Release 858b354df sat 14 min
+  # behind gate-ios 001406-12 on an idle box, load 6) — the preempt rule only decided who got the NEXT grant.
+  { (( priority )) || is_release_name "$name"; } && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
   t0=$(date +%s)
   local mark=""
   if is_gate_name "$name"; then
