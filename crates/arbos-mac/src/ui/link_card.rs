@@ -19,8 +19,8 @@ use gpui::{
 
 use crate::model::LinkPreview;
 
-use super::icons::icon;
 use super::link_tile::{self, Brand, Icon, Tone};
+use super::sf_symbols;
 use super::theme::Theme;
 
 /// Settings → Chat → Link previews: off hides every card on this Mac (plain links stay).
@@ -273,8 +273,13 @@ pub fn card(
         .relative()
         .flex()
         .flex_col()
-        .w_full()
-        .max_w(px(CARD_MAX_WIDTH))
+        // A definite width, not `w_full` capped at 400: the bubble shrink-wraps its content, and
+        // Taffy sizes a percentage-wide child at its unwrapped text width before the cap
+        // applies — a title that wraps at 400 pt came out a line short and the footer was
+        // clipped (v0.6.310 proof shot, the YouTube row). `max_w_full` keeps a narrower bubble
+        // (window at its 900 pt minimum) from overflowing.
+        .w(px(CARD_MAX_WIDTH))
+        .max_w_full()
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(theme.border)
@@ -322,7 +327,7 @@ pub fn card(
                                 .justify_center()
                                 .pl(px(3.0))
                                 .debug_selector(|| "link-play".into())
-                                .child(icon("play", 22.0, gpui::white())),
+                                .child(sf_symbols::glyph("play.fill", 22.0, gpui::white())),
                         ),
                 );
             }
@@ -520,7 +525,11 @@ pub fn card(
                         (ui.on_remove)(mid.clone(), window, cx);
                     }
                 })
-                .child(icon("xmark", 10.0, Theme::with_alpha(gpui::white(), 0.85))),
+                .child(sf_symbols::glyph(
+                    "xmark",
+                    10.0,
+                    Theme::with_alpha(gpui::white(), 0.85),
+                )),
         );
     }
     card.into_any_element()

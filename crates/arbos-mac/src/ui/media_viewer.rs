@@ -25,8 +25,8 @@ use crate::app::{AppState, ForwardTarget, ViewerItem};
 use crate::model::AttachmentKind;
 use crate::ui::avatars;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::modal::modal_overlay;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
@@ -101,7 +101,11 @@ fn control(id: &'static str, glyph: &'static str, enabled: bool) -> Stateful<Div
             // hover-fill: exception overlay
             el.cursor_pointer().hover(|s| s.bg(white(0.28)))
         })
-        .child(icon(glyph, 14.0, white(if enabled { 1.0 } else { 0.35 })))
+        .child(sf_symbols::glyph(
+            glyph,
+            14.0,
+            white(if enabled { 1.0 } else { 0.35 }),
+        ))
 }
 
 /// A bottom pill: glyph + label on white 16 %.
@@ -122,7 +126,7 @@ fn pill(id: &'static str, glyph: &'static str, label: &'static str) -> Stateful<
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(white(1.0))
-        .child(icon(glyph, 14.0, white(1.0)))
+        .child(sf_symbols::glyph(glyph, 14.0, white(1.0)))
         .child(label)
 }
 
@@ -274,7 +278,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon("video", 44.0, white(0.25))),
+                            .child(sf_symbols::glyph("video", 44.0, white(0.25))),
                     )
                     .child(
                         div()
@@ -299,7 +303,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                                             // hover-fill: exception overlay
                                             .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
                                     })
-                                    .child(icon("play", 30.0, white(1.0)))
+                                    .child(sf_symbols::glyph("play.fill", 30.0, white(1.0)))
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
                                         play.update(cx, |s, cx| s.media_viewer_open_external(cx));
@@ -386,7 +390,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     .flex()
                     .items_center()
                     .child(
-                        control("media-viewer-prev", "chevron-left", !at_start).on_click(
+                        control("media-viewer-prev", "chevron.left", !at_start).on_click(
                             move |_, _, cx| {
                                 cx.stop_propagation();
                                 prev.update(cx, |s, cx| s.media_viewer_step(-1, cx));
@@ -403,7 +407,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     .flex()
                     .items_center()
                     .child(
-                        control("media-viewer-next", "chevron-right", !at_end).on_click(
+                        control("media-viewer-next", "chevron.right", !at_end).on_click(
                             move |_, _, cx| {
                                 cx.stop_propagation();
                                 next.update(cx, |s, cx| s.media_viewer_step(1, cx));
@@ -434,14 +438,14 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                 }),
             )
             .when(!is_profile_picture, |el| {
-                el.child(
-                    pill("media-viewer-copy", "copy", "Copy").on_click(move |_, _, cx| {
+                el.child(pill("media-viewer-copy", "doc.on.doc", "Copy").on_click(
+                    move |_, _, cx| {
                         cx.stop_propagation();
                         copy.update(cx, |s, cx| s.media_viewer_copy(cx));
-                    }),
-                )
+                    },
+                ))
                 .child(
-                    pill("media-viewer-download", "arrow-down", "Download").on_click(
+                    pill("media-viewer-download", "arrow.down", "Download").on_click(
                         move |_, _, cx| {
                             cx.stop_propagation();
                             download.update(cx, |s, cx| s.media_viewer_download(cx));
@@ -449,7 +453,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     ),
                 )
                 .child(
-                    pill("media-viewer-forward", "forward", "Forward").on_click(move |_, _, cx| {
+                    pill(
+                        "media-viewer-forward",
+                        "arrowshape.turn.up.right",
+                        "Forward",
+                    )
+                    .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         forward.update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
                     }),
@@ -493,7 +502,7 @@ fn placeholder(glyph: &'static str, line: &str, item: &ViewerItem, _theme: &Them
         .flex_col()
         .items_center()
         .gap(px(12.0))
-        .child(icon(glyph, 44.0, white(0.35)))
+        .child(sf_symbols::glyph(glyph, 44.0, white(0.35)))
         .child(
             div()
                 .text_size(px(13.0))
@@ -530,7 +539,7 @@ fn file_body(
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(white(1.0))
             .child(e),
-        None => tile.child(icon("doc", 36.0, white(0.8))),
+        None => tile.child(sf_symbols::glyph("doc", 36.0, white(0.8))),
     };
     let mut meta = item.attachment.size_label();
     if !meta.is_empty() {
@@ -606,7 +615,7 @@ fn forward_picker(
         .bg(theme.surface_2)
         .cursor_text()
         .text_size(px(PICKER_FIELD_FONT))
-        .child(icon("search", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 12.0, theme.text_muted))
         .child(div().flex_1().min_w_0().child(shell.viewer_search.clone()));
     let mut list = div()
         .id("media-viewer-forward-list")
@@ -736,7 +745,7 @@ fn forward_picker(
                         .justify_center()
                         .cursor_pointer()
                         .map(|el| highlight::button(el, theme))
-                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             close_x.update(cx, |s, cx| dismiss(s, cx));
