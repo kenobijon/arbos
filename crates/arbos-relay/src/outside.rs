@@ -451,6 +451,11 @@ fn open_streams() -> &'static StdMutex<OpenStreams> {
     S.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn deliver_for_test(state: &AppState, project_id: &str, payload: Value) {
+    deliver(state, project_id, payload);
+}
+
 /// Does this queued event ask the agent to act: a `wake: true` row or a chat it was added to?
 fn wakes(payload: &Value) -> bool {
     payload["wake"].as_bool() == Some(true) || payload["type"] == "member.added"
@@ -1432,7 +1437,14 @@ pub async fn inbox(
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let wait = q.wait.min(WAIT_MAX_S);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let n = waiter(&me.project.id);
     loop {
+        // Register interest *before* reading the table: `notify_waiters` wakes only waiters that
+        // already exist, so an event stored between the read and the wait would otherwise park
+        // this call until `wait` runs out (up to 25 s) instead of answering at once.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let mut events = state
             .db
             .asp_events_after(&me.project.id, q.since, limit)
@@ -1441,9 +1453,6 @@ pub async fn inbox(
             crate::outside_sidecar::attach_context(&state, &me.project, &mut events, q.context);
             return Json(events_json(events, q.since)).into_response();
         }
-        let n = waiter(&me.project.id);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = tokio::time::sleep_until(deadline) => {
@@ -1750,7 +1759,7 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id }))
         }
         "message.react" => {
-            if !crate::outside_sidecar::allows("chat.react") {
+            if !me.agent.allows("chat.react") {
                 return Err((
                     "scope",
                     "reacting is switched off for this agent".to_owned(),
@@ -1846,7 +1855,12 @@ async fn run_socket(
         return;
     }
     let mut lease = tokio::time::interval(std::time::Duration::from_secs(45));
+    let n = waiter(&pid);
     loop {
+        // Same ordering as the inbox: interest first, then the read, then the wait.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         // Drain what is queued first.
         let mut events = state
             .db
@@ -1880,9 +1894,6 @@ async fn run_socket(
                 .await;
             return;
         }
-        let n = waiter(&pid);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = lease.tick() => {
