@@ -204,7 +204,7 @@ struct ChartScrubHost: UIViewRepresentable {
     final class TouchSurface: UIView {
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             if DebugHooks.traceChart, let t = touches.first {
-                print("[arbos chart] touch down at=\(t.location(in: self)) in=\(bounds.size)")
+                NSLog("[arbos chart] touch down at=%@ in=%@", NSCoder.string(for: t.location(in: self)), NSCoder.string(for: bounds.size))
             }
             super.touchesBegan(touches, with: event)
         }
@@ -246,7 +246,7 @@ struct ChartScrubHost: UIViewRepresentable {
 
         @objc private func scrubbed(_ gr: UIGestureRecognizer) {
             if DebugHooks.traceChart {
-                print("[arbos chart] \(type(of: gr)) state=\(gr.state.rawValue) at=\(gr.location(in: gr.view)) in=\(gr.view?.bounds.size ?? .zero)")
+                NSLog("[arbos chart] %@ state=%d at=%@ in=%@", String(describing: type(of: gr)), gr.state.rawValue, NSCoder.string(for: gr.location(in: gr.view)), NSCoder.string(for: gr.view?.bounds.size ?? .zero))
             }
             switch gr.state {
             case .began, .changed:
@@ -260,7 +260,7 @@ struct ChartScrubHost: UIViewRepresentable {
         }
 
         @objc private func tapped() {
-            if DebugHooks.traceChart { print("[arbos chart] tap") }
+            if DebugHooks.traceChart { NSLog("[arbos chart] tap") }
             onTap()
         }
 
