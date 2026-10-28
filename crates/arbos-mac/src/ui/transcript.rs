@@ -26,6 +26,7 @@ use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
 use crate::ui::highlight;
+use crate::ui::identity;
 use crate::ui::markdown::{
     self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
@@ -2315,12 +2316,12 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                div()
-                    .text_size(px(CHAT_BODY))
+                // The bubble sits under this line: an emoji-only sender name is
+                // lifted onto the baseline like every other stacked name.
+                identity::name(name, CHAT_BODY)
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
-                    .child(name),
+                    .text_color(color),
             )
             .when(agent, |el| {
                 el.child(
