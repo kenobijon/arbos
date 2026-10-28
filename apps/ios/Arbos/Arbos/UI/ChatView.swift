@@ -785,6 +785,14 @@ struct ChatSession: View {
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         let _ = SendTrace.recent ? SendTrace.mark("session-body", detail: "tick=\(tick) version=\(model.messagesVersion[chatId] ?? 0) rows=\(rows.count) msgs=\(messages.count)", once: false) : ()
         #endif
+        // Split so the type checker can finish (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG
+        // paste path tipped the one-expression body over Xcode's limit).
+        sessionRoot
+    }
+
+    /// Transcript canvas + composer inset (no sheets / lifecycle).
+    @ViewBuilder
+    private var sessionCanvas: some View {
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
         // centre the glass bar over the transcript (feedback app-01M5P98RB40WKA70R70DMDN97E).
@@ -987,6 +995,12 @@ struct ChatSession: View {
             }
             .ignoresSafeArea()
         }
+    }
+
+    /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
+    @ViewBuilder
+    private var sessionRoot: some View {
+        sessionCanvas
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
@@ -2781,6 +2795,8 @@ struct ChatSession: View {
             cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
             onDeleteBackwardEmpty: removeLastPending,
+            // Pasted pictures / files arrive through `onPasteMedia` below (every item,
+            // native type kept — GIF/WebP bytes included); no second handler here.
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
                 if !memoHoldActive {
@@ -3680,6 +3696,8 @@ private struct ComposerField: View {
     let prompt: (String) -> String
     /// ⌫ on an empty field: the chat screen drops its last pending attachment.
     let onDeleteBackwardEmpty: () -> Void
+    /// Paste menu → image / GIF into pending attachments (mime kept).
+    var onPasteImage: ((Data, String, String) -> Void)? = nil
     let onCancelRecording: () -> Void
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
@@ -3794,7 +3812,8 @@ private struct ComposerField: View {
                                 placeholder: prompt(draft.text), theme: theme,
                                 agentProject: { model.agent(member: $0, chatId: chatId) },
                                 onPasteMedia: onPasteMedia,
-                                onDeleteBackwardEmpty: onDeleteBackwardEmpty)
+                                onDeleteBackwardEmpty: onDeleteBackwardEmpty,
+                                onPasteImage: onPasteImage)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
