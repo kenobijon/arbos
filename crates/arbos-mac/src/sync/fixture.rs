@@ -392,7 +392,7 @@ fn emit_link_hook(shared: &Arc<Shared>) {
 }
 
 /// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
-/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// `ARBOS_RIG_FAILURE=toast|toast-repeat|toast-many|composer|delivery|machine|secrets|people` raises that surface's
 /// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
 /// download that timed out, with Try again); `composer` = the opened chat's last own message
 /// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
@@ -430,6 +430,40 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                 .collect()
         };
         match spec.as_str() {
+            // [feedback toast-stack-mac-2026-10-27]: Jacob's shape — the secrets poll failing
+            // with the resolver's words eight times in a row — and five distinct failures for
+            // the "N more" fold.
+            "toast-repeat" | "toast-many" => {
+                let offline = |path: &str| {
+                    anyhow::anyhow!(
+                        "error sending request for url (https://relay.arbos.life{path}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+                    )
+                    .context(format!("GET {path}"))
+                };
+                if spec == "toast-repeat" {
+                    for _ in 0..8 {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify("load your secrets", &offline("/secrets")),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                } else {
+                    for (verb, path) in [
+                        ("load your secrets", "/secrets"),
+                        ("load the voices", "/voices"),
+                        ("download report-q3.pdf", "/blobs/x/report-q3.pdf"),
+                        ("save the secret", "/secrets"),
+                        ("load the devices", "/devices"),
+                    ] {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify(verb, &offline(path)),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
             "toast" => {
                 let raw = anyhow::anyhow!(
                     "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
