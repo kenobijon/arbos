@@ -681,7 +681,7 @@ mod hidden_tests {
     use crate::ui::motion::PulseClock;
     use crate::ui::shell::Shell;
     use crate::ui::theme::Theme;
-    use crate::ui::transcript::{build_rows_hiding, MessageRowCache, RowKind, SpeechRows};
+    use crate::ui::transcript::{build_rows_hiding, RowKind, SpeechRows};
 
     struct Idle;
 
@@ -762,7 +762,6 @@ mod hidden_tests {
             voice_mode: false,
         };
         let hidden: HashSet<String> = ["user:gh_2".to_string()].into_iter().collect();
-        let mut cache = MessageRowCache::default();
         let rows = build_rows_hiding(
             &messages(1_700_000_000_000),
             false,
@@ -772,7 +771,6 @@ mod hidden_tests {
             &Mentions::empty(),
             true,
             &hidden,
-            &mut cache,
         );
         let shape: Vec<String> = rows
             .iter()
@@ -788,13 +786,6 @@ mod hidden_tests {
             "{shape:?}"
         );
         // Nothing hidden: every row is a bubble.
-        let speech = SpeechRows {
-            enabled: false,
-            spoken: &spoken,
-            failed: &failed,
-            voice_mode: false,
-        };
-        let mut cache = MessageRowCache::default();
         let rows = build_rows_hiding(
             &messages(1_700_000_000_000),
             false,
@@ -804,7 +795,6 @@ mod hidden_tests {
             &Mentions::empty(),
             true,
             &HashSet::new(),
-            &mut cache,
         );
         assert_eq!(
             rows.iter()
@@ -860,6 +850,7 @@ mod hidden_tests {
                     person("gh_3", "priya", "Priya Natarajan"),
                 ],
                 blocked_senders: vec!["user:gh_2".into()],
+                my_role: None,
                 ..Project::default()
             });
             let chat: Chat = serde_json::from_value(serde_json::json!({
