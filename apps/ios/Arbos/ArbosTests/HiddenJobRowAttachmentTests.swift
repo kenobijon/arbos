@@ -51,15 +51,18 @@ final class HiddenJobRowAttachmentTests: XCTestCase {
         let rows = Transcript.rows(ms, projectId: "doug", people: true, multiParty: true)
         let mine = rows.filter { $0.messageId == "j1" }
         XCTAssertEqual(mine.map(\.id), ["j1#att1"], "exactly the card, nothing else: \(rows.map(\.id))")
-        guard case .image(let item, let fromUser, _, let lane, _, let sender, let named) = mine[0].kind else {
+        // Labelled pattern: a new associated value on `.image` then fails here by name,
+        // not as "missing pattern #n".
+        guard case .image(item: let item, fromUser: let fromUser, caption: _, lane: let lane, source: _,
+                          forwardedFrom: _, sender: let sender, named: let named) = mine[0].kind else {
             return XCTFail("an image card: \(mine[0].kind)")
         }
         XCTAssertEqual(item.name, "sn120_price.png")
         XCTAssertEqual(item.slot, "doug")
         XCTAssertFalse(fromUser)
         XCTAssertTrue(lane, "agent media in a people chat sits on the avatar lane")
-        XCTAssertEqual(sender, .agent(id: "01DOUG", handle: "doug-agent", name: "Doug agent", avatar: nil),
-                       "attribution borrowed from Doug's ack answering the same ask")
+        let doug: MediaSender? = MediaSender.agent(id: "01DOUG", handle: "doug-agent", name: "Doug agent", avatar: nil)
+        XCTAssertEqual(sender, doug, "attribution borrowed from Doug's ack answering the same ask")
         XCTAssertTrue(named, "Doug's name above the card in a group")
     }
 
