@@ -237,11 +237,18 @@ struct ChatSession: View {
     @State private var showTasks = false
     @State private var pendingThread: PendingThread?
 
-    /// Rows after the in-chat search filter (profile "search").
+    /// Rows after the in-chat search filter (profile "search"). Matching
+    /// messages also get a soft accent wash while the keyword is set
+    /// ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     private var visibleRows: [Row] {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
+
+    /// True while Search-in-chat has a keyword: every filtered message is a hit.
+    private var searchHitsActive: Bool {
+        showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
@@ -1801,6 +1808,7 @@ struct ChatSession: View {
                         replySwipe: replySwipe,
                         rowFrames: rowFrames,
                         highlightedMessage: highlightedMessage,
+                        searchHitsActive: searchHitsActive,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
@@ -3395,6 +3403,8 @@ private struct TranscriptRows: View, Equatable {
     /// Row frames the rows write on layout (not compared: a class, same instance for the chat).
     let rowFrames: RowFrameIndex
     let highlightedMessage: Id?
+    /// Search-in-chat has a keyword: filtered message bubbles get the soft wash.
+    let searchHitsActive: Bool
     let rowsCount: Int
     let messagesCount: Int
     let canReply: (Row) -> Bool
@@ -3416,6 +3426,7 @@ private struct TranscriptRows: View, Equatable {
             && lhs.timeReveal == rhs.timeReveal
             && lhs.replySwipe == rhs.replySwipe
             && lhs.highlightedMessage == rhs.highlightedMessage
+            && lhs.searchHitsActive == rhs.searchHitsActive
             && lhs.mentions.stamp == rhs.mentions.stamp
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
@@ -3440,6 +3451,7 @@ private struct TranscriptRows: View, Equatable {
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in onQuoteTap(quote, row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
+                    searchHit: searchHitsActive && Self.isMessageBubble(row),
                     canReply: reply,
                     replyDrag: replySwipe.rowId == row.id ? replySwipe.reveal : 0,
                     replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
@@ -3475,6 +3487,16 @@ private struct TranscriptRows: View, Equatable {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
                                     onCopyMenu: { onMenu($0, row) })
+        }
+    }
+
+    /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
+    private static func isMessageBubble(_ row: Row) -> Bool {
+        switch row.kind {
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+            return false
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+            return true
         }
     }
 }
