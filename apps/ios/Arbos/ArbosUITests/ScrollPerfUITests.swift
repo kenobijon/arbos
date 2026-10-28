@@ -43,6 +43,26 @@ final class ScrollPerfUITests: XCTestCase {
         drive(app, chatId: "fx-dm-unconst")
     }
 
+    /// Deep into history with the finger: 90 fast flicks up (past the 360-row window cap, so
+    /// the window slides and re-pins), then 24 back down. The touch log says whether any pan
+    /// was dropped on the way and the frame log what a slide costs.
+    func testGroupDeepHistoryPans() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": rows, "ARBOS_FIXTURE_LONG_RICH": "1"])
+        XCTAssertTrue(app.buttons["chat-back:fx-group-launch"].waitForExistence(timeout: appear), "the chat opened")
+        sleep(4)
+        let window = app.windows.firstMatch.frame
+        let low = CGPoint(x: window.midX, y: window.maxY - 240)
+        let high = CGPoint(x: window.midX, y: 180)
+        phase(app, "deep-up") {
+            for _ in 0..<90 { pan(app, from: low, by: CGVector(dx: 0, dy: -300), velocity: .fast); usleep(600_000) }
+        }
+        sleep(2)
+        phase(app, "deep-down") {
+            for _ in 0..<24 { pan(app, from: high, by: CGVector(dx: 0, dy: 300), velocity: .fast); usleep(600_000) }
+        }
+        sleep(3)
+    }
+
     // MARK: The script
 
     private func drive(_ app: XCUIApplication, chatId: String) {
@@ -99,10 +119,17 @@ final class ScrollPerfUITests: XCTestCase {
         NSLog("scrollperf phase %@ end", name)
     }
 
+    /// The window's frame, read once per test: every `app.windows.firstMatch.frame` is an
+    /// accessibility snapshot of the whole screen (≈ 200 ms of the app's main thread on
+    /// 80 rich rows), which was the per-pan stall in the first runs.
+    private var windowFrame: CGRect?
+
     private func pan(_ app: XCUIApplication, from: CGPoint, by: CGVector, velocity: XCUIGestureVelocity) {
         let window = app.windows.firstMatch
+        let frame = windowFrame ?? window.frame
+        windowFrame = frame
         let origin = window.coordinate(withNormalizedOffset: .zero)
-        let start = origin.withOffset(CGVector(dx: from.x - window.frame.minX, dy: from.y - window.frame.minY))
+        let start = origin.withOffset(CGVector(dx: from.x - frame.minX, dy: from.y - frame.minY))
         start.press(forDuration: 0.02, thenDragTo: start.withOffset(by), withVelocity: velocity, thenHoldForDuration: 0.02)
     }
 
