@@ -202,6 +202,21 @@ struct ChartScrubHost: UIViewRepresentable {
 
     /// The recognizers' view; under `ARBOS_TRACE_CHART` it also prints raw touch arrival.
     final class TouchSurface: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if DebugHooks.traceChart {
+                NSLog("[arbos chart] surface window=%d frame=%@ enabled=%d", window == nil ? 0 : 1, NSCoder.string(for: frame), isUserInteractionEnabled ? 1 : 0)
+            }
+        }
+
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            let hit = super.hitTest(point, with: event)
+            if DebugHooks.traceChart, event?.type == .touches {
+                NSLog("[arbos chart] hitTest at=%@ -> %@", NSCoder.string(for: point), hit == nil ? "nil" : String(describing: type(of: hit!)))
+            }
+            return hit
+        }
+
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             if DebugHooks.traceChart, let t = touches.first {
                 NSLog("[arbos chart] touch down at=%@ in=%@", NSCoder.string(for: t.location(in: self)), NSCoder.string(for: bounds.size))
