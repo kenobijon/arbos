@@ -846,7 +846,9 @@ final class AppModel: ObservableObject {
     private(set) weak static var current: AppModel?
 
     init() {
-        Transcript.linkPreviewsEnabled = linkPreviews
+        // The row builder's switch mirrors the saved setting from the first row on (no `self`
+        // here: stored properties are still initialising).
+        Transcript.linkPreviewsEnabled = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
