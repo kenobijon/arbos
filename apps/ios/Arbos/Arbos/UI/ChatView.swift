@@ -4076,7 +4076,10 @@ private struct ComposerField: View {
         .fixedSize(horizontal: false, vertical: true)
         // A true capsule at one line (Grok's edge follows a circle); the radius stays
         // 24 pt as the field grows.
-        .background(fieldShape.fill(theme.field)) // control-size: source (the family's field, rim below)
+        // The family's field: solid on Matte; on Glass the clear system glass and nothing of
+        // ours on it, so the transcript reads through the pill ([feedback
+        // iphone-composer-glass-2026-10-28]). Rim below.
+        .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }

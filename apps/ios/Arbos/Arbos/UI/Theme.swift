@@ -844,17 +844,37 @@ struct ControlSurface<S: InsettableShape>: View {
     var body: some View {
         ZStack {
             if theme.isGlass {
-                // Glass: the real material and nothing of ours on it — clear Liquid Glass on
-                // iOS 26, plain frost before — so the content reads through the pill like
-                // Grok's ([feedback iphone-composer-glass-2026-10-28]; the 0.55 `field` tint
-                // of the first see-through cut read as a near-opaque dark fill on the phone).
-                let glass = ChatHeaderGlass.pillGlass(surface: .glass)
-                HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
+                PillSurface(shape: shape)
             } else {
                 shape.fill(theme.field)
                 ComposerRim(shape: shape)
             }
             if pressed { shape.fill(theme.text.opacity(0.12)) }
+        }
+    }
+}
+
+/// The pill's surface on Glass: the real material and nothing of ours on it — clear Liquid
+/// Glass on iOS 26, plain frost before — so the content reads through the pill like Grok's
+/// ([feedback iphone-composer-glass-2026-10-28]; the 0.55 `field` tint of the first see-through
+/// cut read as a near-opaque dark fill on the phone). On Matte: the field colour.
+/// Rig (`ARBOS_PILL_STYLE=translucent`, Debug): the no-blur alternative for Jacob's eye — the
+/// field colour at `translucentAlpha`, the rim, no material — if the system glass still smears
+/// the text on the phone.
+struct PillSurface<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    static var translucentAlpha: Double { 0.3 }
+
+    var body: some View {
+        if !theme.isGlass {
+            shape.fill(theme.field)
+        } else if DebugHooks.pillStyle == "translucent" {
+            shape.fill(theme.field.opacity(Self.translucentAlpha))
+            ComposerRim(shape: shape)
+        } else {
+            let glass = ChatHeaderGlass.pillGlass(surface: .glass)
+            HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
         }
     }
 }
