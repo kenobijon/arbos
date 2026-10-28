@@ -3479,12 +3479,15 @@ extension ChatSession {
                         #endif
                     }
                 }
-                // A message bubble: long-press → the reaction capsule + menu overlay
-                // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
+                // A message bubble: long-press → reaction capsule + menu; double-tap → ❤️.
+                // Other rows keep the plain Copy menu.
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
+                                    onDoubleTap: {
+                                        model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
+                                    },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
         }
     }
