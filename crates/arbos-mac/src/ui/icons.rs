@@ -123,6 +123,20 @@ const ICONS: &[(&str, &str)] = &[
     icon!("doc", "<path d=\"M7 3h7l5 5v13H7z\"/><path d=\"M14 3v5h5\"/>"),
     // Group pane's Description row (SF `text.alignleft`): three left-aligned lines.
     icon!("text-align-left", "<path d=\"M4 7h16M4 12h11M4 17h14\"/>"),
+    // Sidebar pins (fallbacks for SF `pin` / `pin.slash` / `pin.fill`): an upright
+    // pushpin — head, flange, needle — and the same with a slash / filled.
+    icon!(
+        "pin",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\"/><path d=\"M12 12.8V21\"/>"
+    ),
+    icon!(
+        "pin-slash",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\"/><path d=\"M12 12.8V21\"/><path d=\"M4.5 4.5l15 15\"/>"
+    ),
+    icon!(
+        "pin-fill",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\" fill=\"#000\"/><path d=\"M12 12.8V21\"/>"
+    ),
     // Settings → Secrets (D83): key tile, pause switch, vault.
     icon!("key", "<circle cx=\"8\" cy=\"15\" r=\"4\"/><path d=\"M11 12l9-9M16 6l2 2M13 9l2 2\"/>"),
     icon!("pause", "<rect x=\"6\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/><rect x=\"14\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/>"),
@@ -656,7 +670,17 @@ mod tests {
         assert!(files.len() > 50, "the walk found {} files", files.len());
         let mut pack_calls = Vec::new();
         let mut unregistered = Vec::new();
+        let mut stale_names = Vec::new();
         let mut literals = 0;
+        // The pack names that are not also SF names and cannot be mistaken for
+        // a word or an element id: any string literal equal to one of these is
+        // a glyph table that was never repointed (palette.rs's settings table
+        // kept "circle-half" past the conversion and its row drew nothing).
+        let hyphenated: Vec<&str> = ICONS
+            .iter()
+            .map(|(p, _)| p.trim_start_matches("icons/").trim_end_matches(".svg"))
+            .filter(|n| n.contains('-'))
+            .collect();
         for path in files {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             if name == "icons.rs" || name == "sf_symbols.rs" {
@@ -683,6 +707,11 @@ mod tests {
                     }
                     from = at + 5;
                 }
+                for stale in &hyphenated {
+                    if code.contains(&format!("\"{stale}\"")) {
+                        stale_names.push(format!("{name}:{} {stale:?}", i + 1));
+                    }
+                }
                 for call in ["sf_symbols::glyph(\"", "sf_symbols::symbol(\""] {
                     let mut from = 0;
                     while let Some(ix) = code[from..].find(call) {
@@ -701,6 +730,10 @@ mod tests {
         assert!(
             pack_calls.is_empty(),
             "pack glyphs drawn outside sf_symbols without `// icon: custom <why>`: {pack_calls:?}"
+        );
+        assert!(
+            stale_names.is_empty(),
+            "hyphenated pack names used as string literals (a glyph table that still names the pack — use the SF name): {stale_names:?}"
         );
         assert!(
             literals >= 80,
