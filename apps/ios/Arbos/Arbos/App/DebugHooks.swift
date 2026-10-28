@@ -169,6 +169,9 @@ enum DebugHooks {
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
+    /// Rig (chart bubbles): print every chart-plot gesture event (`[arbos chart] …`) so a
+    /// simulator run can tell a touch that never reached the plot from a readout that did not draw.
+    static let traceChart: Bool = value("ARBOS_TRACE_CHART") == "1"
     /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
     static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
     /// Live-path replay (iphone-open-scroll-block): `<checkpoint path>|<rows.hex path>`. The
