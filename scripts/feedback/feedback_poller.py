@@ -154,6 +154,10 @@ def iso(t: dt.datetime | None = None) -> str:
 IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
 
 
+def head_or(st: dict) -> str:
+    return st.get("branch_head") or st.get("gated_head") or ""
+
+
 def touches_ios(files: list[str] | None) -> bool:
     return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
@@ -2364,6 +2368,42 @@ class Loop:
         self.store.save_state(fid, st)
         return ok
 
+    POOL_BATCH_MAX = 20  # one red on 57 items costs an hour of bisect; 20s cost less on average on the single runner
+
+    def pool_batches(self, candidates: list, cur: dict, plan: list) -> dict[str, str]:
+        """The pool batch to run now, with the rest of the pool queued as tagged pool batches right behind it
+        (coordinator 2026-10-27 22:41). Grouped by footprint so a red stays in its lane: Mac-only (crates/arbos-mac
+        without iOS or server crates), then server (relay / agentd / core / ctl, no iOS), then iOS-touching; each
+        group chunked to POOL_BATCH_MAX. Chunks after the first go to the front of the plan, tagged `pool_plan`, so
+        under pool-first they run one after another without ending pool-first."""
+        def group(st: dict) -> int:
+            files = st.get("files") or []
+            if touches_ios(files) or st.get("expects_ios"):
+                return 2
+            if files and all(f.startswith(("crates/arbos-mac/", "crates/arbos-update/", "docs/", "scripts/runner/")) for f in files):
+                return 0
+            return 1
+        ordered = sorted(candidates, key=lambda fs: (group(fs[1]), fs[1].get("created") or ""))
+        chunks: list[dict] = []
+        for g in (0, 1, 2):
+            items = [fs for fs in ordered if group(fs[1]) == g]
+            while items:
+                batch = self.compatible_batch(items[: self.POOL_BATCH_MAX])
+                items = [fs for fs in items if fs[0] not in batch]
+                if not batch:
+                    break
+                chunks.append(batch)
+        if not chunks:
+            return {}
+        if len(chunks) > 1:
+            tags = cur.get("pool_plan_batches") or []
+            for c in chunks:   # the first one too: pool-first stays armed until the chain is done
+                tags.append(sorted(c))
+            cur["pool_plan_batches"] = tags
+            plan[0:0] = chunks[1:]
+            log(f"Gate: pool batch split by footprint into {len(chunks)} batches of {', '.join(str(len(c)) for c in chunks)} (≤ {self.POOL_BATCH_MAX}); the rest follow as pool batches")
+        return chunks[0]
+
     def rust_gate_tick(self) -> None:
         """Batch mode for the Rust gate, split in two halves that run at the same time:
         every ready branch is merged with current main into one integration branch `gate/<run>` on GitHub
@@ -2467,6 +2507,13 @@ class Loop:
                     if st.get("issue"):
                         self.gh.comment(st["issue"], f"Gate pin cleared: `gate-next` is the operator's call (pinned by {st.get('pinned_by') or 'a worker'}); a worker's pin stands only for a `[hotfix]` commit on a P0-labelled issue. The item keeps its normal place in the pool.")
         members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
+        if members and plan and set(plan[0]) <= set(members):
+            # A red pinned batch bisects like any other: its halves sit at the front of the plan and run one at a time
+            # (22:32 Oct 27, coordinator: the 8-item owner batch must bisect on its own). Without this every pinned
+            # item re-formed the same batch and the same red repeated.
+            half = plan.pop(0)
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+            log(f"Gate: pinned batch bisect — half of {len(half)} runs: " + ", ".join(members))
         if not members:
             bounced = self.release_bounced_pins()
             if bounced:
@@ -2542,18 +2589,36 @@ class Loop:
             if own:
                 pool_first = False
                 log("Gate: pool-first stands aside — the next plan half is the pool's own bisect")
+        # Jacob's items keep priority over tester items (Jacob 22:28 Oct 27, "fix them all" opened the gate to 20–30
+        # outside items): a pool batch is built from the owner-tier items first when there are any; tester items form
+        # the following pool batch. Smaller owner batches also mean fewer reds on his side.
+        def pool_candidates() -> list:
+            own = [(f, st) for f, st in ready if st.get("tier") == "priority" and not st.get("awaiting")]
+            rest = [(f, st) for f, st in ready if (f, st) not in own]
+            # alternate: after an owner-only pool batch, the testers' batch runs before the next owner one
+            if own and rest and cur.get("last_pool_tier") == "priority":
+                cur["last_pool_tier"] = "tester"
+                return rest
+            cur["last_pool_tier"] = "priority" if own else "tester"
+            return own or list(ready)
         if not members and pool_first:
-            # Pool-first: the whole pool (plan-half members included — they are pool items too) runs now.
-            members = self.compatible_batch(list(ready))
+            # Pool-first: the pool (plan-half members included — they are pool items too) runs now.
+            members = self.pool_batches(pool_candidates(), cur, plan)
             pool_batch = bool(members)
+            if members and sorted(members) in (cur.get("pool_plan_batches") or []):
+                pool_plan = True
+                cur["pool_plan_batches"] = [b for b in cur["pool_plan_batches"] if b != sorted(members)]
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
-            members = self.compatible_batch(list(ready))
+            members = self.pool_batches(pool_candidates(), cur, plan)
             pool_batch = bool(members)
+            if members and sorted(members) in (cur.get("pool_plan_batches") or []):
+                pool_plan = True
+                cur["pool_plan_batches"] = [b for b in cur["pool_plan_batches"] if b != sorted(members)]
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
@@ -3360,6 +3425,16 @@ class Loop:
         return r.returncode == 0, out
 
     def merge_branch(self, fid: str, st: dict) -> None:
+        if st.get("do_not_merge"):
+            # Operator hold above approval (coordinator 2026-10-27 22:28: #2047 conflicts with Jacob's hour-stamp rule and
+            # must not land even if `approve` is run by mistake). Green stays green; nothing merges until the flag is
+            # removed by hand.
+            if st.get("do_not_merge_noted") != head_or(st):
+                st["do_not_merge_noted"] = head_or(st)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "merge_refused", reason=str(st["do_not_merge"])[:200])
+                log(f"[{fid}] green but do_not_merge is set ({st['do_not_merge']}); holding")
+            return
         if self.needs_approval(fid, st):
             self.hold_for_approval(fid, st)
             return
@@ -4636,7 +4711,7 @@ class Loop:
                               expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
-                              agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
+                              agent_summary=f"handed-off fix by {st.get('handed_off_to') or st.get('agent_id') or 'owner'}")
                     self.store.save_state(fid, st)
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
@@ -5468,7 +5543,10 @@ def main(argv: list[str]) -> int:
         # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
         # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
         # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
-        # push already made re-gates on the next tick; a pin is released.
+        # push already made re-gates on the next tick; a pin is released. The follower only walks items with
+        # `track_commit`: a parked loop-agent item (app-…, owner = `agent_id`, never handed off) has none, so its
+        # owner's push went unseen (#2049: fix pushed 21:27, found by hand 23:36, 2026-10-27). `handed_off_to` stays
+        # unset on purpose — that is what keeps the Cursor follow-up channel to the agent on a conflict.
         if len(argv) < 4:
             print("park <id> <note…>")
             return 2
@@ -5479,7 +5557,7 @@ def main(argv: list[str]) -> int:
             return 2
         rg = st.get("rust_gate") or {}
         red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
-        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False)
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False, track_commit=True)
         loop.store.save_state(fid, st)
         loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
         later = st.get("branch_head") != red

@@ -23,7 +23,7 @@ enum WorkingSpinnerFrames {
     static let frames: [String] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     /// One frame every 90 ms (the 80–100 ms band, ≈ 11 fps).
     static let interval: TimeInterval = 0.09
-    /// Reduce Motion: every dot set, nothing moves.
+    /// Reduce Motion: all six dots of the frames' cell (U+283F), nothing moves.
     static let still = "⠿"
     /// The cell: the unread dot's footprint (`Theme.unreadDot`, 10 pt) square,
     /// so the spinner's right edge is the dot's right edge under the time.
