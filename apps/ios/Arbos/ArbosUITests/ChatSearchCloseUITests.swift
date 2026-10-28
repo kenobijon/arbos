@@ -18,9 +18,14 @@ final class ChatSearchCloseUITests: XCTestCase {
         app.launch()
         let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: appear), "the chat header's search disc is on screen")
-        search.tap()
+        // Let the push settle (a tap during the slide lands on the home list on a loaded Mac).
         let field = app.textFields["chat-search-field"]
-        XCTAssertTrue(field.waitForExistence(timeout: settle), "the Search-in-chat bar opened")
+        for _ in 0..<3 where !field.exists {
+            sleep(1)
+            search.tap()
+            _ = field.waitForExistence(timeout: 6)
+        }
+        XCTAssertTrue(field.exists, "the Search-in-chat bar opened")
         return app
     }
 
@@ -57,7 +62,9 @@ final class ChatSearchCloseUITests: XCTestCase {
         // Re-open: the query did not survive the close.
         app.descendants(matching: .any)["chat-search-button"].firstMatch.tap()
         XCTAssertTrue(field.waitForExistence(timeout: settle))
-        XCTAssertEqual(field.value as? String ?? "", "", "the query was cleared")
+        // An empty SwiftUI TextField reports its prompt as the value.
+        let value = field.value as? String ?? ""
+        XCTAssertTrue(value.isEmpty || value == "Search in chat", "the query was cleared (value: \(value))")
         close.tap()
         barGone(app, "✕ on its glyph")
     }
@@ -102,7 +109,8 @@ final class ChatSearchCloseUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["chat-search-no-matches"].waitForExistence(timeout: settle))
         app.descendants(matching: .any)["chat-search-close"].firstMatch.tap()
         barGone(app, "✕ after no matches")
-        let press = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "press kit")).firstMatch
-        XCTAssertTrue(press.waitForExistence(timeout: settle), "the messages are back")
+        // The newest row (the close re-pins the tail; older rows may sit outside the lazy stack).
+        let newest = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "landing page")).firstMatch
+        XCTAssertTrue(newest.waitForExistence(timeout: settle), "the messages are back")
     }
 }
