@@ -45,6 +45,7 @@ mod migrate;
 mod moderation;
 mod notices;
 mod notify;
+mod outside;
 mod people;
 mod proxy;
 mod push;
@@ -57,6 +58,7 @@ mod secrets;
 mod settings_audit;
 mod shell_grants;
 mod signin;
+mod site_icons;
 mod sites;
 mod skills;
 mod smoke;
@@ -407,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
+    outside::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     images::spawn_health_probe(state.clone());
     matrix::worker::spawn(state.clone());
@@ -581,6 +584,19 @@ async fn main() -> anyhow::Result<()> {
             post(notify::register_push).delete(notify::unregister_push),
         )
         .route("/chats/{id}/notify", post(notify::notify_people_chat))
+        // Outside agents (#2140): owner side …
+        .route("/outside-agents", get(outside::list).post(outside::create))
+        .route(
+            "/outside-agents/{id}",
+            get(outside::get).delete(outside::revoke),
+        )
+        .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        // … and the agent side (bearer arbk_ key).
+        .route("/asp/me", get(outside::me))
+        .route("/asp/inbox", get(outside::inbox))
+        .route("/asp/events", post(outside::events))
+        .route("/asp/socket", get(outside::socket))
+        .route("/asp/connect/{id}", get(outside::connect_page))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
@@ -844,6 +860,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
+        .route("/unfurl/icon", get(site_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
