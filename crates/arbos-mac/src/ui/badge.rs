@@ -271,6 +271,9 @@ pub mod ring {
     }
 
     /// The chat header's pill: its glass fill over the page it floats on.
+    /// (Unused since the header's mark went through `ui::marks`; kept with the
+    /// dot form for the tests and the presence owner's decision.)
+    #[allow(dead_code)]
     pub fn header_pill(theme: &Theme) -> Hsla {
         Theme::composite(theme.header_glass(), theme.bg)
     }

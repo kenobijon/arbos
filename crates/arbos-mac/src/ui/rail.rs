@@ -39,7 +39,6 @@ use gpui::{
 };
 
 use crate::model::Id;
-use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
@@ -98,7 +97,7 @@ pub(crate) mod metrics {
     pub const TIP_HEIGHT: f32 = 28.0;
     pub const TIP_GAP: f32 = 8.0;
     // Badges at the picture's bottom-right corner (`tile_badge` through
-    // `ui::badge::corner`): the working spinner in a ring of the tile's colour,
+    // `ui::marks::corner`): the working spinner in a ring of the tile's colour,
     // or the unread count pill (`ui::marks`) — never a coloured dot.
 }
 
@@ -222,7 +221,7 @@ pub(crate) fn lights_frame() -> Bounds<Pixels> {
     )
 }
 
-/// A tile's badge for `ui::badge::corner` (Jacob, 2026-10-27: never a coloured
+/// A tile's badge for `ui::marks::corner` (Jacob, 2026-10-27: never a coloured
 /// dot): the braille spinner in a ring of the tile's colour while the space's
 /// agent works, the unread count pill otherwise. `ring` is the tile's fill.
 fn tile_badge(
@@ -233,14 +232,11 @@ fn tile_badge(
     cx: &mut App,
 ) -> Div {
     match badge {
-        RailBadge::Working => div()
-            .size(px(badge::metrics(metrics::AVATAR).ring))
-            .rounded_full()
-            .bg(ring)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(crate::ui::working::glyph(theme, cx)),
+        RailBadge::Working => crate::ui::marks::ring_disc(
+            crate::ui::marks::corner_metrics(metrics::AVATAR).ring,
+            ring,
+        )
+        .child(crate::ui::working::glyph(theme, cx)),
         RailBadge::Unread => crate::ui::marks::unread_pill(unread_count, theme)
             .border_2()
             .border_color(ring),
@@ -372,14 +368,14 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
             .child(
                 match badge {
                     // The badge in front of the picture, in its own paint layer
-                    // (`ui::badge`); the bare picture keeps the same box.
-                    Some(b) => badge::corner(
+                    // (`ui::marks::corner`); the bare picture keeps the same box.
+                    Some(b) => crate::ui::marks::corner(
                         metrics::AVATAR,
                         picture,
                         tile_badge(b, unread_count, ring, &theme, cx),
-                        badge::metrics(metrics::AVATAR).overhang,
+                        crate::ui::marks::CORNER_OVERHANG,
                     ),
-                    None => badge::badged(metrics::AVATAR, picture, None),
+                    None => crate::ui::marks::plain(metrics::AVATAR, picture),
                 }
                 .when(index == 0, |el| {
                     el.debug_selector(|| "rail-first-picture".into())

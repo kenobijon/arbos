@@ -570,30 +570,26 @@ pub(crate) fn account_avatar(
             .justify_center()
             .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
     };
-    // The machine mark in front of the picture (`ui::badge::corner`, its own
-    // paint layer), ringed in the footer's colour. Never a coloured dot
-    // (Jacob, 2026-10-27): the spinner while the machine wakes, the red `!`
-    // on a fault, nothing at rest — then the bare picture in the same box.
-    let m = badge::metrics(FOOTER_AVATAR);
-    match crate::ui::marks::machine_mark_element(machine, m.dot, theme, cx) {
-        Some(mark) => badge::corner(
-            FOOTER_AVATAR,
-            picture,
-            div()
-                .size(px(m.ring))
-                .rounded_full()
-                .bg(badge::ring::sidebar(theme))
+    // The machine mark in front of the picture (`ui::marks::machine_corner`, its
+    // own paint layer), ringed in the footer's colour — the sidebar at rest, the
+    // row's hover fill while the footer row is under the pointer. Never a
+    // coloured dot (Jacob, 2026-10-27): the spinner while the machine wakes, the
+    // red `!` on a fault, nothing at rest — then the bare picture in the same box.
+    let hovered_ring = highlight::over(theme.sidebar, highlight::fills(theme).hover);
+    crate::ui::marks::machine_corner(
+        FOOTER_AVATAR,
+        picture,
+        machine,
+        theme.sidebar,
+        |ring| {
+            ring
                 // hover-fill: exception badge-ring
-                .group_hover(FOOTER_GROUP, |s| s.bg(badge::ring::hovered(theme)))
-                .flex()
-                .items_center()
-                .justify_center()
+                .group_hover(FOOTER_GROUP, move |s| s.bg(hovered_ring))
                 .debug_selector(|| "dot-ring".into())
-                .child(mark),
-            m.overhang,
-        ),
-        None => badge::badged(FOOTER_AVATAR, picture, None),
-    }
+        },
+        theme,
+        cx,
+    )
     .debug_selector(|| "sidebar-account-avatar".into())
 }
 

@@ -16,7 +16,6 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
-use crate::ui::badge;
 use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
@@ -202,26 +201,19 @@ pub fn render(
         let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
         let _ = avatar_state;
         // The machine mark hangs off the disc's corner, in front of the picture
-        // (`ui::badge::corner`, its own paint layer — the pill is frosted) and
-        // ringed in the pill's colour. Never a coloured dot (Jacob, 2026-10-27):
+        // (`ui::marks::machine_corner`, its own paint layer — the pill is frosted)
+        // in a ring of the page colour. Never a coloured dot (Jacob, 2026-10-27):
         // the spinner while the machine wakes, the red `!` on a fault, nothing
         // at rest — then the bare picture in the same box.
-        let picture = match crate::ui::marks::machine_mark_element(machine, 8.0, &theme, cx) {
-            Some(mark) => badge::corner(
-                AVATAR_HEADER,
-                picture_disc,
-                div()
-                    .size(px(14.0))
-                    .rounded_full()
-                    .bg(badge::ring::header_pill(&theme))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(mark),
-                3.0,
-            ),
-            None => badge::badged(AVATAR_HEADER, picture_disc, None),
-        };
+        let picture = crate::ui::marks::machine_corner(
+            AVATAR_HEADER,
+            picture_disc,
+            machine,
+            theme.bg,
+            |ring| ring,
+            &theme,
+            cx,
+        );
         let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {

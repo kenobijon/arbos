@@ -6,7 +6,10 @@
 //! (awake, asleep, read) → nothing. The source lint (`lint_tests`) refuses a
 //! new small round `div` filled with a status colour anywhere in this crate.
 
-use gpui::{div, prelude::*, px, AnyElement, App, Div, FontWeight};
+use gpui::{
+    div, prelude::*, px, AnyElement, App, Bounds, Div, Element, ElementId, FontWeight,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Window,
+};
 
 use crate::model::MachineState;
 use crate::ui::icons::icon;
@@ -83,6 +86,171 @@ pub fn machine_mark_element(
     }
 }
 
+/// The mark's badge on a picture: how far past the picture's bottom-right
+/// corner it hangs, and the ring (a disc of the surface colour) around it.
+/// Sizes follow the picture: the glyph a quarter of it (6–12), the ring 2 pt
+/// wider on each side — Grok's 12-on-48 badge, 9-on-36 on the footer disc.
+pub const CORNER_OVERHANG: f32 = 2.0;
+pub const CORNER_RING_WIDTH: f32 = 2.0;
+pub const CORNER_GLYPH_MIN: f32 = 6.0;
+pub const CORNER_GLYPH_MAX: f32 = 12.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CornerMetrics {
+    pub glyph: f32,
+    pub ring: f32,
+    pub overhang: f32,
+}
+
+pub fn corner_metrics(picture: f32) -> CornerMetrics {
+    let glyph = (picture / 4.0)
+        .round()
+        .clamp(CORNER_GLYPH_MIN, CORNER_GLYPH_MAX);
+    CornerMetrics {
+        glyph,
+        ring: glyph + 2.0 * CORNER_RING_WIDTH,
+        overhang: CORNER_OVERHANG,
+    }
+}
+
+/// `picture` in a `size` square, bare — the same box a marked picture has,
+/// so a row's layout does not move when the mark comes and goes.
+pub fn plain(size: f32, picture: impl IntoElement) -> Div {
+    div()
+        .relative()
+        .size(px(size))
+        .flex_shrink_0()
+        .child(picture)
+}
+
+/// `picture` in a `size` square with the machine mark for `state` hanging
+/// past its bottom-right corner in a ring of `ring_color`, **in front of** the
+/// picture; the bare picture when the state is at rest. `ring` lets the
+/// caller refine the ring disc (a hover fill, a debug selector).
+pub fn machine_corner(
+    size: f32,
+    picture: impl IntoElement,
+    state: MachineState,
+    ring_color: Hsla,
+    ring: impl FnOnce(Div) -> Div,
+    theme: &Theme,
+    cx: &mut App,
+) -> Div {
+    let m = corner_metrics(size);
+    match machine_mark_element(state, m.glyph, theme, cx) {
+        Some(mark) => corner(
+            size,
+            picture,
+            ring(ring_disc(m.ring, ring_color).child(mark)),
+            m.overhang,
+        ),
+        None => plain(size, picture),
+    }
+}
+
+/// A ring disc of the surface colour, the mark centred in it.
+pub fn ring_disc(size: f32, color: Hsla) -> Div {
+    div()
+        .size(px(size))
+        .rounded_full()
+        .bg(color)
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+/// `picture` in a `size` square with `overlay` hanging `overhang` past its
+/// bottom-right corner, painted in a layer of its own so it lands in front of
+/// the picture whatever kind of primitive the picture is (a photo is a
+/// polychrome sprite and is drawn after plain quads inside one layer — a
+/// sibling div would end up under it; see [`Above`]).
+pub fn corner(
+    size: f32,
+    picture: impl IntoElement,
+    overlay: impl IntoElement,
+    overhang: f32,
+) -> Div {
+    plain(size, picture).child(above(
+        div()
+            .absolute()
+            .right(px(-overhang))
+            .bottom(px(-overhang))
+            .child(overlay),
+    ))
+}
+
+/// `child`, painted in a layer of its own: above everything the enclosing
+/// layer paints under it. Inside one GPUI layer every primitive shares one
+/// draw order and the renderer batches equal orders by kind (quads, then
+/// paths / text / icons, then photos), so a mark drawn as a sibling *after* a
+/// photo still lands under it; a fresh layer gets an order above everything
+/// already painted under its bounds. The child is laid out as if it stood
+/// here itself.
+pub fn above(child: impl IntoElement) -> Above {
+    Above {
+        child: child.into_any_element(),
+    }
+}
+
+pub struct Above {
+    child: AnyElement,
+}
+
+impl IntoElement for Above {
+    type Element = Self;
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Above {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.paint_layer(bounds, |window| self.child.paint(window, cx));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +267,25 @@ mod tests {
         ] {
             assert_eq!(machine_mark(s), MachineMark::None, "{s:?} shows no mark");
         }
+    }
+
+    #[test]
+    fn the_corner_mark_scales_with_the_picture() {
+        assert_eq!(
+            corner_metrics(48.0).glyph,
+            12.0,
+            "Grok's 12 on a 48 pt row picture"
+        );
+        assert_eq!(
+            corner_metrics(36.0).glyph,
+            9.0,
+            "9 on the 36 pt footer disc"
+        );
+        assert_eq!(corner_metrics(22.0).glyph, 6.0, "never under 6");
+        assert_eq!(corner_metrics(96.0).glyph, 12.0, "never over 12");
+        let m = corner_metrics(36.0);
+        assert_eq!(m.ring, m.glyph + 2.0 * CORNER_RING_WIDTH);
+        assert_eq!(m.overhang, CORNER_OVERHANG);
     }
 
     #[test]
