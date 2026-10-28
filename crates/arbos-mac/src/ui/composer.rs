@@ -4002,7 +4002,7 @@ impl Render for Composer {
                         .rounded_full()
                         .cursor_pointer()
                         .map(|el| highlight::button(el, &theme))
-                        .child(icon("xmark", 10.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 10.0, theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state
                                 .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
@@ -4257,7 +4257,7 @@ pub fn edit_preview_bar(line: &str, theme: &Theme, clear: impl IntoElement) -> g
         .child(
             div()
                 .flex_shrink_0()
-                .child(icon("pencil", 12.0, theme.text_muted)),
+                .child(sf_symbols::glyph("pencil", 12.0, theme.text_muted)),
         )
         .child(
             div()
