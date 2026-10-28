@@ -641,10 +641,16 @@ struct ChartPlot: View {
             GeometryReader { geo in
                 ChartScrubHost(
                     onScrub: { point in
-                        guard let frame = proxy.plotFrame else { return }
-                        let xPos = point.x - geo[frame].origin.x
-                        guard let x: Double = proxy.value(atX: xPos) else { return }
-                        let near = model.columnNear(x)
+                        let frame = proxy.plotFrame
+                        let xPos = frame.map { point.x - geo[$0].origin.x }
+                        let x: Double? = xPos.flatMap { proxy.value(atX: $0) }
+                        let near = x.flatMap { model.columnNear($0) }
+                        if DebugHooks.traceChart {
+                            NSLog("[arbos chart] scrub point=%@ plot=%@ xPos=%@ x=%@ near=%@ columns=%d", NSCoder.string(for: point),
+                                  frame.map { NSCoder.string(for: geo[$0]) } ?? "nil", xPos.map { "\($0)" } ?? "nil", x.map { "\($0)" } ?? "nil",
+                                  near.map { "\($0)" } ?? "nil", model.columns.count)
+                        }
+                        guard x != nil else { return }
                         if near != selected { Haptics.pick() }
                         selected = near
                     },
