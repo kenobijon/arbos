@@ -638,19 +638,23 @@ pub fn attachments_of(row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Vec
             let a = p.get("attachment")?;
             let key = a["ref"].as_str().filter(|r| !r.is_empty())?;
             let mime = a["mime"].as_str().unwrap_or("application/octet-stream");
-            let kind = a["kind"].as_str().map(str::to_owned).unwrap_or_else(|| {
-                if mime.starts_with("image/gif") {
-                    "gif".into()
-                } else if mime.starts_with("image/") {
-                    "image".into()
-                } else if mime.starts_with("video/") {
-                    "video".into()
-                } else if mime.starts_with("audio/") {
-                    "audio".into()
-                } else {
-                    "file".into()
-                }
-            });
+            // The app's tag (image, video, audio, pdf, doc, sheet, slides, file) when it set
+            // one, else from the mime; a GIF is always "gif" so a bot can tell it apart.
+            let kind = if mime.eq_ignore_ascii_case("image/gif") {
+                "gif".to_owned()
+            } else {
+                a["kind"].as_str().map(str::to_owned).unwrap_or_else(|| {
+                    if mime.starts_with("image/") {
+                        "image".into()
+                    } else if mime.starts_with("video/") {
+                        "video".into()
+                    } else if mime.starts_with("audio/") {
+                        "audio".into()
+                    } else {
+                        "file".into()
+                    }
+                })
+            };
             Some(json!({
                 "blob": format!("{slot}/{key}"),
                 "kind": kind,
@@ -660,8 +664,10 @@ pub fn attachments_of(row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Vec
                 "width": a["width"].as_i64(),
                 "height": a["height"].as_i64(),
                 "caption": if text.trim().is_empty() { Value::Null } else { json!(text) },
+                "duration_ms": a["durationMs"].as_i64().or_else(|| a["duration_ms"].as_i64()),
                 "chart": a.get("chartPart").is_some(),
                 "title": a["title"].as_str(),
+                "source": a.get("source").cloned().unwrap_or(Value::Null),
             }))
         })
         .collect()
@@ -2359,6 +2365,66 @@ mod tests {
         assert_eq!(att[0]["mime"], "image/png");
         assert_eq!(att[0]["name"], "chart.png");
         assert_eq!(att[0]["caption"], "the chart from the call");
+
+        // Every attachment kind goes through: a GIF the app tagged "image", a voice memo, a PDF.
+        let mid = ulid();
+        let (m3, o4) = (mid.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m3,
+                "",
+                "dev:test",
+                &UserMessageOpts {
+                    attachments: vec![
+                        UserAttachment {
+                            name: "nope.gif".into(),
+                            mime: "image/gif".into(),
+                            kind: Some("image".into()),
+                            blob_ref: Some("g1".into()),
+                            source: None,
+                        },
+                        UserAttachment {
+                            name: "memo.m4a".into(),
+                            mime: "audio/mp4".into(),
+                            kind: Some("audio".into()),
+                            blob_ref: Some("a1".into()),
+                            source: None,
+                        },
+                        UserAttachment {
+                            name: "deck.pdf".into(),
+                            mime: "application/pdf".into(),
+                            kind: None,
+                            blob_ref: Some("p1".into()),
+                            source: None,
+                        },
+                        UserAttachment {
+                            name: "clip.mp4".into(),
+                            mime: "video/mp4".into(),
+                            kind: Some("video".into()),
+                            blob_ref: Some("v1".into()),
+                            source: None,
+                        },
+                    ],
+                    sender: Some(format!("user:{o4}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        let row = doc.message(&mid).unwrap();
+        let kinds: Vec<String> = attachments_of(&row, &ChatRef::people(&g))
+            .iter()
+            .map(|a| a["kind"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(kinds, ["gif", "audio", "file", "video"]);
+        let all = attachments_of(&row, &ChatRef::people(&g));
+        assert_eq!(all[2]["mime"], "application/pdf");
+        assert_eq!(all[0]["caption"], Value::Null);
 
         // Scopes: files off by default, PATCH merges, unknown names are ignored by the db layer.
         let agent = state.db.outside_agent(&pid).unwrap().unwrap();
