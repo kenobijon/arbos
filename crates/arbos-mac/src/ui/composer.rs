@@ -3935,7 +3935,7 @@ impl Render for Composer {
                         .justify_center()
                         .rounded_full()
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, &theme))
                         .child(icon("xmark", 10.0, theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state
