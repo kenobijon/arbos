@@ -2518,7 +2518,9 @@ impl Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.85)))
+            // A scrim disc over a picture: black washes, not the text-wash token
+            // (which would vanish on a dark thumbnail).
+            .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.85))) // hover-fill: exception overlay
             .role(AriaRole::Button)
             .aria_label(STAGED_REMOVE_LABEL)
             .tooltip(|_, cx| cx.new(|_| TextTip(STAGED_REMOVE_LABEL.into())).into())
