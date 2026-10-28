@@ -257,6 +257,11 @@ pub fn overlay(
         }
     }
 
+    // One material ([feedback search-popup-single-layer-2026-10-28]): the
+    // popup plate — frosted on Glass, the flat card on Matte — is the only
+    // fill between the chat and the rows. The rows are transparent; the
+    // highlighted one is a tint on top (`highlight::row`). No dim behind,
+    // no second border: `glass::popup_plate`.
     let panel = div()
         .id("palette-panel")
         .key_context("Palette")
@@ -266,10 +271,6 @@ pub fn overlay(
         .flex()
         .flex_col()
         .rounded(px(RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
         .overflow_hidden()
         .debug_selector(|| "palette-panel".into())
         .on_action(cx.listener(|this, a: &Pick1, w, cx| this.palette_pick_action(a, w, cx)))
@@ -284,6 +285,7 @@ pub fn overlay(
         .child(field)
         .child(hairline)
         .child(list);
+    let panel = glass::popup_plate(RADIUS, &theme, panel);
 
     // Spotlight hangs high, not mid-window: the shared backdrop hangs the
     // panel `top` under the window edge.
