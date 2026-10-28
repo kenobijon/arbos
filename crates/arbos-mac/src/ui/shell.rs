@@ -3578,8 +3578,11 @@ impl Shell {
         // 876, which put the bubble 21–28 pt right of the pill's edge
         // ([feedback agent-bubble-inset-2026-10-22]). The pill itself has
         // not moved.
-        // Wheel over the input (sibling of the list) still scrolls the chat —
-        // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+        // Wheel over a short input (sibling of the list) still scrolls the
+        // chat — same as dragging over a bubble ([feedback
+        // app-01M5PDB3QYAPBPA4FJXZE1FFD0]). A tall overflowing field handles
+        // the wheel itself and stops propagation so the transcript stays put
+        // ([feedback app-01M5WNET9M9JY4D7W5YAZG2685]).
         let composer_slot: AnyElement = match &blocked_peer {
             Some(person) => self.blocked_composer(person, &theme, cx),
             None => self.composer.clone().into_any_element(),
