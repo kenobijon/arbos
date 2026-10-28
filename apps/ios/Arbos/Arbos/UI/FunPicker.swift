@@ -227,8 +227,9 @@ struct StickerBubble: View {
         }
         .frame(width: Self.size, height: Self.size)
         .contentShape(Rectangle())
+        // A plain tap, no drag gesture of its own: the system's interactive edge pop
+        // (#2239) owns horizontal swipes, same as `ImageBubble`.
         .onTapGesture {
-            guard !BackSwipe.bubbleSwipeActive else { return }
             viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
         }
         .accessibilityIdentifier("sticker-bubble")
