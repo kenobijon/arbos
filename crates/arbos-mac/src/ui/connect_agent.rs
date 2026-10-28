@@ -537,8 +537,10 @@ fn wake_sections(
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(8.0))
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_size(px(crate::ui::theme::TEXT_TINY))
                             .text_color(theme.text_muted)
                             .child(label),
@@ -546,6 +548,8 @@ fn wake_sections(
                     .when_some(hint, |el, h| {
                         el.child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .text_size(px(crate::ui::theme::TEXT_TINY))
                                 .text_color(theme.text_muted)
                                 .child(h),
