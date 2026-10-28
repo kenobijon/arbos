@@ -523,14 +523,17 @@ pub fn on_announce(
     if targets.is_empty() {
         return;
     }
-    // Pictures, files, GIFs and chart PNGs on the row (the announce carries text only).
-    let attachments =
-        crate::matrix::backfill::load_doc(state, &chat.chat_id, chat.project_id.as_deref())
-            .ok()
-            .flatten()
-            .and_then(|doc| doc.message(message_id))
-            .map(|row| attachments_of(&row, chat))
-            .unwrap_or_default();
+    // Pictures, files, GIFs and chart PNGs on the row, and the message it replies to (the
+    // announce carries text only).
+    let doc = crate::matrix::backfill::load_doc(state, &chat.chat_id, chat.project_id.as_deref())
+        .ok()
+        .flatten();
+    let attachments = doc
+        .as_ref()
+        .and_then(|doc| doc.message(message_id))
+        .map(|row| attachments_of(&row, chat))
+        .unwrap_or_default();
+    let reply_to = reply_json(state, doc.as_ref(), chat, reply_to);
     for (p, wake, chat_json) in targets {
         // Its own message, announced by the relay on its behalf: not news to it.
         if sender.kind == "agent" && sender.id == p.id {
@@ -620,10 +623,71 @@ pub fn attachments_of(row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Vec
         .collect()
 }
 
-/// One row in the shape `message.received.message` uses (history and events agree).
-pub fn message_json(state: &AppState, row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Value {
+/// How much of the parent's text a `reply_to` carries.
+const REPLY_TEXT_MAX: usize = 500;
+
+/// `reply_to` of an event or row: the parent message `{id, from, text (≤ 500 chars),
+/// attachments}` so the agent sees what is being answered (Scout, 2026-10-28); `{id}` alone when
+/// the parent is not in this chat's doc; `null` for a message that replies to nothing.
+pub fn reply_json(
+    state: &AppState,
+    doc: Option<&arbos_core::doc::ChatDoc>,
+    chat: &ChatRef,
+    reply_to: Option<&str>,
+) -> Value {
+    let Some(id) = reply_to.filter(|r| !r.is_empty()) else {
+        return Value::Null;
+    };
+    let Some(parent) = doc.and_then(|d| d.message(id)) else {
+        return json!({ "id": id });
+    };
+    let full = parent.text();
+    let text = if full.chars().count() > REPLY_TEXT_MAX {
+        let cut: String = full.chars().take(REPLY_TEXT_MAX).collect();
+        format!("{cut}…")
+    } else {
+        full
+    };
+    json!({
+        "id": id,
+        "from": from_json(state, &parent, chat),
+        "text": text,
+        "attachments": attachments_of(&parent, chat),
+    })
+}
+
+/// One row in the shape `message.received.message` uses (history and events agree); `doc` is
+/// the chat it sits in, for the parent of its `reply_to`.
+pub fn message_json(
+    state: &AppState,
+    row: &arbos_core::doc::MessageView,
+    chat: &ChatRef,
+    doc: &arbos_core::doc::ChatDoc,
+) -> Value {
+    let mentions: Vec<String> = row.rest["mentions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "id": row.id,
+        "role": row.role,
+        "text": row.text(),
+        "from": from_json(state, row, chat),
+        "reply_to": reply_json(state, Some(doc), chat, row.rest["replyTo"].as_str()),
+        "mentions": mentions,
+        "attachments": attachments_of(row, chat),
+        "created_at": row.rest["createdAt"].as_i64(),
+    })
+}
+
+/// Who wrote a row, as `message.from` names them.
+fn from_json(state: &AppState, row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Value {
     let raw = row.rest["sender"].as_str().unwrap_or("");
-    let from = if let Some(uid) = raw.strip_prefix("user:") {
+    if let Some(uid) = raw.strip_prefix("user:") {
         let s = Sender::user(state, uid);
         json!({ "kind": "user", "id": uid, "name": s.name, "handle": s.handle })
     } else if let Some(pid) = raw.strip_prefix("agent:") {
@@ -654,25 +718,7 @@ pub fn message_json(state: &AppState, row: &arbos_core::doc::MessageView, chat: 
         }
     } else {
         json!({ "kind": "system" })
-    };
-    let mentions: Vec<String> = row.rest["mentions"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    json!({
-        "id": row.id,
-        "role": row.role,
-        "text": row.text(),
-        "from": from,
-        "reply_to": row.rest["replyTo"].as_str(),
-        "mentions": mentions,
-        "attachments": attachments_of(row, chat),
-        "created_at": row.rest["createdAt"].as_i64(),
-    })
+    }
 }
 
 /// Message ids already handed to outside agents by the row fallback (per chat, newest 64), so
@@ -1744,12 +1790,19 @@ pub async fn history(
         None => ChatRef::people(&chat_id),
     };
     let limit = q.limit.unwrap_or(50).clamp(1, 100);
-    let rows =
-        match crate::matrix::backfill::load_doc(&state, &chat_id, chat_ref.project_id.as_deref()) {
-            Ok(Some(doc)) => doc.messages(),
-            Ok(None) => Vec::new(),
-            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-        };
+    let doc = match crate::matrix::backfill::load_doc(
+        &state,
+        &chat_id,
+        chat_ref.project_id.as_deref(),
+    ) {
+        Ok(Some(doc)) => doc,
+        Ok(None) => return Json(
+            json!({ "chat": chat, "messages": [], "has_more": false, "next_before": Value::Null }),
+        )
+        .into_response(),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let rows = doc.messages();
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|m| m.role == "user" || m.role == "assistant" || m.role == "project")
@@ -1761,7 +1814,7 @@ pub async fn history(
     let start = end.saturating_sub(limit);
     let messages: Vec<Value> = rows[start..end]
         .iter()
-        .map(|m| message_json(&state, m, &chat_ref))
+        .map(|m| message_json(&state, m, &chat_ref, &doc))
         .collect();
     Json(json!({
         "chat": chat,
@@ -1792,6 +1845,7 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          Read:    GET  {relay}/asp/inbox?since=0&wait=25      (events; `next` is the next `since`)\n\
          Live:    WS   {relay}/asp/socket?since=0              (same events, pushed)\n\
          History: GET  {relay}/asp/chats/<chat id>/messages?before=<message id>&limit=50   (same row shape, oldest first)\n\
+         Reply:   message.reply_to is the parent message {{id, from, text (first 500 chars), attachments}} when the message answers one\n\
          Files:   GET  {relay}/asp/files/<blob>   where <blob> is attachments[].blob on a message (pictures, files, GIFs, chart PNGs);\n\
                   needs the owner's switch \"Open files shared in chat\" (files.read) on the agent's profile\n\
          Write:   POST {relay}/asp/events  {{\"type\":\"message.post\",\"chat\":\"<chat id from the event>\",\"text\":\"…\",\"reply_to\":\"<message id>\"}}\n\
@@ -2130,12 +2184,53 @@ mod tests {
             .unwrap();
         let rows = doc.messages();
         let chat_ref = ChatRef::people(&g);
-        let j = message_json(&state, &rows[0], &chat_ref);
+        let j = message_json(&state, &rows[0], &chat_ref, &doc);
         assert_eq!(j["id"], msg_id);
         assert_eq!(j["from"]["kind"], "user");
         assert_eq!(j["from"]["id"], other);
         assert_eq!(j["attachments"][0]["blob"], format!("people:{g}/abc123"));
         assert_eq!(j["text"], "the chart from the call");
+        assert_eq!(j["reply_to"], Value::Null);
+
+        // A reply: the event's `reply_to` carries the parent — its sender, text and picture.
+        let reply_id = ulid();
+        let (r2, parent, o3) = (reply_id.clone(), msg_id.clone(), owner.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &r2,
+                "is this the final one?",
+                "dev:test",
+                &UserMessageOpts {
+                    sender: Some(format!("user:{o3}")),
+                    ..Default::default()
+                },
+            )?;
+            doc.set_message_fields(&r2, &[("replyTo", json!(parent))]);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let me = Sender::user(&state, &owner);
+        on_announce(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &reply_id,
+            "is this the final one?",
+            Some(&msg_id),
+            &[],
+        );
+        let events = state.db.asp_events_after(&pid, 1, 10).unwrap();
+        let r = &events[0].1["message"]["reply_to"];
+        assert_eq!(r["id"], msg_id);
+        assert_eq!(r["from"]["id"], other);
+        assert_eq!(r["text"], "the chart from the call");
+        assert_eq!(r["attachments"][0]["blob"], format!("people:{g}/abc123"));
+        // An unknown parent keeps the id alone.
+        assert_eq!(
+            reply_json(&state, Some(&doc), &chat_ref, Some("nope")),
+            json!({ "id": "nope" })
+        );
     }
 
     #[test]
