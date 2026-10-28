@@ -1136,6 +1136,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::OutsideAgentStatus { .. }
         | ClientCommand::OutsideAgentRotate { .. }
         | ClientCommand::OutsideAgentRevoke { .. }
+        | ClientCommand::OutsideAgentScope { .. }
+        | ClientCommand::OutsideAgentWakeSet { .. }
+        | ClientCommand::OutsideAgentWakeTest { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }

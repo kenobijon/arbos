@@ -173,6 +173,35 @@ the_rows_time_shrinks_then_hides_before_the_name_gives,
 dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width}`.
 Rig: `<config>/sidebar_width` (the saved width) + `ARBOS_SIDEBAR_COLLAPSED=0`.
 
+## Split handles: a wide grab, a hairline look (Jacob 2026-10-28, [feedback sidebar-slide-handle-minimal-2026-10-28])
+
+**Every split / resize handle on the Mac is macOS's split-view divider: what
+the pointer grabs is wide and invisible, what the eye sees is at most a 1 pt
+low-contrast hairline that brightens a little on hover and a little more while
+dragging. Never a thick bar, never a coloured fill.** Jacob (2026-10-28 15:15 UTC, v0.6.331): "the
+slide highlight on the side bar is wrong. Should make this much more minimal"
+— the sidebar's handle lit its whole 10 pt band in `primary` at 45 % on hover,
+a fat light-grey bar down the sidebar's edge. #2082's tester note ("fidgety")
+was about the grab, not the look; the grab stays generous, the look goes.
+Rules (`ui/split_handle.rs`):
+
+| Part | Rule |
+|---|---|
+| Hit band | `HIT_WIDTH` **10** pt inside the pane's right edge, full height, `col-resize` cursor, **never drawn** (8–10 pt is the range: easy to start, does not eat the list) |
+| Idle | nothing of the handle's own; the pane's separator is the only line — the sidebar's and the rail's `border_r_1` in `theme.border` (white 8 % / black 10 %), the right info pane's `pane_edge` hairline |
+| Hover | a `LINE_WIDTH` **1** pt hairline flush with the edge, over the separator, text colour at `HOVER_ALPHA` **0.18** — a step above the border, still low contrast |
+| Dragging | the same hairline at `DRAG_ALPHA` **0.30** — one step more, held for the whole gesture (GPUI suppresses hover styles during a drag; `split_handle::DragState` carries the state, raised with the drag's ghost view and lowered when GPUI drops it at mouse up) |
+| Where | one builder, `split_handle::right_edge(id, theme, dragging)`; the sidebar's `sidebar-resize` and the rail's `rail-resize` are that element with the drag wiring (`sidebar::resize_handle`). The right info pane has a fixed width (`Shell::pane_width`) and so no handle — its hairline rule is the one above. Any new divider uses the same builder |
+| Snap / width rules | unchanged: `SIDEBAR_WIDTH_MIN` 220, hysteresis 16, rail snap and restore (`ui/sidebar_fit.rs`, § above) |
+
+Pinned by `split_handle::tests::{the_hit_band_is_generous_and_the_line_is_a_hairline,
+the_line_is_dark_at_rest_and_brightens_in_two_steps,
+the_drag_state_lowers_itself_when_the_ghost_drops,
+the_rendered_hit_band_is_wide_and_the_drawn_line_is_one_point}` (a headless
+render measures the hit band at 10 × full height and the drawable line at
+1 × full height, both flush with the pane's edge). The `// hover-fill:
+exception handle` marker in `highlight`'s lint is this hairline's.
+
 ## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
 
 **The footer is the top strip mirrored at the window's bottom edge: a 60 pt
@@ -264,9 +293,10 @@ backdrop): the chat behind gets no wheel and no key while it is up; Esc,
 
 | Item | Value (measured on `ref-grok-command-palette.png`, 2 px/pt) |
 |---|---|
-| Panel | 558 wide (`palette::WIDTH`), radius 12, `card()` fill, hangs at 12 % of the window height (≥ 48), at most 72 % tall |
-| Field row | 49 tall, magnifier 17 (12.5 visible) inset 16.5, "Search" at 17 pt; 1 pt hairline under it |
-| List | inset 10, 8 over the first row; rows 49 tall, 2 apart, radius 12, highlight `surface_2` |
+| Panel | 558 wide (`palette::WIDTH`), radius 12, hangs at 12 % of the window height (≥ 48), at most 72 % tall |
+| Material | **one plate** ([feedback search-popup-single-layer-2026-10-28], Jacob 2026-10-28 "double transparency on search pop up is annoying"; Scout's report of the same): `glass::popup_plate` — on **Glass** the window frosted under the panel at `glass::POPUP_BLUR` 24 (the sheet's), the card tint at the popup floor `theme.popup()` (`POPUP_WASH_FLOOR` 0.80, adaptive above it), the glass family's 1 pt rim + top highlight, the sheet's lift shadow; on **Matte** the flat `surface_1` card with a 1 pt `border_strong` hairline. **Nothing else between the chat and the rows**: the backdrop does not dim (`modal::PASSTHROUGH_BACKDROP_ALPHA` 0 — Spotlight does not dim the desktop), the rows have no fill of their own, the field row and the list sit straight on the plate. Readability: a 15 pt line of transcript under the panel must not be legible — the blur erases it, the tint flattens what is left (`PopupMaterial::backdrop_bleed` ≤ 0.2) |
+| Field row | 49 tall, magnifier 17 (12.5 visible) inset 16.5, "Search" at 17 pt; 1 pt hairline under it — the panel's one inner line |
+| List | inset 10, 8 over the first row; rows 49 tall, 2 apart, radius 12; rows transparent, the highlighted / hovered row is the `ui::highlight` tint on top (`Shape::Own`) |
 | Row | picture 24 (chat disc / server square / `#` tile / thumbnail or glyph tile), name 13.5 medium, subtitle 12.5 muted |
 | Shortcut badge | ⌘1–⌘9 on the first nine rows: 27 × 19, radius 6, 8 from the row's right edge |
 | Keys | ↑↓ move the highlight (`ComposerInput::on_arrow`), ⏎ opens, ⌘1–9 open that row, Esc closes |
@@ -312,7 +342,7 @@ app-wide, the bar is this chat only. Code: `crate::chat_search` (rules),
 | Count | "n of m" over the loaded rows, 1 = the oldest loaded (Find's order); the cursor starts on the newest hit; "No matches"; nothing while nothing is typed |
 | Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism |
 | Keys | **⌘F toggles** (Jacob 2026-10-27, [feedback search-toggle-click-outside-mac-2026-10-27]): closed → opens and focuses the field; open → closes exactly like ✕ / Esc (marks go, the composer types again), also with the field focused — the chord is a root action, the text input never swallows it. Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention. **⌘⇧F / ⌘K toggle the palette** the same way |
-| Click outside | a mouse-down anywhere outside the bar closes it, and anywhere outside the palette's panel dismisses the palette — **without swallowing the click**: the message, sidebar row or button under it answers in the same click (`Shell::click_outside`, capture phase against the bar's / panel's last-painted bounds; the palette's backdrop is see-through for the mouse — `modal::modal_overlay_top_passthrough` — and still dims and still swallows the wheel). A click inside the bar / panel keeps it. The Forward picker and the media viewer stay true modals (#1632) |
+| Click outside | a mouse-down anywhere outside the bar closes it, and anywhere outside the palette's panel dismisses the palette — **without swallowing the click**: the message, sidebar row or button under it answers in the same click (`Shell::click_outside`, capture phase against the bar's / panel's last-painted bounds; the palette's backdrop is see-through for the mouse — `modal::modal_overlay_top_passthrough` — does not dim (§ Command palette, Material) and still swallows the wheel). A click inside the bar / panel keeps it. The Forward picker and the media viewer stay true modals (#1632) |
 | Beyond the loaded rows | ‹ on the oldest loaded hit of a **server channel** asks the relay for a page (`ChannelLoadOlder`), shows "searching older…", moves on to the page's older hit when it lands, keeps paging while rows come without a hit, and wraps once the room says there is nothing above (`SyncEvent::ChannelHistoryEnd`). A chat doc (agent, DM, group) is whole on this Mac, so ‹ wraps at once |
 | Not | no second field in the header, no dropdown of senders, no match counter in the pill, no sidebar field |
 
@@ -380,6 +410,37 @@ below's start, so no empty sliver is highlighted at the end of the row above.
 Pinned by `ui::composer::caret_tests` (every move and extend on a wrapped
 two-paragraph draft in a 360 pt field, ⌘⌫, ⌥ arrows, focused vs blurred
 routing — all through the real keymap) and `keymap_tests::caret_chords_route_to_the_focused_composer_only`.
+
+### Composer — keyboard layouts (Scout 2026-10-28, [feedback mention-hotkey-layout-2026-10-28])
+
+There is no `@` hotkey: the mention picker opens when an `@` is **typed** at a
+word start, and every layout types it differently (US ⇧2, German ⌥L **and**
+⌃⌥L, Spanish ⌥G, Swiss ⌥G, French/Italian/Norwegian a plain key, Finnish /
+Portuguese ⌥2 — read off the real layouts with `UCKeyTranslate`). GPUI's macOS
+layer drops the character of any chord with Control held and AppKit never
+hands such a chord to `insertText:`, so German ⌃⌥L reached the composer as a
+bare `ctrl-alt-l` and typed nothing (on German the whole ⌃⌥ column repeats
+the ⌥ column — Q `«`, F `ƒ`, Y `¥` — AltGr by another name). Rule: **a
+Control+Option chord no binding took types what the layout says it types**,
+when that is printable — the composer's `on_key_down` asks
+`ui::key_layout::typed_text` (Carbon TIS + `UCKeyTranslate`, the table
+`NSTextView` uses) and inserts the result. Nothing is special-cased to `@` or
+to German; US ⌃⌥L is still a control character and types nothing, as in
+TextEdit; plain Control chords are left alone (US ⌃2 reports "2" but is not
+typed). Bindings run first, so ⌃⌥F stays Send Feedback on German rather than
+typing `ƒ`. Chords that arrive with their character (⌥L = `alt-l` + `@`) are
+the platform's to type and are not typed twice.
+
+Shortcut audit: GPUI reports every letter chord under ⌘ by the character the
+layout gives that key with ⌘ held (non-ASCII layouts fall back to the ⌘ table),
+so ⌘B / ⌘I / ⌘⇧X / ⌘F / ⌘⇧F / ⌘K / ⌘G and the caret chords (named keys) work
+on QWERTZ, AZERTY and friends. Only `cmd-{` / `cmd-}` (tabs) are unreachable
+where braces need ⌥; **⌃⇥ / ⌃⇧⇥** are bound as the layout-independent tab
+chords. Pinned by `ui::key_layout::tests` (layout tables read off the real
+German / US / French / Spanish layouts), `ui::composer::layout_chord_tests`
+(the chords dispatched exactly as the platform builds them, through the real
+keymap, into a focused composer) and
+`keymap_tests::non_us_at_sign_chords_are_nobodys_and_tabs_have_layout_free_chords`.
 
 ### Composer — formatting chords and live styling (Jacob 2026-10-27, [feedback chat-markdown-composer-2026-10-27])
 
@@ -1357,7 +1418,7 @@ a slightly stronger fill of the same shape; pressed = one step more.** One token
 | Fills | washes of `text` so one number reads the same on the chat, sidebar, card, frosted plate and Glass. Matte dark **0.055 / 0.09 / 0.13** (hover / selected / pressed), Matte light **0.045 / 0.08 / 0.12**, Glass dark **0.08 / 0.12 / 0.16**, Glass light **0.06 / 0.10 / 0.14**. A selected row keeps its step under the pointer; pressed is the third step for every row | `highlight::alphas`, `highlight::fills` |
 | Transparent buttons | an icon disc, a text button, a tab segment, a small ×: the same hover / pressed washes on its own rounded shape | `highlight::button`, `button_with` (extra hover styling), `segment` (the on segment is a filled control) |
 | Filled controls | the fill at rest, the wash composited over it under the pointer and while down — `surface_2` discs and pills, `field` pills, the glass circle, the blue update disc. Dark: the old chip rule (a shade lighter); light: a shade darker (lifting `#E8E8E8` toward white vanished on the `#F6F6F6` sidebar). `DISC_HOVER_LIFT` / `DISC_PRESSED_LIFT` are gone | `highlight::washed(el, base, theme)`, `highlight::over` |
-| Exceptions | a line that must set its own fill says why: `// hover-fill: exception <kind>` on it or the line above — `handle` (the sidebar resize hairline), `overlay` (white / black washes over a photo or video), `code-card` (the copy pill's four states), `danger` (a Delete label's `danger_soft`), `card-option` (the approval card's own palette), `choice` (a chosen chip / segment in a form, not a list selection), `removed-by-sibling`. The "Add agent" / "Add your agent" rows and the add-agent popover are untouched while [feedback add-agent-row-removal] removes them | `highlight::tests::EXCEPTION_KINDS` |
+| Exceptions | a line that must set its own fill says why: `// hover-fill: exception <kind>` on it or the line above — `handle` (a split handle's hover hairline, `ui/split_handle.rs`), `overlay` (white / black washes over a photo or video), `code-card` (the copy pill's four states), `danger` (a Delete label's `danger_soft`), `card-option` (the approval card's own palette), `choice` (a chosen chip / segment in a form, not a list selection), `removed-by-sibling`. The "Add agent" / "Add your agent" rows and the add-agent popover are untouched while [feedback add-agent-row-removal] removes them | `highlight::tests::EXCEPTION_KINDS` |
 | Focus | the keyboard focus ring is not part of this token and did not change | — |
 
 Pinned by `highlight::tests::no_hover_or_pressed_fill_outside_the_token` (scans `src/ui` for

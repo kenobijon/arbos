@@ -6253,6 +6253,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Details → Can → a switch. The row flips at once; the relay's answer confirms it.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) {
+        outsideInfo[projectId]?.scopes[scope] = on
+        guard !isFixture else { return }
+        Task {
+            do {
+                if let info = try await api.setOutsideScope(projectId, scope, on: on) {
+                    outsideInfo[projectId] = info
+                }
+            } catch {
+                outsideInfo[projectId]?.scopes[scope] = !on
+                fail("change what the agent may do", error)
+            }
+        }
+    }
+
     func revokeOutsideAgent(_ projectId: Id) async {
         do {
             try await api.revokeOutsideAgent(projectId)
@@ -6260,6 +6276,40 @@ final class AppModel: ObservableObject {
         } catch {
             fail("revoke the agent's access", error)
         }
+    }
+
+    /// Connection card → Wake URL → Save ([feedback outside-agents-wake-ios-2026-10-28]). An empty
+    /// URL clears the URL and the header value together; an empty value with a URL keeps the stored
+    /// value (it is never shown back, so blank means "unchanged"). Returns the relay's short reason
+    /// when it refused, `nil` when saved.
+    func saveOutsideWake(_ projectId: Id, url: String, auth: String) async -> String? {
+        let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let auth = auth.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let info = url.isEmpty
+                ? try await api.setOutsideWake(projectId, url: "", auth: "")
+                : try await api.setOutsideWake(projectId, url: url, auth: auth.isEmpty ? nil : auth)
+            if let info { outsideInfo[projectId] = info }
+            return nil
+        } catch let e as RelayError where !e.message.isEmpty {
+            return e.message
+        } catch {
+            return "Could not reach the relay"
+        }
+    }
+
+    /// Connection card → Wake URL → Send test wake: `(ok, text)` for the line under the buttons.
+    func testOutsideWake(_ projectId: Id) async -> (ok: Bool, text: String) {
+        let result: (ok: Bool, text: String)
+        do {
+            result = try await api.testOutsideWake(projectId)
+        } catch let e as RelayError where !e.message.isEmpty {
+            result = (false, e.message)
+        } catch {
+            result = (false, "Could not reach the relay")
+        }
+        await refreshOutsideInfo(projectId)
+        return result
     }
 
     // MARK: Create sheet pictures (Jacob, 2026-10-25)
