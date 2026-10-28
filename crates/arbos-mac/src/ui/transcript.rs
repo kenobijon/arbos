@@ -3036,7 +3036,6 @@ impl Transcript {
                 }
                 div()
                     .w_full()
-                    .relative()
                     .flex()
                     .when(mine, |el| el.justify_end())
                     .when(!mine, |el| el.justify_start())
