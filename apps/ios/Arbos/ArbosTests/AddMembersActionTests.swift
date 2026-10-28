@@ -85,7 +85,8 @@ final class AddMembersActionTests: XCTestCase {
         // own note under the search field, not as a toast.
         model.failureClaim = FailureClaim(surface: "people-sheet", verbs: ["add members", "add @", "add the agent", "add them", "create the group"])
         let toastsBefore = model.toasts.count
-        XCTAssertFalse(await model.addMembers(chatId: Self.chatId, handles: [], agentIds: [Self.agentId]))
+        let okWithSheet = await model.addMembers(chatId: Self.chatId, handles: [], agentIds: [Self.agentId])
+        XCTAssertFalse(okWithSheet)
         let claimed = try XCTUnwrap(model.claimedFailure, "the sheet shows it inline")
         XCTAssertEqual(claimed.verb, "add members")
         XCTAssertEqual(model.toasts.count, toastsBefore, "no toast while the sheet claims the verb")
