@@ -4360,6 +4360,11 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
         mime: att.mime,
         kind: att.kind.map(attachment_kind_str),
         blob_ref: att.blob_ref,
+        source: att.source.map(|s| arbos_core::doc::AttachmentSource {
+            provider: s.provider,
+            id: s.id,
+            page_url: s.page_url,
+        }),
     }
 }
 
@@ -4450,6 +4455,7 @@ async fn upload_outgoing(
         mime,
         kind,
         blob_ref,
+        source: None,
     }
 }
 
@@ -4774,6 +4780,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             kind: Some(AttachmentKind::Audio),
             title: None,
             chart_part: None,
+            source: None,
         },
     }
 }

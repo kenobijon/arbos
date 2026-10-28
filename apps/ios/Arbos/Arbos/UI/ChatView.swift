@@ -2672,6 +2672,12 @@ struct ChatSession: View {
             cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
             onDeleteBackwardEmpty: removeLastPending,
+            onPasteImage: { data, mime, ext in
+                // Keep GIF/WebP bytes and mime; do not re-encode to PNG/JPEG.
+                let stamp = ChatView.photoStamp.string(from: Date())
+                pending.append(.init(name: "Pasted image \(stamp).\(ext)", mime: mime, data: data))
+                composerFocused = true
+            },
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
                 if !memoHoldActive {
@@ -3549,6 +3555,8 @@ private struct ComposerField: View {
     let prompt: (String) -> String
     /// ⌫ on an empty field: the chat screen drops its last pending attachment.
     let onDeleteBackwardEmpty: () -> Void
+    /// Paste menu → image / GIF into pending attachments (mime kept).
+    var onPasteImage: ((Data, String, String) -> Void)? = nil
     let onCancelRecording: () -> Void
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
@@ -3660,7 +3668,8 @@ private struct ComposerField: View {
                 MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                                 placeholder: prompt(draft.text), theme: theme,
                                 agentProject: { model.agent(member: $0, chatId: chatId) },
-                                onDeleteBackwardEmpty: onDeleteBackwardEmpty)
+                                onDeleteBackwardEmpty: onDeleteBackwardEmpty,
+                                onPasteImage: onPasteImage)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
