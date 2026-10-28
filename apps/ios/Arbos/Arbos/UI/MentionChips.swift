@@ -328,7 +328,7 @@ final class MentionTable {
             }
             entry.picture.padding(.leading, Self.padX)
         }
-        .frame(width: Self.capWidth, height: height)
+        .frame(width: Self.capWidth, height: height, alignment: .leading)
         let renderer = ImageRenderer(content: view)
         renderer.scale = UIScreen.main.scale
         guard let img = renderer.uiImage else { return nil }

@@ -15,7 +15,7 @@ final class MentionChipSnapshotTests: XCTestCase {
     func testEachChipIsOnePillWithEvenInsetsAndThePictureOnItsCentre() throws {
         guard #available(iOS 18.0, *) else { throw XCTSkip("the pill renderer needs iOS 18") }
         let shot = try render("@comms and @unconst, the embargo lifts at 9.", name: "mention-chips-one-line")
-        let pills = shot.components(near: marker)
+        let pills = pillBoxes(in: shot)
         XCTAssertEqual(pills.count, 2, "one pill per chip, nothing else in the marker colour")
         for pill in pills {
             try assertOnePill(pill, in: shot)
@@ -26,7 +26,7 @@ final class MentionChipSnapshotTests: XCTestCase {
         guard #available(iOS 18.0, *) else { throw XCTSkip("the pill renderer needs iOS 18") }
         let shot = try render("a first line of plain words that wraps well before it reaches @comms near the end",
                               name: "mention-chips-second-line", width: 230)
-        let pills = shot.components(near: marker)
+        let pills = pillBoxes(in: shot)
         XCTAssertEqual(pills.count, 1)
         let pill = try XCTUnwrap(pills.first)
         XCTAssertGreaterThan(CGFloat(pill.minY) / scale, 12 + Theme.body, "the chip is on a later line, not the first")
@@ -34,6 +34,12 @@ final class MentionChipSnapshotTests: XCTestCase {
     }
 
     // MARK: Measuring
+
+    /// The marker regions at least half a pill tall: the counters of letters such as "o" on the
+    /// pill are marker colour too, but closed off from it by the glyph.
+    private func pillBoxes(in shot: Bitmap) -> [Box] {
+        shot.components(near: marker).filter { CGFloat($0.height) / scale > MentionTable.pillHeight / 2 }
+    }
 
     private func assertOnePill(_ pill: Box, in shot: Bitmap, file: StaticString = #filePath, line: UInt = #line) throws {
         let pt = scale
