@@ -768,6 +768,14 @@ struct ChatSession: View {
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         let _ = SendTrace.recent ? SendTrace.mark("session-body", detail: "tick=\(tick) version=\(model.messagesVersion[chatId] ?? 0) rows=\(rows.count) msgs=\(messages.count)", once: false) : ()
         #endif
+        // Split so the type checker can finish (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG
+        // paste path tipped the one-expression body over Xcode's limit).
+        sessionRoot
+    }
+
+    /// Transcript canvas + composer inset (no sheets / lifecycle).
+    @ViewBuilder
+    private var sessionCanvas: some View {
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
         // centre the glass bar over the transcript (feedback app-01M5P98RB40WKA70R70DMDN97E).
@@ -970,6 +978,12 @@ struct ChatSession: View {
             }
             .ignoresSafeArea()
         }
+    }
+
+    /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
+    @ViewBuilder
+    private var sessionRoot: some View {
+        sessionCanvas
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
