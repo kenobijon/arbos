@@ -183,13 +183,12 @@ mod tests {
             revoked(dev("m3", "Mac (Mac)", "github", false, Some(0))),
             dev("p2", "iPhone", "github", false, Some(60_000)),
         ];
-        let rows = rows(&list, NOW);
+        let shown = rows(&list, NOW);
         assert_eq!(
-            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            shown.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["me", "p1", "p2"],
             "only live rows, this Mac first, then the relay's order"
         );
-        assert!(rows.iter().all(|r| !r.id.starts_with('m')));
         assert_eq!(
             live(&list).count(),
             3,
