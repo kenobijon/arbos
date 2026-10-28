@@ -1683,6 +1683,21 @@ impl Agent {
         Some(ReplyAttribution { fields })
     }
 
+    /// Who wrote a row in a people chat, without the asker and reply fields: what a control row
+    /// (an agent-to-agent hand-off, a job's host row) carries so no reader sees a line from a
+    /// bare `agent` (Arbonites, 2026-10-28), while it still does not count as the answer.
+    pub fn people_sender_fields(&self, chat_id: &str) -> Option<Vec<(&'static str, Value)>> {
+        let attr = self.people_reply_fields(chat_id)?;
+        Some(
+            attr.fields
+                .into_iter()
+                .filter(|(k, _)| {
+                    !matches!(*k, "askedBy" | "askedByHandle" | "inReplyTo" | "replyTo")
+                })
+                .collect(),
+        )
+    }
+
     /// The agent was removed while answering here: abort that turn.
     async fn handle_people_stop(self: &std::sync::Arc<Self>, chat_id: &str) -> Result<()> {
         let running = self
