@@ -1247,6 +1247,25 @@ struct ChatSession: View {
                         startCall(.voice)
                         #endif
                     case "recording": recorder.start()
+                    // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
+                    // the n-th newest message row (0 = newest) through the menu's own path, the
+                    // pasteboard printed to the console, then the composer's paste 2 s later.
+                    case let s where s.hasPrefix("copy"):
+                        #if DEBUG
+                        let n = Int(s.split(separator: ":").dropFirst().first ?? "0") ?? 0
+                        let candidates = rows.filter { isMessageRow($0) }
+                        if n < candidates.count {
+                            let row = candidates[candidates.count - 1 - n]
+                            runMessageMenu(.copy, row: row)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                MessagePasteboard.debugDump()
+                                let media = MessagePasteboard.pendingAttachments()
+                                if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
+                                if let words = UIPasteboard.general.string { composerDraft.text = words }
+                                print("rig copy: composer staged \(media.count) attachment(s), draft \"\(composerDraft.text)\"")
+                            }
+                        }
+                        #endif
                     case "scrollup":
                         if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "media", "media-forward", "media-file":
@@ -2165,7 +2184,8 @@ struct ChatSession: View {
         return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
     }
 
-    /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
+    /// The long-press menu's actions (`MessageMenu`): Copy the message (text and
+    /// pictures), Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// View thread (when the message has replies), Forward to another chat,
     /// Reply in DM (open a private chat with the human who wrote it), Edit
@@ -2173,7 +2193,12 @@ struct ChatSession: View {
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
-            UIPasteboard.general.string = m_text(row)
+            // The whole message — words and pictures / files — through the one copy path
+            // ([feedback copy-image-messages-ios-2026-10-27]: the text alone went out before,
+            // and a picture message copied nothing).
+            guard let m = messageById[row.messageId] else { return }
+            let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+            Task { await model.copyMessage(m, slot: slot) }
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -2749,12 +2774,8 @@ struct ChatSession: View {
             cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
             onDeleteBackwardEmpty: removeLastPending,
-            onPasteImage: { data, mime, ext in
-                // Keep GIF/WebP bytes and mime; do not re-encode to PNG/JPEG.
-                let stamp = ChatView.photoStamp.string(from: Date())
-                pending.append(.init(name: "Pasted image \(stamp).\(ext)", mime: mime, data: data))
-                composerFocused = true
-            },
+            // Pasted pictures / files arrive through `onPasteMedia` below (every item,
+            // native type kept — GIF/WebP bytes included); no second handler here.
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
                 if !memoHoldActive {
@@ -2824,6 +2845,12 @@ struct ChatSession: View {
                 } else if !isChannel {
                     requestCall(.voice)
                 }
+            },
+            onPasteMedia: { media in
+                // A copied picture / file pastes back as an attachment chip
+                // ([feedback copy-image-messages-ios-2026-10-27]).
+                pending.append(contentsOf: media)
+                composerFocused = true
             }
         )
         // Hold released before permission returned: finish once recording starts.
@@ -3613,6 +3640,8 @@ private struct ComposerField: View {
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
     let onPrimary: () -> Void
+    /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
@@ -3721,6 +3750,7 @@ private struct ComposerField: View {
                 MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                                 placeholder: prompt(draft.text), theme: theme,
                                 agentProject: { model.agent(member: $0, chatId: chatId) },
+                                onPasteMedia: onPasteMedia,
                                 onDeleteBackwardEmpty: onDeleteBackwardEmpty,
                                 onPasteImage: onPasteImage)
                     .fixedSize(horizontal: false, vertical: true)
