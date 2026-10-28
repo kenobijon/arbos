@@ -564,18 +564,21 @@ pub async fn get_project(
         .map_err(internal)?;
     // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
     let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
-    Ok(Json(
-        serde_json::to_value(GetProjectResponseDto {
-            project: project_dto(&state, &p).await,
-            chats,
-            box_state: bs,
-            box_since: since,
-            spend_today: serde_json::to_value(today).unwrap_or(Value::Null),
-            skills_rev,
-        })
-        .expect("GetProjectResponseDto"),
-    )
-    .into_response())
+    let mut v = serde_json::to_value(GetProjectResponseDto {
+        project: project_dto(&state, &p).await,
+        chats,
+        box_state: bs,
+        box_since: since,
+        spend_today: serde_json::to_value(today).unwrap_or(Value::Null),
+        skills_rev,
+    })
+    .expect("GetProjectResponseDto");
+    // An outside agent (#2140): its connection, for the apps' Details pane. Extra key beside
+    // the DTO so the typeshared Swift/Mac decoders are untouched.
+    if let Ok(Some(a)) = state.db.outside_agent(&p.id) {
+        v["outside"] = a.json(Some(&p));
+    }
+    Ok(Json(v).into_response())
 }
 
 /// A model id the proxy can serve: `vendor/name`, no spaces. Picker labels ("Claude Fable 5.1")
