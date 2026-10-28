@@ -888,6 +888,23 @@ ack rises by exactly the reply's row; scrolled into history → no row). Record:
 project store `internal/feedback-loop/status-row-gap-2026-10-26.md`, shots in
 `media/feedback/status-row-gap/`.
 
+### iPhone chat bar: an opaque band with a short fade, like Grok Bot (Jacob 2026-10-28, [feedback iphone-composer-bottom-fade-2026-10-28])
+
+Grok's messages fade out into the solid page colour above the composer; nothing
+is readable behind or between the `+`, the field and the voice pill. Ours hung a
+24 pt gradient over the bar and rows read through around the controls.
+
+| Item | Rule (pt) | Code |
+| --- | --- | --- |
+| Band | opaque from the bar's top edge (8 over the status row / composer) through the home indicator; keyboard up → ends on the keyboard and moves with it | `ComposerBandMaterial`, the bar's `.background` in `ChatView` |
+| Fade | **28** above the bar's top, clear → band, over the transcript; drawn in the chat canvas under the ↓ chevron and the new-messages pill | `Theme.composerFade`, `ComposerBottomFade` |
+| Last row at rest | fully above the fade: the transcript's tail = the fade's height | `Theme.transcriptTail` |
+| Material | Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash | `ComposerBottomBand.wash(glass:)` |
+
+Pinned by `ArbosTests/ComposerBottomBandTests`. Record: project store
+`internal/feedback-loop/iphone-composer-bottom-fade-2026-10-28.md`, shots in
+`media/feedback/iphone-composer-fade/`.
+
 ## iPhone control family — one size for every round button, pill, field and bar (iPhone only; Jacob 2026-10-26, [feedback iphone-header-composer-sizing-2026-10-26])
 
 **iPhone only.** The Mac keeps its own `CONTROL` family (36 pt discs and pill, 44 pt
