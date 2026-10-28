@@ -22,6 +22,7 @@ use gpui::{
 use crate::app::{AppState, ForwardTarget, ViewerItem};
 use crate::model::AttachmentKind;
 use crate::ui::avatars;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::modal::modal_overlay;
 use crate::ui::shell::Shell;
@@ -95,6 +96,7 @@ fn control(id: &'static str, glyph: &'static str, enabled: bool) -> Stateful<Div
         .items_center()
         .justify_center()
         .when(enabled, |el| {
+            // hover-fill: exception overlay
             el.cursor_pointer().hover(|s| s.bg(white(0.28)))
         })
         .child(icon(glyph, 14.0, white(if enabled { 1.0 } else { 0.35 })))
@@ -113,6 +115,7 @@ fn pill(id: &'static str, glyph: &'static str, label: &'static str) -> Stateful<
         .items_center()
         .gap(px(8.0))
         .cursor_pointer()
+        // hover-fill: exception overlay
         .hover(|s| s.bg(white(0.26)))
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
@@ -280,6 +283,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                                 .justify_center()
                                 .when(can_act && !busy, |el| {
                                     el.cursor_pointer()
+                                        // hover-fill: exception overlay
                                         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
                                 })
                                 .child(icon("play", 30.0, white(1.0)))
@@ -637,7 +641,7 @@ fn forward_picker(
                 .items_center()
                 .gap(px(12.0))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
                 .child(avatar)
                 .child(
                     div()
@@ -721,7 +725,7 @@ fn forward_picker(
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, theme))
                         .child(icon("xmark", 11.0, theme.text_muted))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
