@@ -390,11 +390,33 @@ struct ChatSession: View {
         }
     }
 
-    /// Esc or the ✕: the bar goes, the filter with it.
-    private func closeSearch() {
-        showSearch = false
-        searchText = ""
+    /// Esc, the ✕, a tap on the transcript or a swipe: the bar goes, the filter with it, the
+    /// keyboard down — and the window is re-seeded at the tail so the unfiltered rows come
+    /// back where a fresh open would show them (a window that slid while the filter was on
+    /// was measured against the filtered list; [feedback iphone-search-close-2026-10-28]).
+    private func closeSearch(scrollToTail: Bool = true) {
+        guard showSearch || !searchText.isEmpty || searchFocused else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            showSearch = false
+            searchText = ""
+            windowSkipEnd = 0
+            windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
+        }
         searchFocused = false
+        guard scrollToTail else { return }
+        pinnedToBottom = true
+        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    /// A tap on a search result ([feedback iphone-search-close-2026-10-28]): the bar and
+    /// the filter go, then the full transcript scrolls to that message and highlights it
+    /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
+    private func openSearchResult(_ messageId: Id) {
+        guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
+        closeSearch(scrollToTail: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -868,14 +890,25 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
+                        // The ✕ ([feedback iphone-search-close-2026-10-28], Jacob: "the x button
+                        // doesn't work"): the glyph alone was the hit target — 17 pt beside a
+                        // 48 pt field, so a near miss refocused the field instead. The whole
+                        // trailing cell (44 × the bar's height) now closes.
                         Button { closeSearch() } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: Controls.glyph))
+                                .foregroundStyle(theme.muted)
+                                .frame(width: ChatSearchClose.closeHitWidth, height: Controls.height)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Close search")
+                        .accessibilityIdentifier("chat-search-close")
                     }
                     // The family's field (48, capsule, text at 17) in the header's glass
-                    // (Jacob 2026-10-25 22:53; sized 2026-10-26).
-                    .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
+                    // (Jacob 2026-10-25 22:53; sized 2026-10-26). The ✕ cell carries its own
+                    // trailing inset.
+                    .padding(.leading, Controls.textInset).padding(.trailing, 4).frame(height: Controls.height)
                     .background {
                         HeaderGlassBackground(
                             shape: Capsule(),
@@ -1866,6 +1899,16 @@ struct ChatSession: View {
                         // People chats and channels stay blank (iMessage-style); the agent
                         // empty copy would say "Ask @handle anything…" which is wrong here.
                         emptyHint
+                    } else if searchHitsActive, visibleRows.isEmpty {
+                        // A keyword with no hit never leaves the transcript blank
+                        // ([feedback iphone-search-close-2026-10-28]): say so, and that a
+                        // tap or the ✕ brings the messages back.
+                        Text("No messages match “\(searchText.trimmingCharacters(in: .whitespaces))”")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 60)
+                            .accessibilityIdentifier("chat-search-no-matches")
                     }
                     let shown = windowedRows
                     // One MentionTable for every bubble (Mac builds Mentions once per
@@ -1907,11 +1950,22 @@ struct ChatSession: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            // Tap empty chat chrome to dismiss the keyboard and free the transcript.
+            // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
+            // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
+            // "clicking away from the search should close it"). A tap on a result row runs
+            // `openSearchResult` first (simultaneous gesture), so this only drops the bar.
             .onTapGesture {
                 composerFocused = false
                 searchFocused = false
+                if ChatSearchClose.tapOutsideCloses(open: showSearch) { closeSearch() }
             }
+            // A swipe on the list with the bar open and nothing typed closes it too; with a
+            // keyword the list IS the results, so scrolling them keeps the bar.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 12).onChanged { _ in
+                    if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
+                }
+            )
             .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
                 // Streaming / new-row growth while pinned: re-stick without animation so
                 // each delta glides with layout instead of fighting a scroll animation.
@@ -3528,6 +3582,10 @@ extension ChatSession {
                     replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
                     mentions: mentions)
                 .equatable()
+                // Search result rows take a tap (simultaneous, so links and chips still work).
+                .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
+                    openSearchResult(row.messageId)
+                })
                 // Where this row is, for the swipe recognizer's row-by-location lookup. The
                 // transcript space scrolls with the content, so this fires on layout, not per
                 // scroll frame; the index is a plain class, so no view is invalidated.
@@ -3904,6 +3962,22 @@ private struct ComposerField: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Allow the microphone in Settings to record a voice memo.")
+        }
+    }
+}
+
+/// A tap on a Search-in-chat result row ([feedback iphone-search-close-2026-10-28]). Only
+/// mounted while a keyword filters the list, so the long-chat transcript carries no extra
+/// recognizer at rest; simultaneous, so a link or mention chip inside the bubble still wins.
+private struct SearchResultTap: ViewModifier {
+    let active: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if active {
+            content.simultaneousGesture(TapGesture().onEnded { action() })
+        } else {
+            content
         }
     }
 }
