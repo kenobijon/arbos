@@ -2859,6 +2859,7 @@ pub fn seed_devices() -> Vec<DeviceView> {
             kind: "github".into(),
             created_at: now - 12 * 24 * 3_600_000,
             last_seen_at: Some(now - 20_000),
+            revoked_at: None,
             current: true,
         },
         DeviceView {
@@ -2867,6 +2868,7 @@ pub fn seed_devices() -> Vec<DeviceView> {
             kind: "github".into(),
             created_at: now - 9 * 24 * 3_600_000,
             last_seen_at: Some(now - 2 * 3_600_000),
+            revoked_at: None,
             current: false,
         },
         DeviceView {
@@ -2875,6 +2877,7 @@ pub fn seed_devices() -> Vec<DeviceView> {
             kind: "reader".into(),
             created_at: now - 6 * 24 * 3_600_000,
             last_seen_at: Some(now - 3 * 24 * 3_600_000),
+            revoked_at: None,
             current: false,
         },
     ]
