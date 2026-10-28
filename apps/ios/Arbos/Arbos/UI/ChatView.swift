@@ -993,14 +993,27 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("channel-read-only")
-                    } else if isPeople, people?.isSilencedNow == true {
+                    } else if isPeople, let people, people.silenced {
                         // Group admin muted me from posting — one quiet line, no composer.
-                        Text("You've been muted in this group")
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.muted)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: Theme.composerHeight)
-                            .accessibilityIdentifier("group-silenced")
+                        // TimelineView restores the composer at `silencedUntil`
+                        // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+                        let ends: [Date] = people.silencedUntil.map {
+                            [Date(timeIntervalSince1970: TimeInterval($0) / 1000)]
+                        } ?? []
+                        TimelineView(.explicit(ends)) { context in
+                            let nowMs = Int64(context.date.timeIntervalSince1970 * 1000)
+                            let stillMuted = people.silencedUntil.map { $0 > nowMs } ?? true
+                            if stillMuted {
+                                Text(BlockedState.mutedUntilLabel(untilMs: people.silencedUntil, nowMs: nowMs))
+                                    .font(theme.font(Theme.small))
+                                    .foregroundStyle(theme.muted)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: Theme.composerHeight)
+                                    .accessibilityIdentifier("group-silenced")
+                            } else {
+                                composer
+                            }
+                        }
                     } else if let peer = blockedPeer {
                         // A DM with someone I blocked has no input ([feedback
                         // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
@@ -1185,6 +1198,20 @@ struct ChatSession: View {
                     guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
                     await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
                 }
+            }
+            // Timed group mute: sleep until `silencedUntil`, then clear local silenced state and
+            // a silenced refusal note so the composer returns without a chat reload
+            // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Lives here (not on the muted line) so
+            // the sleep is not cancelled when `isSilencedNow` flips false a tick early.
+            .task(id: people?.silencedUntil) {
+                guard isPeople, let people, people.silenced, let until = people.silencedUntil else { return }
+                let end = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
+                let delay = end.timeIntervalSinceNow
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run { model.clearExpiredSilence(chatId: chatId) }
             }
     }
 
