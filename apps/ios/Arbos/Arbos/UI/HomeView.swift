@@ -175,7 +175,7 @@ struct HomeView: View {
         .onAppear {
             // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
-            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
@@ -669,15 +669,11 @@ struct HomeView: View {
     private var topBarRow: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
-                ZStack(alignment: .bottomTrailing) {
-                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
-                    Circle()
-                        .fill(machineDotColor(model.machine.state, theme: theme))
-                        .frame(width: 11, height: 11)
-                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                        .offset(x: 2, y: 2)
-                }
-                .frame(width: Theme.control, height: Theme.control)
+                // My picture with the machine dot through the one presence badge (in front,
+                // ring cut out of the picture — `PresenceBadge`).
+                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
+                    .presenceBadge(machineDotColor(model.machine.state, theme: theme), size: Theme.control)
+                    .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Account, machine and settings · \(model.machine.label)")
@@ -716,16 +712,10 @@ struct HomeView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             if let err = model.registryError {
-                Text("Could not reach the relay")
-                    .font(theme.font(Theme.body, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                Text(err)
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.muted)
-                    .multilineTextAlignment(.center)
-                Button("Try again") { Task { await model.refreshRegistry() } }
-                    .font(theme.font(Theme.small, weight: .semibold))
-                    .foregroundStyle(theme.text)
+                // Home's note where the list would be: the shared element with Try again.
+                ErrorNote(id: "home-registry-error", error: err, detailsOpen: $model.registryErrorDetailsOpen,
+                          onTryAgain: { Task { await model.refreshRegistry() } })
+                    .padding(.horizontal, 16)
             } else if model.link == .connecting && !model.isFixture {
                 ProgressView().tint(theme.muted)
                 Text(slowConnect ? "Still connecting…" : "Loading your agents…")
@@ -1182,7 +1172,8 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // A row hidden for me (someone I blocked) never previews.
+        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty && !model.hidesMessage($0, chatId: c.id) }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""

@@ -46,6 +46,9 @@ use super::{chats_of, collect, editable_name, hero_picture, HeroClick, HERO_AVAT
 /// (the agent's box). Every pane keeps the structure (hero, pill, options),
 /// not a tab count.
 pub(super) const TABS: [&str; 3] = ["Details", "Library", "Computer"];
+/// A connected (outside) agent has no Arbos machine: Details · Library (#2141; the
+/// Connection and Key cards sit under Details, `connect_agent::details_sections`).
+pub(super) const OUTSIDE_TABS: [&str; 2] = ["Details", "Library"];
 /// Jacob 2026-10-25 ([feedback agent-details-remove-sections-mac-2026-10-25]):
 /// the Details tab hides its Coding and Routines cards for now. Temporary —
 /// flip this to bring them back; the Computer tab, the routines calls and the
@@ -79,7 +82,7 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar_leaf_color: a.avatar_leaf_color,
             // The owner's picture travels with the roster copy; without it the hero drew the
             // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
-            image_url: a.image_url.clone(),
+            image_url: a.image_url.clone(), // avatar-lint: allow (data copy, not a draw)
             avatar_version: a.avatar_version,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
@@ -125,7 +128,12 @@ pub(super) fn page(
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
-    let tab = state.profile_tab;
+    let outside = project.outside.clone();
+    // An outside agent has no Computer tab: a stale index lands on Details.
+    let tab = match state.profile_tab {
+        TAB_COMPUTER if outside.is_some() => 0,
+        t => t,
+    };
     let editing_description = state.profile_editing_description && mine;
     let pid: Id = project.id.clone();
     // Library tab: what the agent's chats hold (read while `state` is borrowed).
@@ -148,10 +156,9 @@ pub(super) fn page(
 
     // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
     // is borrowed) — from the newest copy the store holds, like every other surface.
-    let hero_image = crate::sync::agent_avatar::newest(&state.projects, &project.id)
-        .and_then(|f| f.image_url)
-        .or_else(|| project.image_url.clone())
-        .and_then(|url| state.avatar(&url));
+    let hero_image = avatars::project_image(state, &project);
+    let newest_picture_url =
+        crate::sync::agent_avatar::newest(&state.projects, &project.id).and_then(|f| f.image_url); // avatar-lint: allow (resolver)
     if avatar_state != AvatarState::Idle || streaming {
         PulseClock::request(cx);
     }
@@ -188,16 +195,13 @@ pub(super) fn page(
         Box::new(f) as HeroClick
     });
     // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
-    let view_click = (!mine)
-        .then(|| project.image_url.clone())
-        .flatten()
-        .map(|url| {
-            let name = project.name.clone();
-            let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                this.view_picture(&name, &url, cx);
-            });
-            Box::new(f) as HeroClick
+    let view_click = (!mine).then_some(newest_picture_url).flatten().map(|url| {
+        let name = project.name.clone();
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            this.view_picture(&name, &url, cx);
         });
+        Box::new(f) as HeroClick
+    });
     let avatar = hero_picture("profile-avatar", picture, pic_click, view_click).into_any_element();
     let p_rename = pid.clone();
     let name_click = mine.then(|| {
@@ -279,6 +283,12 @@ pub(super) fn page(
         TAB_LIBRARY => library_sections(
             content.expect("collected for the Library tab"),
             shell,
+            &theme,
+            cx,
+        ),
+        _ if outside.is_some() => crate::ui::connect_agent::details_sections(
+            &pid,
+            outside.as_ref().expect("outside"),
             &theme,
             cx,
         ),
@@ -389,7 +399,11 @@ pub(super) fn page(
                 project_id: project.id.clone(),
             },
             hero,
-            tabs: &TABS,
+            tabs: if outside.is_some() {
+                &OUTSIDE_TABS
+            } else {
+                &TABS
+            },
             selected: tab,
             body,
             footer,
@@ -613,7 +627,7 @@ fn details_sections(
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state
                         .update(cx, |s, cx| s.set_profile_tab(TAB_COMPUTER, cx));
