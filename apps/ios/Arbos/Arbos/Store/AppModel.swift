@@ -4648,6 +4648,10 @@ final class AppModel: ObservableObject {
                 }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .pinsChanged:
+                // Sidebar pins from another device; the iPhone's synced pins land with
+                // [feedback sidebar-pinning-ios-2026-10-28].
+                break
             case .notificationsCleared(let payload):
                 applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
