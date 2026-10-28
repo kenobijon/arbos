@@ -83,7 +83,7 @@ struct AgentAvatar: View {
 
     var body: some View {
         let project = shown
-        Group {
+        ZStack(alignment: .bottomTrailing) {
             if let url = project.imageURL, !url.isEmpty {
                 // D92 amendment: the uploaded / generated picture wins over the leaf. While the
                 // picture loads the disc is the neutral initial — never the leaf, which would
@@ -109,79 +109,6 @@ struct AgentAvatar: View {
         // `StatusMarks.swift`), never a coloured dot (Jacob, 2026-10-27).
         .statusMark(mark, size: size)
     }
-}
-
-// MARK: - Presence badge
-
-/// The one status badge on a picture (Jacob 2026-10-27, [feedback
-/// presence-dot-layering-ios-2026-10-27]; `docs/mac-design-rules.md` § Avatars): the dot
-/// sits **in front of** the picture, past its bottom-right corner, inside a ring that is
-/// **cut out of the picture** — so whatever surface is behind (the page, a card, the
-/// header pill's material, Liquid Glass) shows through as the ring, and no colour has to
-/// be guessed per surface. Same numbers as the Mac's `ui::badge`: dot = size / 4 clamped
-/// 6–12 (12 on the 48 pt home circle, 8 on the 32 pt pill picture), ring 2 pt, the ring
-/// box 2 pt past the picture's edge. Every picture-with-dot goes through
-/// [`View.presenceBadge(_:size:)`]; `PresenceBadgeTests` fails the gate on a corner
-/// dot drawn by hand.
-enum PresenceBadge {
-    static let ringWidth: CGFloat = 2
-    static let overhang: CGFloat = 2
-    static let dotMin: CGFloat = 6
-    static let dotMax: CGFloat = 12
-
-    struct Metrics: Equatable {
-        let dot: CGFloat
-        let ring: CGFloat
-        let overhang: CGFloat
-    }
-
-    static func metrics(_ size: CGFloat) -> Metrics {
-        let dot = min(max((size / 4).rounded(), dotMin), dotMax)
-        return Metrics(dot: dot, ring: dot + 2 * ringWidth, overhang: overhang)
-    }
-
-    /// Cuts the ring out of `content` (a `size` square) and lays the dot over it.
-    struct Modifier: ViewModifier {
-        let color: Color?
-        let size: CGFloat
-
-        @ViewBuilder
-        func body(content: Content) -> some View {
-            if let color {
-                let m = PresenceBadge.metrics(size)
-                content
-                    .mask {
-                        ZStack(alignment: .bottomTrailing) {
-                            // Wider than the picture: a leaf's sway or a shadow must not be clipped.
-                            Rectangle().padding(-size)
-                            Circle()
-                                .frame(width: m.ring, height: m.ring)
-                                .offset(x: m.overhang, y: m.overhang)
-                                .blendMode(.destinationOut)
-                        }
-                        .compositingGroup()
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        Circle()
-                            .fill(color)
-                            .frame(width: m.dot, height: m.dot)
-                            .offset(x: m.overhang - PresenceBadge.ringWidth, y: m.overhang - PresenceBadge.ringWidth)
-                            .accessibilityHidden(true)
-                    }
-            } else {
-                content
-            }
-        }
-    }
-}
-
-extension View {
-    /// A status dot (machine state) on this `size`-pt picture: in front of it, inside a
-    /// ring cut out of the picture. `nil` draws the bare picture in the same box.
-    func presenceBadge(_ color: Color?, size: CGFloat) -> some View {
-        modifier(PresenceBadge.Modifier(color: color, size: size))
-    }
-
 }
 
 /// An agent's uploaded / generated picture, through `AvatarImageCache` (one download per
