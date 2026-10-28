@@ -644,6 +644,8 @@ pub struct AppState {
     /// Chat-list column width (pt). Dragged on the right edge; persisted in
     /// `<config>/sidebar_width` ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
     pub sidebar_width: f32,
+    /// The running edge drag's state (`ui::sidebar_fit::EdgeDrag`).
+    pub sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
@@ -1106,6 +1108,7 @@ impl AppState {
             relay_link: (LinkState::Live, 0),
             rail_collapsed: crate::ui::theme::SidebarCollapsed::load(),
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
+            sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag::default(),
             sidebar_overlay: false,
             details_open: None,
             media_viewer: None,
@@ -2562,20 +2565,40 @@ impl AppState {
                 // agent's reply) arrive as a new snapshot, not an upsert: tell
                 // the notifier about the ones we have not seen. A chat's first
                 // snapshot is history, except what was written just now.
-                let seen: HashSet<Id> = self
-                    .messages
-                    .get(&chat_id)
-                    .map(|l| l.iter().map(|m| m.id.clone()).collect())
-                    .unwrap_or_default();
+                //
+                // Append-only catch-up snapshots (#1405 /
+                // feedback app-01M5Z3QPDA5BRE84SAPADXX05V): when the previous
+                // list is a prefix of the new one, skip building a HashSet of
+                // every id — the new suffix is exactly what arrived.
                 let first_load = !self.messages.contains_key(&chat_id);
                 let fresh_after = now_ms().saturating_sub(SNAPSHOT_FRESH_MS);
-                let arrived: Vec<Message> = messages
-                    .iter()
-                    .filter(|m| !seen.contains(&m.id))
-                    .filter(|m| !first_load || m.created_at >= fresh_after)
-                    .filter(|m| !m.is_streaming())
-                    .cloned()
-                    .collect();
+                let arrived: Vec<Message> = {
+                    let prev = self.messages.get(&chat_id);
+                    let append_only = prev.is_some_and(|old| {
+                        messages.len() >= old.len()
+                            && old.iter().zip(messages.iter()).all(|(a, b)| a.id == b.id)
+                    });
+                    if append_only {
+                        let old_len = prev.map(|p| p.len()).unwrap_or(0);
+                        messages[old_len..]
+                            .iter()
+                            .filter(|m| !first_load || m.created_at >= fresh_after)
+                            .filter(|m| !m.is_streaming())
+                            .cloned()
+                            .collect()
+                    } else {
+                        let seen: HashSet<Id> = prev
+                            .map(|l| l.iter().map(|m| m.id.clone()).collect())
+                            .unwrap_or_default();
+                        messages
+                            .iter()
+                            .filter(|m| !seen.contains(&m.id))
+                            .filter(|m| !first_load || m.created_at >= fresh_after)
+                            .filter(|m| !m.is_streaming())
+                            .cloned()
+                            .collect()
+                    }
+                };
                 self.messages.insert(chat_id.clone(), messages);
                 self.index_chat(&chat_id);
                 // Message counts decide an agent's primary chat (single-chat mode).
@@ -6335,6 +6358,49 @@ impl AppState {
         cx.notify();
     }
 
+    /// A drag of the column's right edge begins (expanded or rail): a fresh
+    /// gesture, so a width restored from the rail by an earlier drag no
+    /// longer holds the handle ([feedback sidebar-narrow-wrap-2026-10-27]).
+    pub fn begin_sidebar_edge_drag(&mut self) {
+        self.sidebar_edge_drag = crate::ui::sidebar_fit::EdgeDrag::begin(
+            (!self.rail_collapsed).then_some(self.sidebar_width),
+        );
+    }
+
+    /// Each move of that drag: the pointer's x is the width asked for. Past
+    /// the snap point the column collapses to the rail (the saved width is
+    /// kept); from the rail, crossing the snap width restores that width,
+    /// and the handle follows the pointer again once it passes it
+    /// (`ui::sidebar_fit::EdgeDrag`). The rail flip animates like the toggle.
+    pub fn drag_sidebar_edge(&mut self, x: f32, cx: &mut Context<Self>) {
+        use crate::ui::sidebar_fit::EdgeTarget;
+        match self
+            .sidebar_edge_drag
+            .target(x, self.rail_collapsed, self.sidebar_width)
+        {
+            EdgeTarget::Rail { keep } => {
+                if !self.rail_collapsed {
+                    self.rail_collapsed = true;
+                    self.sidebar_overlay = false;
+                    crate::ui::theme::SidebarCollapsed::save(true);
+                    // The width to come back to is the one the drag began
+                    // from, not the minimum the handle passed on the way.
+                    self.set_sidebar_width(keep, cx);
+                    cx.notify();
+                }
+            }
+            EdgeTarget::Expanded(width) => {
+                if self.rail_collapsed {
+                    self.rail_collapsed = false;
+                    crate::ui::theme::SidebarCollapsed::save(false);
+                    cx.notify();
+                }
+                self.set_sidebar_width(width, cx);
+            }
+            EdgeTarget::Hold => {}
+        }
+    }
+
     /// Drag on the chat-list column's right edge: set width and persist it.
     pub fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
         let width = crate::ui::theme::SidebarWidth::clamp(width);
@@ -8921,6 +8987,12 @@ impl AppState {
         self.projects.iter().find(|p| p.id == pid)
     }
 
+    /// One of my agents into a people chat, the way the Add members picker
+    /// does it (optimistic "<me> added <agent>" line, then the batch
+    /// `AddMembers` call). Only the `ARBOS_RIG_ADD_AGENT` recording hook
+    /// calls it since the "Add agent" rows went ([feedback
+    /// add-your-agent-row-removal-mac-2026-10-27]); the picker goes through
+    /// [`Self::add_members_to_group`].
     pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
         let names: Vec<String> = self
             .projects
@@ -8933,9 +9005,10 @@ impl AppState {
             id: project_id.clone(),
         }];
         self.show_membership_notice(&chat_id, &names, subjects, cx);
-        self.command(ClientCommand::AddAgent {
+        self.command(ClientCommand::AddMembers {
             chat_id,
-            project_id,
+            handles: Vec::new(),
+            agent_ids: vec![project_id],
         });
         cx.notify();
     }

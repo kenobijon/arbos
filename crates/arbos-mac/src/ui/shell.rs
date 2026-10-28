@@ -3,13 +3,15 @@
 //! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
 //! float centred over everything.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
+    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div,
+    Entity, FocusHandle, Focusable, FontWeight, Pixels, Render, ScrollHandle, SharedString,
+    Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -35,6 +37,7 @@ use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
@@ -254,6 +257,11 @@ pub struct Shell {
     chat_search_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
+    /// Where the palette's panel was painted last frame; a mouse-down outside
+    /// it closes the palette without swallowing the click (`click_outside`).
+    pub(crate) palette_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Likewise the Search-in-chat bar.
+    pub(crate) chat_search_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The palette's result list scroll (keeps the highlight in view).
     palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
@@ -337,8 +345,11 @@ pub struct Shell {
     pub(crate) rail_hover: Option<crate::model::Id>,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
+    /// The sidebar filter capsules' horizontal scroll (a narrow column,
+    /// [feedback sidebar-narrow-wrap-2026-10-27]).
+    pub(crate) filter_scroll: ScrollHandle,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
-    /// screen (the rail's toggle at its top-left slot) where the platform
+    /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
     rig_fullscreen: bool,
     /// Rig: `ARBOS_RIG_RAIL_T=0.4` freezes the collapse morph at that
@@ -449,7 +460,6 @@ pub struct Shell {
     pub(crate) profile_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
     pub(crate) handle_input: Entity<ComposerInput>,
-    pub add_agent_open: bool,
     pub members_open: bool,
     /// Double-click rename on a chat tab: the chat being edited, and its field.
     pub(crate) renaming_tab: Option<crate::model::Id>,
@@ -1068,6 +1078,8 @@ impl Shell {
                 .ok()
                 .filter(|q| !q.trim().is_empty()),
             palette,
+            palette_bounds: Rc::new(Cell::new(None)),
+            chat_search_bounds: Rc::new(Cell::new(None)),
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
@@ -1147,6 +1159,7 @@ impl Shell {
             morph: Default::default(),
             rail_hover: None,
             rail_scroll: ScrollHandle::new(),
+            filter_scroll: ScrollHandle::new(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
@@ -1183,7 +1196,6 @@ impl Shell {
             profile_edit_open: false,
             name_input,
             handle_input,
-            add_agent_open: false,
             members_open: false,
             feedback,
         };
@@ -2577,7 +2589,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_palette(window, cx);
+        // A toggle ([feedback search-toggle-click-outside-mac-2026-10-27],
+        // Jacob 2026-10-27): ⌘⇧F on an open palette closes it, field focused or not.
+        if self.palette.open {
+            self.close_palette(window, cx);
+        } else {
+            self.open_palette(window, cx);
+        }
     }
 
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2619,7 +2637,34 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_chat_search(window, cx);
+        // A toggle ([feedback search-toggle-click-outside-mac-2026-10-27],
+        // Jacob 2026-10-27): ⌘F on an open bar closes it like ✕ / Esc, field
+        // focused or not.
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+        } else {
+            self.open_chat_search(window, cx);
+        }
+    }
+
+    /// Capture-phase mouse-down anywhere in the window: a click outside the
+    /// open Search-in-chat bar closes it, a click outside the open palette's
+    /// panel dismisses the palette — and the click goes on to whatever is
+    /// under it (a message, a sidebar row, a button answers in the same
+    /// click). Nothing here stops propagation.
+    fn click_outside(
+        &mut self,
+        at: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inside = |b: Option<Bounds<Pixels>>| b.is_some_and(|b| b.contains(&at));
+        if self.palette.open && !inside(self.palette_bounds.get()) {
+            self.close_palette(window, cx);
+        }
+        if self.state.read(cx).chat_search_open() && !inside(self.chat_search_bounds.get()) {
+            self.close_chat_search(window, cx);
+        }
     }
 
     pub(crate) fn open_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2901,7 +2946,6 @@ impl Shell {
         }
         let floating = self.menu_open
             || self.members_open
-            || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
@@ -3076,7 +3120,6 @@ impl Shell {
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
-            || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.channel_menu.is_some()
@@ -3090,7 +3133,6 @@ impl Shell {
             self.member_menu = None;
             self.library.menu = None;
             self.members_open = false;
-            self.add_agent_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
@@ -3138,16 +3180,7 @@ impl Shell {
             sidebar::footer_disc_frame("sidebar-update")
                 .bg(fill)
                 .when(!busy, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| {
-                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
-                        })
-                        .active(|s| {
-                            s.bg(Theme::lighter(
-                                theme.update_disc,
-                                sidebar::DISC_PRESSED_LIFT,
-                            ))
-                        })
+                    highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
@@ -3709,36 +3742,6 @@ impl Shell {
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
-            // Empty people chat: a clear "Add agent" control so bringing your
-            // own agent in is discoverable ([feedback
-            // app-01M5WKBR85JVW1KKJH96FWZVK5]); the right pane has the same
-            // entry for chats that already have messages.
-            let add_agent = is_people.then(|| {
-                div()
-                    .id("empty-add-agent")
-                    .mt(px(4.0))
-                    .px(px(14.0))
-                    .py(px(7.0))
-                    .rounded(px(8.0))
-                    .bg(theme.surface_2)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bubble_assistant))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(icon("sparkles", 14.0, theme.text_muted))
-                    .child(
-                        div()
-                            .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text)
-                            .child("Add agent"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.members_open = false;
-                        this.add_agent_open = true;
-                        cx.notify();
-                    }))
-            });
             column = column.child(
                 div()
                     .flex_1()
@@ -3764,7 +3767,6 @@ impl Shell {
                             .max_w(px(460.0))
                             .child(hint),
                     )
-                    .children(add_agent)
                     .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(12.0)).child(
                         match &blocked_peer {
                             Some(person) => self.blocked_composer(person, &theme, cx),
@@ -4760,6 +4762,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        this.click_outside(event.position, window, cx);
+                    }
+                },
+            ))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
@@ -4878,18 +4887,12 @@ impl Render for Shell {
         // at rest that is 72 + the disc with the sidebar hidden, nothing with
         // it docked; mid-slide the disc holds its spot (72 + 12) from the
         // moment the sidebar's own disc has left until the sidebar is back.
-        // With the rail the header's toggle is only for a plain window at rest
-        // (full screen puts it in the rail's top-left slot; the morph's
-        // overlay carries it in between) — and for the narrow band's hidden
-        // sidebar, as before.
+        // With the rail the toggle is the rail's own (the morph's overlay
+        // carries it in between), so the header draws one only for the
+        // narrow band's hidden sidebar, as before
+        // ([feedback sidebar-toggle-in-rail-2026-10-27]).
         let rail_progress = frame.rail_progress(sidebar_width);
-        let show_sidebar_toggle = rail::header_toggle_shown(
-            sidebar_hidden,
-            frame.sidebar_visible,
-            rail,
-            frame.sidebar_sliding,
-            self.fullscreen,
-        );
+        let show_sidebar_toggle = rail::header_toggle_shown(sidebar_hidden, frame.sidebar_visible);
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
             show_sidebar_toggle,
@@ -5141,14 +5144,6 @@ impl Render for Shell {
         }
         if let Some(space) = people_space {
             let right = 16.0;
-            if self.add_agent_open {
-                root = root.child(glass::popover(people::add_agent_picker(
-                    &space,
-                    &self.state,
-                    right,
-                    cx,
-                )));
-            }
             if self.members_open {
                 root = root.child(glass::popover(people::members_popover(
                     &space,
