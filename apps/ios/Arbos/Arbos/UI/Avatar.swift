@@ -105,9 +105,9 @@ struct AgentAvatar: View {
             }
         }
         .frame(width: size, height: size)
-        // The machine mark through the one presence badge (in front, ring cut out of
-        // the picture) — never a coloured dot (Jacob, 2026-10-27).
-        .presenceMark(mark, size: size)
+        // The machine mark at the badge spot (in front, ring cut out of the picture —
+        // `StatusMarks.swift`), never a coloured dot (Jacob, 2026-10-27).
+        .statusMark(mark, size: size)
     }
 }
 
@@ -138,38 +138,6 @@ enum PresenceBadge {
     static func metrics(_ size: CGFloat) -> Metrics {
         let dot = min(max((size / 4).rounded(), dotMin), dotMax)
         return Metrics(dot: dot, ring: dot + 2 * ringWidth, overhang: overhang)
-    }
-
-    /// Cuts the ring out of `content` (a `size` square) and lays a mark — the spinner
-    /// or the fault glyph — over it. The dot form below stays for the layering tests.
-    struct MarkModifier: ViewModifier {
-        let mark: StatusMark?
-        let size: CGFloat
-
-        @ViewBuilder
-        func body(content: Content) -> some View {
-            if let mark {
-                let m = PresenceBadge.metrics(size)
-                content
-                    .mask {
-                        ZStack(alignment: .bottomTrailing) {
-                            Rectangle().padding(-size)
-                            Circle()
-                                .frame(width: m.ring, height: m.ring)
-                                .offset(x: m.overhang, y: m.overhang)
-                                .blendMode(.destinationOut)
-                        }
-                        .compositingGroup()
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        StatusMarkView(mark: mark, size: m.dot)
-                            .frame(width: m.dot, height: m.dot)
-                            .offset(x: m.overhang - PresenceBadge.ringWidth, y: m.overhang - PresenceBadge.ringWidth)
-                    }
-            } else {
-                content
-            }
-        }
     }
 
     /// Cuts the ring out of `content` (a `size` square) and lays the dot over it.
@@ -214,13 +182,6 @@ extension View {
         modifier(PresenceBadge.Modifier(color: color, size: size))
     }
 
-    /// The badge spot with a *mark* instead of a dot (`StatusMarks.swift`, [feedback
-    /// neon-dots-ios-2026-10-27]): the same cut-out ring and metrics, the braille
-    /// spinner or the fault glyph laid over it; nothing (and no cut-out) when `mark`
-    /// is nil. Every machine mark on a picture goes through here.
-    func presenceMark(_ mark: StatusMark?, size: CGFloat) -> some View {
-        modifier(PresenceBadge.MarkModifier(mark: mark, size: size))
-    }
 }
 
 /// An agent's uploaded / generated picture, through `AvatarImageCache` (one download per

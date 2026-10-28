@@ -675,7 +675,7 @@ struct HomeView: View {
                 // My picture with the machine mark through the one presence badge (in
                 // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
                 PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
-                    .presenceMark(machineMark(model.machine.state), size: Theme.control)
+                    .statusMark(machineMark(model.machine.state), size: Theme.control)
                     .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)

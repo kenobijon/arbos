@@ -3,8 +3,8 @@
 // app with braille spinners always, on a matter of principle never use colored
 // dots"). Activity → the braille spinner (`WorkingSpinner`); unread → the count
 // pill (`UnreadBadge`); a fault → the red "!" glyph; a resting state (awake,
-// asleep, read) → nothing. On a picture the mark sits in the presence badge's
-// cut-out ring (`View.presenceMark`, `Avatar.swift`). `StatusDotLintTests` refuses a new small
+// asleep, read) → nothing. On a picture the mark sits in a ring cut out of the
+// picture (`CornerMark`, `View.statusMark`). `StatusDotLintTests` refuses a new small
 // `Circle().fill(<status colour>)` anywhere in the app. Mirrors the Mac's
 // `ui/marks.rs`.
 
@@ -54,6 +54,70 @@ struct StatusMarkView: View {
         case .fault:
             FaultGlyph(size: size)
         }
+    }
+}
+
+/// The mark's spot on a picture (Grok's status badge: past the bottom-right corner,
+/// inside a ring **cut out of the picture**, so whatever surface is behind shows through
+/// as the ring). Sizes follow the picture: the glyph a quarter of it (6–12), the ring
+/// 2 pt wider on each side, the ring box 2 pt past the picture's edge. Mirrors the Mac's
+/// `marks::corner_metrics`.
+enum CornerMark {
+    static let ringWidth: CGFloat = 2
+    static let overhang: CGFloat = 2
+    static let glyphMin: CGFloat = 6
+    static let glyphMax: CGFloat = 12
+
+    struct Metrics: Equatable {
+        let glyph: CGFloat
+        let ring: CGFloat
+        let overhang: CGFloat
+    }
+
+    static func metrics(_ size: CGFloat) -> Metrics {
+        let glyph = min(max((size / 4).rounded(), glyphMin), glyphMax)
+        return Metrics(glyph: glyph, ring: glyph + 2 * ringWidth, overhang: overhang)
+    }
+
+    /// Cuts the ring out of `content` (a `size` square) and lays the mark — the spinner
+    /// or the fault glyph — over it; `content` untouched (no cut-out) when `mark` is nil.
+    struct Modifier: ViewModifier {
+        let mark: StatusMark?
+        let size: CGFloat
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+            if let mark {
+                let m = CornerMark.metrics(size)
+                content
+                    .mask {
+                        ZStack(alignment: .bottomTrailing) {
+                            // Wider than the picture: a leaf's sway or a shadow must not be clipped.
+                            Rectangle().padding(-size)
+                            Circle()
+                                .frame(width: m.ring, height: m.ring)
+                                .offset(x: m.overhang, y: m.overhang)
+                                .blendMode(.destinationOut)
+                        }
+                        .compositingGroup()
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        StatusMarkView(mark: mark, size: m.glyph)
+                            .frame(width: m.glyph, height: m.glyph)
+                            .offset(x: m.overhang - CornerMark.ringWidth, y: m.overhang - CornerMark.ringWidth)
+                    }
+            } else {
+                content
+            }
+        }
+    }
+}
+
+extension View {
+    /// The machine mark at a picture's badge spot (`CornerMark`): every machine mark on
+    /// a picture goes through here. Never a dot.
+    func statusMark(_ mark: StatusMark?, size: CGFloat) -> some View {
+        modifier(CornerMark.Modifier(mark: mark, size: size))
     }
 }
 
