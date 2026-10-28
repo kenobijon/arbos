@@ -590,7 +590,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/outside-agents", get(outside::list).post(outside::create))
         .route(
             "/outside-agents/{id}",
-            get(outside::get).delete(outside::revoke),
+            get(outside::get)
+                .patch(outside::patch)
+                .delete(outside::revoke),
         )
         .route("/outside-agents/{id}/rotate", post(outside::rotate))
         // … and the agent side (bearer arbk_ key).
@@ -598,6 +600,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/inbox", get(outside::inbox))
         .route("/asp/events", post(outside::events))
         .route("/asp/socket", get(outside::socket))
+        .route("/asp/files/{slot}/{key}", get(outside::file))
+        .route("/asp/chats/{id}/messages", get(outside::history))
         .route("/asp/connect/{id}", get(outside::connect_page))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
