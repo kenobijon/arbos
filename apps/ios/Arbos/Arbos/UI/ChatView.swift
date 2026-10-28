@@ -1753,31 +1753,11 @@ struct ChatSession: View {
                     // One MentionTable for every bubble (Mac builds Mentions once per
                     // sync). Per-row rebuilds were the main group-chat lag on iPhone.
                     let mentions = MentionTable.Cache.shared.table(model: model, theme: theme)
-                    // Equatable host: composer keystrokes re-evaluate ChatView but
-                    // skip the ForEach when the transcript inputs are unchanged.
-                    TranscriptRows(
-                        model: model,
-                        theme: theme,
-                        composerInset: composerSideInset,
-                        people: isPeople || isChannel,
-                        mentions: mentions,
-                        shown: shown,
-                        shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
-                        chatId: chatId,
-                        width: width,
-                        timeReveal: timeReveal,
-                        replySwipe: replySwipe,
-                        rowFrames: rowFrames,
-                        highlightedMessage: highlightedMessage,
-                        rowsCount: rows.count,
-                        messagesCount: messages.count,
-                        canReply: { isMessageRow($0) },
-                        onQuoteTap: { revealQuoted($0) },
-                        onMenu: { runMessageMenu($0, row: $1) },
-                        actionsRowId: actionsRow?.id,
-                        onLongPress: { row in openActions(row) }
-                    )
-                    .equatable()
+                    // The ForEach sits directly in the LazyVStack: that is what makes the rows
+                    // lazy (wrapped in another view it is one child, and every row is built).
+                    // Keystrokes do not reach this body (the composer is isolated); the other
+                    // publishes re-diff the ids and let each realized `RowView` skip by `==`.
+                    transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
@@ -3275,67 +3255,23 @@ struct ModelPickerView: View {
 /// The visible transcript rows. Equatable so a composer keystroke (ChatView's
 /// composer draft) or an AppModel presence tick that re-evaluates ChatView
 /// does not rebuild every bubble when the row list is unchanged.
-private struct TranscriptRows: View, Equatable {
-    let model: AppModel
-    let theme: Theme
-    let composerInset: CGFloat
-    /// People chat: the wider bubble caps (`Theme.peopleBubbleInset`).
-    let people: Bool
-    let mentions: MentionTable
-    let shown: [Row]
-    /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
-    let shownStamp: Int
-    let chatId: Id
-    let width: CGFloat
-    let timeReveal: CGFloat
-    /// The reply swipe in progress (one row follows the finger).
-    let replySwipe: ReplySwipe
-    /// Row frames the rows write on layout (not compared: a class, same instance for the chat).
-    let rowFrames: RowFrameIndex
-    let highlightedMessage: Id?
-    let rowsCount: Int
-    let messagesCount: Int
-    let canReply: (Row) -> Bool
-    let onQuoteTap: (Quote) -> Void
-    let onMenu: (MessageMenuItem, Row) -> Void
-    /// The bubble whose long-press actions are open (it alone reports its frame).
-    let actionsRowId: String?
-    let onLongPress: (Row) -> Void
-
-    static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
-        let same = lhs.shownStamp == rhs.shownStamp
-            && lhs.actionsRowId == rhs.actionsRowId
-            && lhs.composerInset == rhs.composerInset
-            && lhs.people == rhs.people
-            && lhs.theme == rhs.theme
-            && lhs.chatId == rhs.chatId
-            && lhs.width == rhs.width
-            && lhs.timeReveal == rhs.timeReveal
-            && lhs.replySwipe == rhs.replySwipe
-            && lhs.highlightedMessage == rhs.highlightedMessage
-            && lhs.mentions.stamp == rhs.mentions.stamp
-        #if DEBUG
-        PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
-        if !same {
-            PerfCounters.bump("rowsEq.\(lhs.shownStamp == rhs.shownStamp ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
-        }
-        #endif
-        return same
-    }
-
-    var body: some View {
-        #if DEBUG
-        let _ = PerfCounters.bump("transcriptRowsBody")
-        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
-        #endif
-        // Rows keyed by id, never by position: a grow step prepends older rows and
-        // must not touch the ones already laid out (arbonites-chat-lag).
+extension ChatSession {
+    /// The transcript's rows, keyed by id, never by position: a grow step prepends older
+    /// rows and must not touch the ones already laid out (arbonites-chat-lag).
+    @ViewBuilder
+    fileprivate func transcriptRows(shown: [Row], mentions: MentionTable, width: CGFloat) -> some View {
+        let people = isPeople || isChannel
+        let composerInset = composerSideInset
+        let actionsRowId = actionsRow?.id
         let firstId = shown.first?.id
+        // Lazy rows: the oldest row of the window sits above the viewport and may never
+        // appear; the newest one is on screen at open, so it marks the open.
+        let lastId = shown.last?.id
         ForEach(shown) { row in
-            let reply = canReply(row)
+            let reply = isMessageRow(row)
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: onQuoteTap,
+                    onQuoteTap: { revealQuoted($0) },
                     highlighted: highlightedMessage == row.messageId,
                     canReply: reply,
                     replyDrag: replySwipe.rowId == row.id ? replySwipe.reveal : 0,
@@ -3358,8 +3294,8 @@ private struct TranscriptRows: View, Equatable {
                     }
                     #endif
                     // Once per open — not on every row (group chats fire this dozens of times).
-                    if row.id == firstId {
-                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                    if row.id == lastId {
+                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
                         #if DEBUG
                         PerfLog.shared.armScrollable()
                         #endif
@@ -3370,8 +3306,8 @@ private struct TranscriptRows: View, Equatable {
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
-                .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
-                                    onCopyMenu: { onMenu($0, row) })
+                .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
+                                    onCopyMenu: { runMessageMenu($0, row: row) })
         }
     }
 }
