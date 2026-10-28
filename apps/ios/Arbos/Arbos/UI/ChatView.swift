@@ -427,7 +427,7 @@ struct ChatSession: View {
             Button(action: openSearchFromKeyboard) { EmptyView() }
                 .keyboardShortcut(ChatSearchShortcut.key, modifiers: ChatSearchShortcut.modifiers)
             if showSearch {
-                Button(action: closeSearch) { EmptyView() }
+                Button { closeSearch() } label: { EmptyView() }
                     .keyboardShortcut(.cancelAction)
             }
         }
