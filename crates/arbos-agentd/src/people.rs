@@ -909,11 +909,15 @@ impl Agent {
                     .await
                 {
                     Ok(_) => {
-                        if !full {
-                            // Added (or re-added) while running: the room's past is not ours.
-                            self.sync.mark_late_join(&chat_id).await;
+                        // The relay's membership time is the line: rows issued after it are
+                        // work even when they landed before this box opened the room (a group
+                        // created with its first message already in it, #2127/#2120). Only
+                        // without that time does "now" stand in for it.
+                        match people_join_marks(full, joined_at) {
+                            JoinMarks::JoinedAt(at) => self.sync.mark_joined_at(&chat_id, at).await,
+                            JoinMarks::LateJoinNow => self.sync.mark_late_join(&chat_id).await,
+                            JoinMarks::None => {}
                         }
-                        self.sync.mark_joined_at(&chat_id, joined_at).await;
                         tracing::info!(chat = %chat_id, late = !full, joined_at, "joined a people chat");
                     }
                     Err(e) => tracing::warn!(chat = %chat_id, error = %e, "people room"),
@@ -943,6 +947,9 @@ impl Agent {
     }
 
     /// Fetch one people chat from the relay (after a `people_agent_added` push) and join it.
+    /// Open one people chat's room on the relay's word (a `people_agent_added` or
+    /// `people_chat_open` push): fetch its membership and join with the relay's joined_at as
+    /// the line, so the row that triggered the push is work, not history.
     pub async fn join_people_chat(self: &std::sync::Arc<Self>, chat_id: &str) -> Result<()> {
         let r = self
             .http_client()
@@ -1838,6 +1845,28 @@ impl Agent {
     }
 }
 
+/// What a freshly opened people room is told about its past (#2127/#2120). `full` = the room
+/// came from the boot/registry listing; `joined_at` = the relay's membership time (0 = unknown).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum JoinMarks {
+    /// Commands issued before the relay's membership time are never run; everything after it is.
+    JoinedAt(i64),
+    /// No membership time from the relay and the add came while running: "now" is the line.
+    LateJoinNow,
+    /// A listing at boot with no membership time: the room's whole past is replayed as usual.
+    None,
+}
+
+pub(crate) fn people_join_marks(full: bool, joined_at: i64) -> JoinMarks {
+    if joined_at > 0 {
+        JoinMarks::JoinedAt(joined_at)
+    } else if !full {
+        JoinMarks::LateJoinNow
+    } else {
+        JoinMarks::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Mention routing: which human messages a shared agent answers.
@@ -1845,6 +1874,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// #2127/#2120: a push that opens a people room must not discard the row that caused it —
+    /// the relay's joined_at is the line, "now" only when the relay gave none.
+    #[test]
+    fn a_push_join_keeps_rows_issued_after_the_membership_time() {
+        // people_agent_added / people_chat_open push, relay knows when we joined
+        assert_eq!(people_join_marks(false, 1_700), JoinMarks::JoinedAt(1_700));
+        // boot/registry listing, relay knows
+        assert_eq!(people_join_marks(true, 1_700), JoinMarks::JoinedAt(1_700));
+        // push with no membership time: the old rule, now is the line
+        assert_eq!(people_join_marks(false, 0), JoinMarks::LateJoinNow);
+        // boot listing with no membership time: nothing to mark
+        assert_eq!(people_join_marks(true, 0), JoinMarks::None);
+    }
 
     pub(super) fn msg(text: &str, extra: Value) -> MessageView {
         let mut rest = json!({ "sender": "user:gh_2", "senderHandle": "sam" });
