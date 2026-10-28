@@ -4,7 +4,8 @@
 //! toggles my reaction on that message (`AppState::toggle_reaction`, a
 //! reaction row in the chat doc, synced like any other op) and closes it.
 //! The chips under the bubble (`RowKind::Reactions`) show the result; hovering
-//! a chip lists who used that emoji (iPhone `reactionSenders`).
+//! a chip lists who used that emoji (iPhone `reactionSenders`) in an out-of-flow
+//! line so the list row does not grow under the pointer.
 
 use gpui::{
     div, point, prelude::*, px, size, Context, Div, Entity, Focusable, Pixels, Point, Size, Window,

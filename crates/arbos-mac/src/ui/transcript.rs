@@ -829,6 +829,9 @@ pub struct Transcript {
     /// Reaction chip whose senders are listed under the chips (iPhone
     /// `reactionSenders`): `(message_id, emoji)`. Set while the pointer is
     /// over that chip; click still toggles my reaction (capsule also toggles).
+    /// The names paint out of flow so the list row's height never changes
+    /// under the pointer (in-flow names grew the row, the bottom-aligned
+    /// list shifted the chip away, and hover oscillated).
     reaction_senders: Option<(String, String)>,
 }
 
@@ -2957,7 +2960,10 @@ impl Transcript {
             } => {
                 // iPhone parity: small capsules under the bubble, mine tinted;
                 // click toggles my reaction. Hover lists who used that emoji
-                // under the chips — iPhone `reactionSenders`.
+                // under the chips — iPhone `reactionSenders`. Names hang out
+                // of flow (absolute) so the row height stays put: in-flow
+                // names grew the row, the bottom-aligned list shifted the
+                // chip out from under the pointer, and hover oscillated.
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let showing = self
@@ -3042,11 +3048,10 @@ impl Transcript {
                 });
                 div()
                     .w_full()
+                    .relative()
                     .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .when(mine, |el| el.items_end())
-                    .when(!mine, |el| el.items_start())
+                    .when(mine, |el| el.justify_end())
+                    .when(!mine, |el| el.justify_start())
                     .when(indent, |el| el.pl(px(2.0)))
                     .mt(px(-2.0))
                     .pb(px(ROW_GAP_HALF))
@@ -3054,8 +3059,14 @@ impl Transcript {
                     .when_some(names, |el, names| {
                         el.child(
                             div()
+                                .absolute()
+                                .top(relative_width(1.0))
+                                .pt(px(4.0))
+                                .when(mine, |d| d.right_0())
+                                .when(!mine, |d| d.left_0())
                                 .text_size(px(12.0))
                                 .text_color(theme.text_muted)
+                                .whitespace_nowrap()
                                 .child(names),
                         )
                     })
