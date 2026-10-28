@@ -874,37 +874,71 @@ struct ListTopFade: View {
             case .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
             }
         }
-        /// Opaque past the status bar. Home: through the disc row and the whole tab bar, so nothing
-        /// reads through behind the discs or around the tabs (Jacob's shot). Chat: 20 pt into the
-        /// header (its `headerBlur` since #1336). Bar-only lists and pane pages: the status bar alone.
+        /// Opaque past the status bar. Home and its search: a hair (`HomeChrome.topSolid`), then the
+        /// bars float over the rows ([feedback iphone-home-bar-fades-2026-10-28] — Jacob reversed
+        /// #1988's opaque-through-the-tabs block: Grok's buttons float and the rows fade out under
+        /// them). Chat: 20 pt into the header (its `headerBlur` since #1336). Bar-only lists and
+        /// pane pages: the status bar alone.
         var solid: CGFloat {
             switch self {
-            case .home: return Controls.top + Controls.diameter + HomeChrome.filterBand
+            case .home, .homeSearch: return HomeChrome.topSolid
             case .chat: return 20
-            case .homeSearch, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            case .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
             }
         }
         /// The gradient after `solid`, ending where the content starts at rest.
         var band: CGFloat {
             switch self {
             case .home: return HomeChrome.listTop - solid
+            case .homeSearch: return HomeChrome.barOnlyListTop - solid
             case .chat: return Controls.top + Controls.diameter + 6 - solid
-            case .homeSearch, .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
             case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
+            }
+        }
+        /// The gradient's shape after `solid`: `(pt into the band, wash alpha)` knots before the
+        /// clear end. Home: the rows pass under the discs at a quarter strength and under the tabs
+        /// at under half (`HomeChrome.discsWash` / `tabsWash`), gone where the first row rests —
+        /// Grok's floating bars; the other screens keep the Mac family's straight ramp.
+        var knots: [(at: CGFloat, alpha: Double)] {
+            switch self {
+            case .home:
+                return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash),
+                        (HomeChrome.discsBottom + HomeChrome.filterBand - solid, HomeChrome.tabsWash)]
+            case .homeSearch:
+                return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash)]
+            case .chat, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library:
+                return []
             }
         }
     }
 
-    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall it is.
+    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall
+    /// it is, and the mask's knots from the top edge (`y` pt, wash alpha) — opaque to `solid`, the
+    /// screen's `knots`, clear at `height`.
     struct Spec: Equatable {
+        struct Knot: Equatable {
+            let y: CGFloat
+            let alpha: Double
+        }
         let topInset: CGFloat
         let solid: CGFloat
         let height: CGFloat
+        let knots: [Knot]
+
+        var stops: [Gradient.Stop] {
+            guard height > 0 else { return [] }
+            return knots.map { .init(color: .black.opacity($0.alpha), location: $0.y / height) }
+        }
     }
 
     static func spec(_ screen: Screen, statusBar: CGFloat, extra: CGFloat = 0) -> Spec {
         let solid = statusBar + screen.solid + extra
-        return Spec(topInset: 0, solid: solid, height: solid + screen.band)
+        let height = solid + screen.band
+        var knots = [Spec.Knot(y: 0, alpha: 1), Spec.Knot(y: solid, alpha: 1)]
+        knots += screen.knots.map { Spec.Knot(y: solid + $0.at, alpha: $0.alpha) }
+        knots.append(Spec.Knot(y: height, alpha: 0))
+        return Spec(topInset: 0, solid: solid, height: height, knots: knots)
     }
 
     var body: some View {
@@ -920,15 +954,7 @@ struct ListTopFade: View {
                 theme.bg.opacity(theme.isGlass ? Self.glassWash : 1)
             }
             .frame(height: spec.height)
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .black, location: 0),
-                        .init(color: .black, location: spec.solid / spec.height),
-                        .init(color: .clear, location: 1),
-                    ],
-                    startPoint: .top, endPoint: .bottom)
-            )
+            .mask(LinearGradient(stops: spec.stops, startPoint: .top, endPoint: .bottom))
             .frame(maxWidth: .infinity, alignment: .top)
             .ignoresSafeArea(.container, edges: .top)
         }
@@ -965,6 +991,76 @@ extension HomeChrome {
     static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
     /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
     static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
+
+    // Home's floating bars ([feedback iphone-home-bar-fades-2026-10-28], Jacob 2026-10-28 18:21):
+    // the discs, the tabs and the bottom search capsule float over the list like Grok's; rows stay
+    // visible and fade out under them. Same geometry on Glass and Matte, each with its material.
+    /// Opaque this far past the status bar, then the rows show (nothing ever reads behind the
+    /// status bar itself, #1988).
+    static let topSolid: CGFloat = 4
+    /// The disc row's bottom edge, from the safe-area top.
+    static let discsBottom: CGFloat = Controls.top + Controls.diameter
+    /// The wash's alpha at the disc row's bottom: rows read at a quarter strength under the discs.
+    static let discsWash: Double = 0.75
+    /// … and at the tab bar's bottom: under half under the tabs (the words stay legible; the
+    /// selected tab has its own capsule), then gone over `fadeBand` where the first row rests.
+    static let tabsWash: Double = 0.55
+    /// The bottom search capsule's padding over the home indicator.
+    static let bottomPad: CGFloat = 8
+    /// The bar on the bottom edge: the capsule + its padding (the safe-area inset it takes).
+    static let bottomBar: CGFloat = Controls.height + bottomPad
+    /// The fade over the list's end, above the capsule.
+    static let bottomFade: CGFloat = 28
+    /// The wash's alpha at the capsule's top edge and at its bottom edge: the rows pass under the
+    /// capsule at under half strength and are gone at the home indicator.
+    static let capsuleTopWash: Double = 0.55
+    static let capsuleBottomWash: Double = 0.9
+    /// The list's trailing clear row: the last row at rest sits above the fade.
+    static let listBottom: CGFloat = bottomFade
+}
+
+/// The fade and the band under Home's search capsule, one layer for the bottom of the home canvas
+/// (the same construction as the chat's `ComposerBottomBand`, with Grok's floating-bar curve: clear
+/// above, under half at the capsule's top, nearly full at its bottom, full through the home
+/// indicator). The reader keeps the safe area, so its bottom inset is the bar (+ home indicator /
+/// keyboard); the layer inside ignores that edge and reaches the screen's edge.
+enum HomeBottomFade {
+    struct Spec: Equatable {
+        let fade: CGFloat
+        /// The bottom inset under the canvas: the bar + the home indicator, or the bar + the keyboard.
+        let inset: CGFloat
+        var height: CGFloat { fade + inset }
+        var knots: [ListTopFade.Spec.Knot] {
+            [.init(y: 0, alpha: 0),
+             .init(y: fade, alpha: HomeChrome.capsuleTopWash),
+             .init(y: fade + Controls.height, alpha: HomeChrome.capsuleBottomWash),
+             .init(y: fade + HomeChrome.bottomBar, alpha: 1),
+             .init(y: height, alpha: 1)]
+        }
+        var stops: [Gradient.Stop] {
+            guard height > 0 else { return [] }
+            return knots.map { .init(color: .black.opacity($0.alpha), location: min(1, $0.y / height)) }
+        }
+    }
+
+    static func spec(bottomInset: CGFloat) -> Spec {
+        Spec(fade: HomeChrome.bottomFade, inset: bottomInset)
+    }
+}
+
+struct HomeBottomFadeView: View {
+    var body: some View {
+        GeometryReader { geo in
+            let spec = HomeBottomFade.spec(bottomInset: geo.safeAreaInsets.bottom)
+            ComposerBandMaterial()
+                .frame(height: spec.height)
+                .mask(LinearGradient(stops: spec.stops, startPoint: .top, endPoint: .bottom))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .ignoresSafeArea(edges: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }
 
 // MARK: - Composer bottom band
