@@ -778,8 +778,10 @@ enum Transcript {
     static func bearsAvatar(_ kind: RowKind) -> Bool {
         switch kind {
         case .other, .member: return true
-        case .secretGhost(_, let mine, _, _, _): return !mine
-        case .image(_, _, _, _, _, _, let sender, _), .file(_, _, _, _, let sender, _): return sender != nil
+        case .secretGhost(name: _, mine: let mine, handle: _, avatar: _, named: _): return !mine
+        case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
+             .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
+            return sender != nil
         case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
         }
     }
