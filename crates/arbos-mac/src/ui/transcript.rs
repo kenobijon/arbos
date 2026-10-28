@@ -11538,6 +11538,7 @@ mod delivery_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            false,
             &mut cache,
             &HashSet::new(),
         );
@@ -11556,6 +11557,7 @@ mod delivery_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            false,
             false,
             &mut cache,
             &HashSet::new(),
@@ -11586,6 +11588,7 @@ mod delivery_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            false,
             false,
             &mut cache,
             &HashSet::new(),

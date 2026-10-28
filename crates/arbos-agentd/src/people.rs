@@ -296,6 +296,18 @@ fn mentioned_agent_ids(msg: &MessageView) -> Vec<String> {
     out
 }
 
+/// A row the agent writes beside its answer, not as one: a background job's host row, a
+/// worker's spawn row, an agent-to-agent hand-off. It names its sender in a people chat
+/// ([`Agent::people_sender_fields`]) but never counts as the reply to the ask.
+pub(crate) fn is_control_row(m: &arbos_core::doc::MessageView) -> bool {
+    m.rest.get("job").is_some_and(|j| !j.is_null())
+        || m.rest.get("worker").and_then(Value::as_bool) == Some(true)
+        || m.rest
+            .get("agentMessage")
+            .and_then(|a| a.get("toProjectId"))
+            .is_some()
+}
+
 /// What a reply in a people chat carries: message fields for the clients.
 /// `replyTo` is the platform quote/reply (clients show Grok's quote header on
 /// the bubble). `inReplyTo` is turn linkage (retry, "already replied"). Both
@@ -905,6 +917,7 @@ impl Agent {
                 && m.status != "cancelled"
                 && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg_id)
                 && m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str())
+                && !is_control_row(m)
         })
     }
 

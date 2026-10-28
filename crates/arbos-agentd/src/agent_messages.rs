@@ -776,6 +776,10 @@ mod tests {
         assert!(row.rest.get("askedBy").is_none());
         assert_eq!(row.rest["subagentName"], "Bob");
         assert!(!row.has_visible_content());
+        assert!(
+            !agent.people_already_replied(&host, "u1").await,
+            "a hand-off row is not the answer to the ask"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
