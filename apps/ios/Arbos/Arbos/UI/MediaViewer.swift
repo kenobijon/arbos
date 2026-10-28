@@ -33,6 +33,9 @@ struct MediaItem: Identifiable, Equatable {
     /// instead of a chat blob — no Download / Forward, and `caption` under the name.
     var pictureURL: String? = nil
     var caption: String? = nil
+    /// GIF-picker attribution; the viewer shows "via <provider>" under the name
+    /// (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    var source: AttachmentSource? = nil
 
     /// The line under the name: the caption of a profile picture, else when it was shared.
     var subline: String { caption ?? whenLabel }
@@ -91,7 +94,7 @@ enum MediaAlbum {
     static func item(id: String, message m: Message, attachment a: Attachment, kind: MediaItem.Kind, slot: String,
                      projectName: (String) -> String?) -> MediaItem {
         MediaItem(id: id, name: a.name, mime: a.mime, kind: kind, blobRef: a.blobRef, slot: slot,
-                  by: senderName(m, projectName: projectName), at: m.createdAt)
+                  by: senderName(m, projectName: projectName), at: m.createdAt, source: a.source)
     }
 
     /// Who shared it, for the caption: name, else `@handle`, else "You" / the agent.
@@ -252,7 +255,24 @@ struct MediaViewer: View {
             if let item {
                 VStack(spacing: 2) {
                     Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                    Text(item.subline).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                    // GIF-picker "via <provider>" under the name; https only as a
+                    // link (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+                    if let source = item.source, !source.provider.isEmpty {
+                        let label = "via \(source.provider)"
+                        Group {
+                            if let url = AttachmentSource.httpsPageURL(from: source.pageUrl) {
+                                SwiftUI.Link(label, destination: url)
+                            } else {
+                                Text(label)
+                            }
+                        }
+                        .font(theme.font(13))
+                        .foregroundStyle(.white.opacity(0.67))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("viewer-via-source")
+                    } else {
+                        Text(item.subline).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                    }
                 }
             }
 
