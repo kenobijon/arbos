@@ -859,7 +859,7 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
         .filter(|c| c.server_id == server.id && c.last_ts > 0)
         .max_by_key(|c| c.last_ts);
     match newest {
-        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
+        Some(c) => format!("{} · {}", c.name, channel_last_line(state, c)),
         None => state
             .space_row(server)
             .map(|s| s.last_text.clone())
@@ -868,13 +868,38 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
     }
 }
 
-/// "Sam: hi" for a channel row.
-fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
+/// "@sam: hi" for a channel row — a person by handle, as a group's `preview`
+/// labels them, "You" for my own row, an agent by name; a system line bare.
+/// The Matrix row's sender name is the handle for people
+/// (`arbos_matrix::message_row`), so it is never shown as if it were a name
+/// ([feedback server-member-names-2026-10-28]).
+fn channel_last_line(state: &AppState, row: &arbos_matrix::ChannelRow) -> String {
     let line = plain(row.last_text.lines().next().unwrap_or_default());
-    if row.last_sender_name.is_empty() {
+    let who = channel_preview_who(
+        &row.last_sender,
+        &row.last_sender_name,
+        &format!("user:{}", state.me_id()),
+    );
+    if who.is_empty() {
         line
     } else {
-        format!("{}: {line}", row.last_sender_name)
+        format!("{who}: {line}")
+    }
+}
+
+/// The label before a channel preview's text, from the newest row's member
+/// string and Matrix display name; `me` is my own member string.
+pub(crate) fn channel_preview_who(sender: &str, sender_name: &str, me: &str) -> String {
+    if sender.eq_ignore_ascii_case(me) {
+        return "You".into();
+    }
+    if sender_name.is_empty() || sender == "system" {
+        return String::new();
+    }
+    if sender.starts_with("user:") {
+        format!("@{sender_name}")
+    } else {
+        sender_name.to_owned()
     }
 }
 
@@ -1681,7 +1706,7 @@ fn server_channels(
         let preview = room
             .as_ref()
             .filter(|r| r.last_ts > 0)
-            .map(channel_last_line)
+            .map(|r| channel_last_line(state, r))
             .unwrap_or_else(|| "No messages yet".into());
         let time = room
             .as_ref()
@@ -3453,6 +3478,28 @@ mod row_bounds_tests {
                 assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_preview_tests {
+    //! A server row's "#general · …" preview labels a person as a group's preview does
+    //! (`@handle:`), me as "You", an agent by name — never a bare handle as if it were a
+    //! name ([feedback server-member-names-2026-10-28]; the tester's shot read "general ·
+    //! A: bug").
+    use super::channel_preview_who;
+
+    #[test]
+    fn the_preview_labels_people_like_a_group_does() {
+        let me = "user:test_01ME";
+        assert_eq!(channel_preview_who("user:test_01scout", "A", me), "@A");
+        assert_eq!(channel_preview_who("user:test_01me", "affinity", me), "You");
+        assert_eq!(channel_preview_who("agent:01COMMS", "Comms", me), "Comms");
+        assert_eq!(channel_preview_who("system", "", me), "");
+        assert_eq!(channel_preview_who("system", "launchcrew", me), "");
+        assert_eq!(channel_preview_who("", "", me), "", "no row yet");
+        // The fixture names its senders outright (no member string).
+        assert_eq!(channel_preview_who("", "Sami", me), "Sami");
     }
 }
 

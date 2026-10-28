@@ -327,6 +327,8 @@ fn emit_servers_hook(shared: &Arc<Shared>) {
             member_count: 4 + i as u64,
             unread: u64::from(i == 0),
             last_text: text.to_string(),
+            // The fixture names its senders outright (no roster to resolve against).
+            last_sender: String::new(),
             last_sender_name: who.to_string(),
             last_ts,
             channel_ids: vec![format!("{id}-{channel}")],
@@ -340,6 +342,7 @@ fn emit_servers_hook(shared: &Arc<Shared>) {
             can_post: true,
             unread: u64::from(i == 0),
             last_text: text.to_string(),
+            last_sender: String::new(),
             last_sender_name: who.to_string(),
             last_ts,
             order: format!("{i}"),
