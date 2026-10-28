@@ -8,9 +8,9 @@ import XCTest
 /// Debug builds): no relay, deterministic rows.
 ///
 /// A message bubble is `bubble:<messageId>`, the capsule `message-actions-capsule`, its
-/// add-emoji cell is labelled "More emoji", a chip "<emoji> reaction, <count>".
-/// `ARBOS_SHOT_DIR` (set) makes the test write a PNG of each step there — the rig's
-/// before/after shots.
+/// add-emoji cell is labelled "More emoji", a chip "<emoji> reaction, <count>". Each step
+/// is attached as a screenshot (`reaction-pick-<step>`, kept in the result bundle:
+/// `xcresulttool export attachments`) — the rig's before/after shots.
 final class ReactionPickerUITests: XCTestCase {
     /// The shared Mac runs the gate and releases at the same time; waits are generous.
     private let appear: TimeInterval = 90
@@ -50,36 +50,39 @@ final class ReactionPickerUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [wait], timeout: settle), .completed, what, file: file, line: line)
     }
 
-    private func shot(_ app: XCUIApplication, _ name: String) {
-        guard let dir = ProcessInfo.processInfo.environment["ARBOS_SHOT_DIR"], !dir.isEmpty else { return }
-        let png = XCUIScreen.main.screenshot().pngRepresentation
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
+    private func shot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = "reaction-pick-\(name)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testEmojiFromTheKeyboardBecomesOneReaction() {
         let app = launch()
         let bubble = lastBubble(app)
         XCTAssertFalse(chip(app, "🔥").exists, "no 🔥 chip before the pick")
-        shot(app, "1-chat")
+        shot("1-chat")
 
         bubble.press(forDuration: 0.8)
         let capsule = app.descendants(matching: .any)["message-actions-capsule"]
         XCTAssertTrue(capsule.waitForExistence(timeout: settle), "the reaction capsule opened")
-        shot(app, "2-capsule")
+        shot("2-capsule")
 
         let more = app.buttons["More emoji"]
         XCTAssertTrue(more.waitForExistence(timeout: settle), "the add-emoji cell is in the capsule")
         more.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the emoji keyboard came up")
-        shot(app, "3-keyboard")
+        shot("3-keyboard")
 
         app.typeText("🔥")
 
         assertGone(capsule, "the overlay closed on the pick")
         let fire = chip(app, "🔥")
-        XCTAssertTrue(fire.waitForExistence(timeout: settle), "a 🔥 chip sits under the bubble")
+        // The chip appears with the overlay's close; give the transcript a moment, then
+        // record the row as it is — with the chip (fixed) or without it (the bug).
+        _ = fire.waitForExistence(timeout: 3)
+        shot("4-after-pick")
+        XCTAssertTrue(fire.exists, "a 🔥 chip sits under the bubble")
         XCTAssertEqual(fire.label, "🔥 reaction, 1", "exactly one 🔥 — the pick toggled once")
-        shot(app, "4-reaction")
     }
 }
