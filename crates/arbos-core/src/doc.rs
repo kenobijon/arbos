@@ -3107,6 +3107,7 @@ mod tests {
                         mime: "image/jpeg".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("k".into()),
+                        url: None,
                         source: None,
                     }],
                     ..Default::default()
