@@ -787,42 +787,35 @@ impl Shell {
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
             // macOS's own answer first: a denial here is why "no banners" — and the
-            // one place to fix it is System Settings, so the row opens it.
-            let system_row = match permission {
-                crate::ui::notify::Permission::Denied => Some(
+            // one place to fix it is System Settings, so the next row opens it.
+            // State and action are two rows, as on the iPhone: label, value and
+            // link on one row do not fit the pane, and the label wrapped.
+            let system_rows = match permission {
+                crate::ui::notify::Permission::Denied => Some((
                     glass::row("Allowed by macOS".to_string(), &theme)
-                        .child(value("Off".to_string(), &theme))
-                        .child(
-                            link_button(
-                                "notify-system-settings",
-                                "Open System Settings",
-                                false,
-                                &theme,
-                            )
-                            .ml(px(10.0))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, _| s.open_notification_settings());
-                            })),
-                        ),
-                ),
-                crate::ui::notify::Permission::NotDetermined => Some(
+                        .child(value("Off".to_string(), &theme)),
+                    glass::hot_row("notify-system-settings", "Open System Settings", &theme)
+                        .text_color(theme.accent)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, _| s.open_notification_settings());
+                        })),
+                )),
+                crate::ui::notify::Permission::NotDetermined => Some((
                     glass::row("Allowed by macOS".to_string(), &theme)
-                        .child(value("Not asked yet".to_string(), &theme))
-                        .child(
-                            link_button("notify-system-allow", "Allow", false, &theme)
-                                .ml(px(10.0))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
-                                })),
-                        ),
-                ),
+                        .child(value("Not asked yet".to_string(), &theme)),
+                    glass::hot_row("notify-system-allow", "Allow notifications", &theme)
+                        .text_color(theme.accent)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                        })),
+                )),
                 crate::ui::notify::Permission::Allowed | crate::ui::notify::Permission::Unknown => {
                     None
                 }
             };
             let mut group = settings_group(&theme);
-            if let Some(row) = system_row {
-                group = group.child(row);
+            if let Some((state_row, action_row)) = system_rows {
+                group = group.child(state_row).child(action_row);
             }
             let group = group
                 .child(seg_row(
