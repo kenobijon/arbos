@@ -209,6 +209,23 @@ impl AppState {
             real.composer_dropped |= ui.composer_dropped;
             real.drop_started_at = real.drop_started_at.or(ui.drop_started_at);
         }
+        // The relay lists the DM's space before its chat; a people DM's one chat shares the
+        // space id, so the sends need not wait for the chat list.
+        if self.selected_project.as_deref() == Some(dm_id.as_str()) {
+            if !self.chats.get(dm_id).is_some_and(|c| !c.is_empty()) {
+                let mut chat = draft.chat[0].clone();
+                chat.id = dm_id.clone();
+                chat.project_id = dm_id.clone();
+                chat.title = self
+                    .project(dm_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or(chat.title);
+                self.chats.insert(dm_id.clone(), vec![chat]);
+            }
+            self.active_tab
+                .entry(dm_id.clone())
+                .or_insert_with(|| dm_id.clone());
+        }
         if self.active_chat_id().as_deref() != Some(dm_id.as_str()) {
             return;
         }
@@ -467,17 +484,15 @@ mod tests {
             Some("draft-dm:kenjigb"),
             "the group with Kenji in it is not the DM"
         );
-        // The relay lists the new DM: it opens and the message is sent in it.
+        // The relay lists the new DM (its space first, its chat list after): it opens and the
+        // message is sent in it.
         let mut after = before;
         after.push(space(
             "dm-kenji",
             SpaceKind::Dm,
             vec![person("gh_3", "kenjigb")],
         ));
-        state.update(cx, |s, cx| {
-            s.chats.insert("dm-kenji".into(), vec![chat("dm-kenji")]);
-            s.apply(SyncEvent::Projects(after), cx);
-        });
+        state.update(cx, |s, cx| s.apply(SyncEvent::Projects(after), cx));
         let (selected, draft) = state.read_with(cx, |s, _| {
             (s.selected_project.clone(), s.draft_dm.is_some())
         });
@@ -494,6 +509,26 @@ mod tests {
             sends,
             vec![("dm-kenji".to_string(), "hey Kenji".to_string())]
         );
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::Chats {
+                    project_id: "dm-kenji".into(),
+                    chats: vec![chat("dm-kenji")],
+                },
+                cx,
+            )
+        });
+        let (active, shown) = state.read_with(cx, |s, _| {
+            (
+                s.active_chat_id(),
+                s.messages_of("dm-kenji")
+                    .iter()
+                    .map(|m| m.plain_text())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(active.as_deref(), Some("dm-kenji"));
+        assert_eq!(shown, vec!["hey Kenji".to_string()], "the sent row stays");
     }
 
     #[gpui::test]
