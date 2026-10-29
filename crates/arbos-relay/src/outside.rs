@@ -2867,7 +2867,7 @@ mod tests {
             apply_event(
                 &state,
                 &me,
-                &json!({ "type": "message.end", "chat": g, "message": started["message"] }),
+                &json!({ "type": "message.end", "chat": g, "message": started["message"], "text": "ok" }),
             )
             .await
             .unwrap();
