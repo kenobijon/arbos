@@ -2578,8 +2578,18 @@ class Loop:
                 self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
                 log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
         deferred_batch = False
+
+        # A held item re-gating (awaiting_jacob with a green run, re-gated because main moved onto its files) is
+        # only keeping itself fresh: it ends awaiting_jacob again whatever the verdict. It must not take a solo
+        # slot or a deferred-fairness batch away from items that can merge (02:54 Oct 29: #2230, green and held
+        # since 02:13, ran alone a second time ahead of the pinned #2247 the moment a bounce released that pin).
+        # It still gates with the pool, where its re-gate costs nothing extra. An approved item is no longer held.
+        def held_green(st: dict) -> bool:
+            return bool((st.get("awaiting") or {}).get("ready")) and not st.get("approved_by_jacob")
+
         if not members and not pool_first:
-            solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
+            solo = sorted(((f, st) for f, st in ready if st.get("solo_next") and not held_green(st)),
+                          key=lambda fs: fs[1].get("created") or "")
             if solo:
                 fid, st = solo[0]
                 members = {fid: st["branch_head"]}
@@ -2591,7 +2601,8 @@ class Loop:
             # Oldest-deferred first, so inside that batch the older one merges and the newer one is bumped.
             # Without it #1532/#1534/#1543 sat behind older siblings that touch the same files (sidebar.rs,
             # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
-            deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
+            deferred = sorted(((f, st) for f, st in ready
+                               if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER and not held_green(st)),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
             # Mirror of #2019 for this lane: a red deferred batch hands over to its own bisect halves. Its members lose
             # the deferred flag at the red (see the red path), and while the next plan half is a half of a red deferred
