@@ -886,6 +886,9 @@ final class AppModel: ObservableObject {
     /// The relay's reason for each refused room, in plain words ([feedback blocked-state-ios-2026-10-26]);
     /// the chat-level note under the header draws it. Cleared with the room's next ACK.
     @Published private(set) var pushRefusalText: [Id: String] = [:]
+    /// The relay's `reason` next to `pushRefusalText` (so a timed mute can clear only a
+    /// `silenced` entry once the end passes — [feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    @Published private(set) var pushRefusalReason: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2035,6 +2038,12 @@ final class AppModel: ObservableObject {
                     return nil
                 }
                 let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll()
+                if let messages, AppModel.storedCopyIsBlank(rows: messages.count, docCount: doc.count, cursor: s.cursor) {
+                    // Resuming at the saved cursor would fetch nothing and leave the chat
+                    // blank for good; start the room from scratch instead.
+                    NSLog("store: \(s.key) reads \(messages.count) of \(doc.count) rows at cursor \(s.cursor); refetching")
+                    return nil
+                }
                 return (s, doc, messages)
             }
         }.value
@@ -2404,6 +2413,7 @@ final class AppModel: ObservableObject {
             guard let self, !isProjectDoc else { return }
             if self.pushRefused.remove(key) != nil {
                 self.pushRefusalText.removeValue(forKey: key)
+                self.pushRefusalReason.removeValue(forKey: key)
             }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
@@ -2433,8 +2443,15 @@ final class AppModel: ObservableObject {
             let why = room?.lastRefusal
             let fresh = self.pushRefused.insert(key).inserted
             if fresh || why?.reason != nil {
-                let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                let until = why?.reason == "silenced" ? self.peopleChat(key)?.silencedUntil : nil
+                let text = why?.sentence(silencedUntilMs: until)
+                    ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
                 self.pushRefusalText[key] = text
+                if let reason = why?.reason {
+                    self.pushRefusalReason[key] = reason
+                } else {
+                    self.pushRefusalReason.removeValue(forKey: key)
+                }
             }
         }
         rooms[key] = room
@@ -2492,6 +2509,7 @@ final class AppModel: ObservableObject {
         unacked[key] = nil
         pushRefused.remove(key)
         pushRefusalText[key] = nil
+        pushRefusalReason[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2576,7 +2594,9 @@ final class AppModel: ObservableObject {
             PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
             #endif
             await MainActor.run {
-                guard let self, self.snapshotGeneration[chatId] == gen else { return }
+                // A superseded read still paints a chat that shows nothing yet: rows arriving
+                // faster than one read finishes must not keep the transcript blank.
+                guard let self, self.snapshotGeneration[chatId] == gen || (self.messages[chatId]?.isEmpty ?? true) else { return }
                 self.applySnapshot(chatId, list: list)
             }
         }
@@ -2587,6 +2607,12 @@ final class AppModel: ObservableObject {
         let t0 = Date()
         defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
         #endif
+        if let doc = docs[chatId], !Self.shouldPublishSnapshot(rows: list.count, docCount: doc.count) {
+            // [feedback arbonites-blank-chat-ios-2026-10-28]: an empty read over a doc with rows
+            // is a failed read, not an empty chat. Keep what is on screen (or the spinner).
+            NSLog("snapshot \(chatId): read 0 of \(doc.count) rows; not publishing an empty transcript")
+            return
+        }
         var list = list
         let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
@@ -2985,6 +3011,26 @@ final class AppModel: ObservableObject {
     func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
 
     func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }
+
+    /// Timed admin mute ended: clear local `silenced` on the chat and drop a silenced
+    /// refusal note. Messages refused while muted stay as they are (no resend).
+    func clearExpiredSilence(chatId: Id) {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            let chat = peopleChats[i]
+            if chat.silenced, let until = chat.silencedUntil {
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                if until <= now {
+                    peopleChats[i].silenced = false
+                    peopleChats[i].silencedUntil = nil
+                }
+            }
+        }
+        if pushRefusalReason[chatId] == "silenced" {
+            pushRefused.remove(chatId)
+            pushRefusalText.removeValue(forKey: chatId)
+            pushRefusalReason.removeValue(forKey: chatId)
+        }
+    }
 
     func refreshPeople() async {
         guard credentials != nil, !isFixture else { return }
@@ -5673,7 +5719,29 @@ final class AppModel: ObservableObject {
     /// True when we already published an empty transcript for this chat
     /// (optimistic new chat) — ChatView shows the empty hint, not a spinner.
     func hasKnownEmptyTranscript(_ chatId: Id) -> Bool {
-        messages[chatId]?.isEmpty == true
+        messages[chatId]?.isEmpty == true && !transcriptPending(chatId)
+    }
+
+    /// The chat's doc holds rows that are not on screen yet (a read in flight, or one that
+    /// failed): ChatView shows the spinner, never a blank transcript.
+    func transcriptPending(_ chatId: Id) -> Bool {
+        (messages[chatId]?.isEmpty ?? true) && (docs[chatId]?.count ?? 0) > 0
+    }
+
+    /// Caught up (or opened) with an empty transcript over a doc that has rows: read again.
+    func repaintIfBlank(_ chatId: Id) {
+        guard transcriptPending(chatId), !snapshotPending.contains(chatId) else { return }
+        emitSnapshot(chatId)
+    }
+
+    nonisolated static func shouldPublishSnapshot(rows: Int, docCount: Int) -> Bool {
+        rows > 0 || docCount == 0
+    }
+
+    /// A saved replica whose rows do not read back — none decode, or none at all while the
+    /// cursor is past the start — must not be resumed at that cursor.
+    nonisolated static func storedCopyIsBlank(rows: Int, docCount: Int, cursor: Int64) -> Bool {
+        rows == 0 && (docCount > 0 || cursor > 0)
     }
 
     private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,

@@ -14,6 +14,7 @@
 //! `typing` · `status` · `presence.heartbeat`).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use arbos_core::auth::hash;
@@ -52,6 +53,8 @@ const WAIT_MAX_S: u64 = 25;
 const EVENTS_PER_MIN: i64 = 240;
 /// Longest message text an outside agent may post.
 const TEXT_MAX: usize = 16 * 1024;
+/// Longest a streamed message may grow, every delta together: the socket's frame cap.
+const MESSAGE_MAX: usize = 64 * 1024;
 /// Transports the owner can pick; the value is informational (shown on the profile).
 const TRANSPORTS: &[&str] = &["acp", "grok", "custom"];
 
@@ -1565,6 +1568,35 @@ fn settle_send(doc: &ChatDoc, reply_to: Option<&str>, status: CommandStatus) {
     }
 }
 
+/// Why a `message.delta` / `message.end` was refused before anything was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamRefused {
+    NoSuchMessage,
+    NotYours,
+    Finished,
+    TooLarge,
+}
+
+impl StreamRefused {
+    fn event_error(self) -> (&'static str, String) {
+        let (code, msg) = match self {
+            StreamRefused::NoSuchMessage => ("not_found", "no such message in this chat"),
+            StreamRefused::NotYours => ("forbidden", "this agent did not start that message"),
+            StreamRefused::Finished => ("closed", "that message is already finished"),
+            StreamRefused::TooLarge => ("too_large", "message over 64 KB in total"),
+        };
+        (code, msg.to_owned())
+    }
+}
+
+impl std::fmt::Display for StreamRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.event_error().1)
+    }
+}
+
+impl std::error::Error for StreamRefused {}
+
 pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventResult {
     let ty = field(e, "type").ok_or(("bad_request", "type required".to_owned()))?;
     let pid = me.project.id.clone();
@@ -1731,12 +1763,32 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             let is_people = project_id.is_none();
             let full = std::sync::Arc::new(StdMutex::new(String::new()));
             let full2 = full.clone();
-            crate::notices::write_doc_as(
+            let blank = Arc::new(AtomicBool::new(false));
+            let blank2 = blank.clone();
+            let device = device_of(&pid);
+            let device_in = device.clone();
+            let written = crate::notices::write_doc_as(
                 state,
                 project_id.as_deref(),
                 chat_id,
-                &device_of(&pid),
+                &device,
                 move |doc| {
+                    // Only a row this agent started and has not finished takes more text.
+                    let row = doc.message(&m).ok_or(StreamRefused::NoSuchMessage)?;
+                    if row.rest["deviceId"].as_str() != Some(device_in.as_str()) {
+                        return Err(StreamRefused::NotYours.into());
+                    }
+                    if row.status != MessageStatus::Streaming.as_str() {
+                        return Err(StreamRefused::Finished.into());
+                    }
+                    let total = match (ending, t.as_deref()) {
+                        (true, Some(whole)) => whole.len(),
+                        (_, Some(delta)) => row.text().len() + delta.len(),
+                        (_, None) => 0,
+                    };
+                    if total > MESSAGE_MAX {
+                        return Err(StreamRefused::TooLarge.into());
+                    }
                     let part = doc
                         .part_id_at(&m, 0)
                         .ok_or_else(|| anyhow::anyhow!("no such message"))?;
@@ -1748,10 +1800,20 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
                     }
                     if ending {
                         doc.set_activity(&m, None);
-                        doc.finish_message(&m, MessageStatus::Done);
                         if !is_people {
                             settle_send(doc, r.as_deref(), CommandStatus::Done);
                         }
+                        // A stream that ends with no words and no attachment is not a message:
+                        // the row goes rather than stay as a blank line.
+                        if doc
+                            .message(&m)
+                            .is_some_and(|row| !row.has_visible_content())
+                        {
+                            doc.delete_message(&m)?;
+                            blank2.store(true, Ordering::Relaxed);
+                            return Ok(());
+                        }
+                        doc.finish_message(&m, MessageStatus::Done);
                         if let Some(row) = doc.message(&m) {
                             *full2.lock().unwrap() = row.text();
                         }
@@ -1759,13 +1821,33 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
                     Ok(())
                 },
             )
-            .await
-            .map_err(|e| ("write_failed", e.to_string()))?;
+            .await;
+            if let Err(e) = written {
+                let Some(refused) = e.downcast_ref::<StreamRefused>() else {
+                    return Err(("write_failed", e.to_string()));
+                };
+                if matches!(
+                    refused,
+                    StreamRefused::NoSuchMessage | StreamRefused::Finished
+                ) {
+                    let mut open = open_streams().lock().unwrap();
+                    if open.get(&key).is_some_and(|(id, _)| *id == msg_id) {
+                        open.remove(&key);
+                    }
+                }
+                return Err(refused.event_error());
+            }
             if ending {
                 open_streams().lock().unwrap().remove(&key);
+                state.activity.lock().await.remove(&pid);
+                if blank.load(Ordering::Relaxed) {
+                    return Err((
+                        "bad_request",
+                        "text required: the message ended empty and was not posted".to_owned(),
+                    ));
+                }
                 let whole = full.lock().unwrap().clone();
                 announce(state, &me.project, &chat, &msg_id, &whole).await;
-                state.activity.lock().await.remove(&pid);
             }
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id }))
         }
@@ -2042,10 +2124,13 @@ pub async fn history(
         .into_response(),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
+    // A row with no words and no visible attachment (an agent-to-agent hand-off row, a job's
+    // host row, an empty stream) reads as a blank message with no sender to the agent.
     let rows = doc.messages();
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|m| m.role == "user" || m.role == "assistant" || m.role == "project")
+        .filter(|m| m.has_visible_content())
         .collect();
     let end = match &q.before {
         Some(b) => rows.iter().position(|m| &m.id == b).unwrap_or(rows.len()),
@@ -2548,6 +2633,330 @@ mod tests {
             reply_json(&state, Some(&doc), &chat_ref, Some("nope")),
             json!({ "id": "nope" })
         );
+    }
+
+    /// Arbonites, 2026-10-28 (01M627S7…, 01M627VG…): a box wrote an agent-to-agent hand-off row
+    /// and a background job's host row into a group — no words, bare `sender: "agent"`. The
+    /// outside agent's history and wake context leave them out; a stream it ends with no words
+    /// is refused and its row removed, and a stream with words still posts.
+    #[tokio::test]
+    async fn blank_rows_stay_out_and_empty_streams_are_refused() {
+        use crate::people::tests_support::{group, person, project_of};
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        use arbos_core::doc::UserMessageOpts;
+        use axum::body::to_bytes;
+
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 7401);
+        let (other, _) = person(&state, 7402);
+        let pid = project_of(&state, &owner, "Grok Bot");
+        let key = mint_key();
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "grok", &hash(&key))
+            .unwrap();
+        let g = group(&state, &[&owner, &other]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &owner, &json!({}))
+            .unwrap();
+        let (hi, ask) = (ulid(), ulid());
+        let (h2, a2, from) = (hi.clone(), ask.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            let user = |id: &str, text: &str| {
+                doc.append_user_message(
+                    id,
+                    text,
+                    "dev:test",
+                    &UserMessageOpts {
+                        sender: Some(format!("user:{from}")),
+                        ..Default::default()
+                    },
+                )
+            };
+            user(&h2, "morning all")?;
+            doc.start_assistant_message("handoff", "", "box:bubble");
+            doc.set_message_fields(
+                "handoff",
+                &[
+                    ("turn", json!({ "kind": "spawn" })),
+                    ("subagentName", json!("Bob")),
+                ],
+            );
+            doc.add_hidden_part("handoff", "agent_message_sent", "Hey Bob", &json!({}));
+            doc.finish_message("handoff", MessageStatus::Done);
+            doc.start_assistant_message("job", "", "box:bubble");
+            doc.set_message_fields(
+                "job",
+                &[
+                    ("job", json!({ "id": "j1" })),
+                    ("hidden", json!(true)),
+                    ("worker", json!(true)),
+                ],
+            );
+            doc.finish_message("job", MessageStatus::Done);
+            user(&a2, "@grok-bot what were those two blank lines?")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let agent = state
+            .db
+            .outside_agent_by_key_hash(&hash(&key))
+            .unwrap()
+            .unwrap();
+        let project = state.db.project(&pid).unwrap().unwrap();
+        let me = AgentPrincipal {
+            agent,
+            project: project.clone(),
+        };
+        let resp = history(
+            State(state.clone()),
+            me.clone(),
+            Path(g.clone()),
+            Query(HistoryQuery {
+                before: None,
+                limit: None,
+            }),
+        )
+        .await;
+        let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<&str> = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, [hi.as_str(), ask.as_str()]);
+        let chat = chat_json_for(&state, &project, &g).unwrap();
+        let ctx = crate::outside_sidecar::context_for(&state, &project, &chat, Some(&ask), 10);
+        let recent = ctx["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0]["text"], "morning all");
+
+        // An empty stream: refused, and no row is left behind.
+        let started = apply_event(&state, &me, &json!({ "type": "message.start", "chat": g }))
+            .await
+            .unwrap();
+        let empty = started["message"].as_str().unwrap().to_owned();
+        let r = apply_event(&state, &me, &json!({ "type": "message.end", "chat": g })).await;
+        assert_eq!(r.unwrap_err().0, "bad_request");
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        assert!(doc.message(&empty).is_none());
+        // Ending another writer's blank row by its id leaves it in place and posts nothing.
+        let r = apply_event(
+            &state,
+            &me,
+            &json!({ "type": "message.end", "chat": g, "message": "handoff" }),
+        )
+        .await;
+        assert!(r.is_err());
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        assert!(doc.message("handoff").is_some());
+
+        // A stream with words still posts.
+        apply_event(&state, &me, &json!({ "type": "message.start", "chat": g }))
+            .await
+            .unwrap();
+        apply_event(
+            &state,
+            &me,
+            &json!({ "type": "message.end", "chat": g, "text": "Those were hand-off rows." }),
+        )
+        .await
+        .unwrap();
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        let last = doc.messages().pop().unwrap();
+        assert_eq!(last.text(), "Those were hand-off rows.");
+        assert_eq!(last.rest["sender"], format!("agent:{pid}"));
+    }
+
+    /// `message.delta` / `message.end` reach only a row the same agent started and has not
+    /// finished, and a stream stops at [`MESSAGE_MAX`]; a refused event leaves the row as it was.
+    #[tokio::test]
+    async fn stream_events_touch_only_own_open_messages() {
+        use crate::people::tests_support::{group, person, project_of};
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        use arbos_core::doc::UserMessageOpts;
+
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 7201);
+        let (other, _) = person(&state, 7202);
+        let pid = project_of(&state, &owner, "Bubble Rig");
+        let key = mint_key();
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "custom", &hash(&key))
+            .unwrap();
+        let g = group(&state, &[&owner, &other]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &owner, &json!({}))
+            .unwrap();
+        let me = AgentPrincipal {
+            agent: state
+                .db
+                .outside_agent_by_key_hash(&hash(&key))
+                .unwrap()
+                .unwrap(),
+            project: state.db.project(&pid).unwrap().unwrap(),
+        };
+
+        // A person's finished row and another agent's row that is still streaming.
+        let (human, box_row) = (ulid(), ulid());
+        let (h2, b2, o2) = (human.clone(), box_row.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &h2,
+                "the numbers are 14",
+                "dev:other",
+                &UserMessageOpts {
+                    sender: Some(format!("user:{o2}")),
+                    ..Default::default()
+                },
+            )?;
+            let part = doc.start_assistant_message(&b2, "", "box:someone-else");
+            doc.append_text(&b2, &part, "thinking");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let row = |id: &str| {
+            crate::matrix::backfill::load_doc(&state, &g, None)
+                .unwrap()
+                .unwrap()
+                .message(id)
+                .unwrap()
+        };
+        let code = |r: EventResult| r.unwrap_err().0;
+
+        // Another member's message: refused, untouched — with or without an open stream.
+        for (id, before, status) in [
+            (&human, "the numbers are 14", "done"),
+            (&box_row, "thinking", "streaming"),
+        ] {
+            let ev = |ty: &str, text: &str| json!({ "type": ty, "chat": g, "message": id, "text": text });
+            assert_eq!(
+                code(apply_event(&state, &me, &ev("message.delta", " (edited)")).await),
+                "forbidden"
+            );
+            assert_eq!(
+                code(apply_event(&state, &me, &ev("message.end", "rewritten")).await),
+                "forbidden"
+            );
+            let started = apply_event(&state, &me, &json!({ "type": "message.start", "chat": g }))
+                .await
+                .unwrap();
+            assert_eq!(
+                code(apply_event(&state, &me, &ev("message.end", "rewritten")).await),
+                "forbidden"
+            );
+            let r = row(id);
+            assert_eq!(r.text(), before);
+            assert_eq!(r.status, status);
+            apply_event(
+                &state,
+                &me,
+                &json!({ "type": "message.end", "chat": g, "message": started["message"], "text": "ok" }),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            code(
+                apply_event(
+                    &state,
+                    &me,
+                    &json!({ "type": "message.delta", "chat": g, "message": "nope", "text": "x" }),
+                )
+                .await
+            ),
+            "not_found"
+        );
+
+        // Its own finished messages: posted, and streamed then ended.
+        let posted = apply_event(
+            &state,
+            &me,
+            &json!({ "type": "message.post", "chat": g, "text": "done here" }),
+        )
+        .await
+        .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let streamed = apply_event(
+            &state,
+            &me,
+            &json!({ "type": "message.start", "chat": g, "text": "short" }),
+        )
+        .await
+        .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        apply_event(&state, &me, &json!({ "type": "message.end", "chat": g }))
+            .await
+            .unwrap();
+        for (id, before) in [(&posted, "done here"), (&streamed, "short")] {
+            for ty in ["message.delta", "message.end"] {
+                let ev = json!({ "type": ty, "chat": g, "message": id, "text": "late" });
+                assert_eq!(code(apply_event(&state, &me, &ev).await), "closed");
+            }
+            assert_eq!(row(id).text(), before);
+            assert_eq!(row(id).status, "done");
+        }
+        // No open stream is left behind for an implicit delta to land in.
+        assert_eq!(
+            code(
+                apply_event(
+                    &state,
+                    &me,
+                    &json!({ "type": "message.delta", "chat": g, "text": "x" }),
+                )
+                .await
+            ),
+            "bad_request"
+        );
+
+        // The total cap: deltas up to MESSAGE_MAX land, one byte more is refused, end still works.
+        let open = apply_event(&state, &me, &json!({ "type": "message.start", "chat": g }))
+            .await
+            .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chunk = "a".repeat(TEXT_MAX);
+        for _ in 0..MESSAGE_MAX / TEXT_MAX {
+            apply_event(
+                &state,
+                &me,
+                &json!({ "type": "message.delta", "chat": g, "text": chunk }),
+            )
+            .await
+            .unwrap();
+        }
+        let over = json!({ "type": "message.delta", "chat": g, "message": open, "text": "b" });
+        assert_eq!(code(apply_event(&state, &me, &over).await), "too_large");
+        let r = row(&open);
+        assert_eq!(r.text().len(), MESSAGE_MAX);
+        assert_eq!(r.status, "streaming");
+        apply_event(&state, &me, &json!({ "type": "message.end", "chat": g }))
+            .await
+            .unwrap();
+        let r = row(&open);
+        assert_eq!(r.text().len(), MESSAGE_MAX);
+        assert_eq!(r.status, "done");
     }
 
     #[test]

@@ -9,6 +9,8 @@ mod auth;
 mod avatar;
 mod avatar_image;
 mod blobs;
+#[cfg(test)]
+mod box_row_tests;
 mod boxes;
 mod browser;
 mod calls;
@@ -73,6 +75,8 @@ mod stickers;
 mod unfurl;
 mod upgrade;
 mod upgrade_carry;
+#[cfg(test)]
+mod upgrade_rollback_tests;
 mod vault;
 mod vaults;
 mod voice;
@@ -416,6 +420,7 @@ async fn main() -> anyhow::Result<()> {
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
+    boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
