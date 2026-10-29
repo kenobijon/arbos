@@ -8,6 +8,7 @@ import XCTest
 /// Every row that carries reactions must start its chips where the layout puts the bubble:
 /// the avatar lane for another person's or an agent's row in a people chat (grouped
 /// continuations included), 0 for mine and for the 1:1 agent chat.
+@MainActor
 final class ReactionChipAnchorTests: XCTestCase {
     private let chat = "fx-group-arbonites"
     private let me = "user:fx-me"
