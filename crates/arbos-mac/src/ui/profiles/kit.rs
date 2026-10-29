@@ -17,7 +17,8 @@
 //! * danger row: centred red label, same height.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Stateful,
+    div, prelude::*, px, AnyElement, BoxShadow, Div, ElementId, FontWeight, Hsla, SharedString,
+    Stateful,
 };
 
 use crate::ui::glass;
@@ -97,7 +98,17 @@ pub fn card(theme: &Theme) -> Div {
         .mx(px(INSET))
         .mb(px(CARD_GAP))
         .rounded(px(CARD_RADIUS))
-        .bg(theme.pane_card)
+        .bg(theme.pane_card_fill())
+        // The Glass rim: an inset shadow, so it costs the rows no layout
+        // (a border would shrink the card's content box by 1 pt a side);
+        // transparent on Matte.
+        .shadow(vec![BoxShadow::new(
+            px(0.0),
+            px(0.0),
+            theme.pane_card_rim(),
+        )
+        .spread_radius(px(1.0))
+        .inset()])
         .overflow_hidden()
 }
 
@@ -182,11 +193,11 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
                 .size(px(AVATAR))
                 .flex_shrink_0()
                 .rounded(px(10.0))
-                .bg(theme.surface_2)
+                .bg(theme.control_fill())
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(sf_symbols::glyph(glyph, 18.0, theme.text_muted))
+                .child(sf_symbols::glyph(glyph, 18.0, theme.label_muted()))
                 .into_any_element(),
         ),
     }
@@ -237,6 +248,16 @@ pub fn row_state(
         Leading::None | Leading::Tile(_) => FontWeight::NORMAL,
     };
     let leading = leading_el(leading, theme);
+    // A title over a subtitle (a member's name over "@handle") lifts an
+    // emoji-only name onto the baseline (`identity::name`); a one-line title
+    // is centred in the row, where Core Text's own emoji placement already
+    // sits level with capitals.
+    let title: SharedString = title.into();
+    let title_el = if subtitle.is_some() {
+        identity::name(title, TEXT_BODY)
+    } else {
+        div().truncate().child(title)
+    };
     div()
         .id(id)
         .relative()
@@ -263,17 +284,12 @@ pub fn row_state(
                 .flex()
                 .flex_col()
                 .gap(px(1.0))
-                .child(
-                    div()
-                        .truncate()
-                        .font_weight(title_weight)
-                        .child(title.into()),
-                )
+                .child(title_el.font_weight(title_weight))
                 .when_some(subtitle, |el, s| {
                     el.child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .truncate()
                             .child(s),
                     )
@@ -284,13 +300,17 @@ pub fn row_state(
                 div()
                     .flex_shrink_0()
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(d),
             )
         })
         .children(trailing)
         .when(chevron, |el| {
-            el.child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
+            el.child(sf_symbols::glyph(
+                "chevron.right",
+                13.0,
+                theme.label_faint(),
+            ))
         })
         .child(hairline_below(theme))
 }
@@ -395,7 +415,7 @@ pub fn pill_button(
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .cursor_pointer();
-    highlight::washed(frame, theme.surface_2, theme)
+    highlight::washed(frame, theme.control_fill(), theme)
         .child(sf_symbols::symbol(
             symbol,
             PILL_GLYPH,
@@ -414,7 +434,7 @@ pub fn footnote(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .mt(px(-8.0))
         .mb(px(14.0))
         .text_size(px(TEXT_TINY))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .child(text.into())
 }
 
@@ -429,7 +449,7 @@ pub fn section_title(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .pb(px(SECTION_TITLE_BOTTOM))
         .text_size(px(TEXT_SMALL))
         .line_height(px(SECTION_TITLE_LINE))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .debug_selector(|| "section-title".into())
         .child(text.into())
 }
@@ -443,7 +463,7 @@ pub fn empty(text: &str, theme: &Theme) -> Div {
         .flex()
         .justify_center()
         .text_size(px(TEXT_SMALL))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .child(text.to_string())
 }
 
@@ -474,7 +494,7 @@ pub fn confirm_button(
                 el.border_1()
                     .border_color(theme.field_border)
                     .text_color(theme.text),
-                theme.field,
+                theme.field_fill(),
                 theme,
             )
         })
@@ -707,6 +727,82 @@ mod tests {
             assert_eq!(leading, trailing, "{name}: symmetric");
             assert_eq!(f(line.size.height), 1.0, "{name}: 1 pt line");
         }
+    }
+
+    /// A member row (avatar, name over `@handle`) for one name.
+    struct MemberRow(&'static str);
+
+    impl gpui::Render for MemberRow {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let subtitle = div()
+                .debug_selector(|| "member-handle".into())
+                .child("@dawizzaa")
+                .into_any_element();
+            div().w(px(340.0)).h(px(120.0)).child(
+                card(&theme).debug_selector(|| "member-card".into()).child(
+                    row(
+                        "member",
+                        Leading::Avatar(div().size(px(AVATAR)).into_any_element()),
+                        self.0,
+                        Some("@dawizzaa".into()),
+                        None,
+                        Some(subtitle),
+                        false,
+                        &theme,
+                    )
+                    .debug_selector(|| "member-row".into()),
+                ),
+            )
+        }
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a member row whose
+    /// name is one emoji is as tall as a text name's row, its `@handle` sits at
+    /// the same place in it, and only the emoji name is drawn lifted.
+    #[gpui::test]
+    fn an_emoji_member_name_keeps_the_row_and_its_handle_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let lay = |cx: &mut gpui::TestAppContext, name: &'static str| {
+            let (_view, vcx) = cx.add_window_view(|_, _| MemberRow(name));
+            vcx.run_until_parked();
+            let row = vcx.debug_bounds("member-row").expect("row");
+            let handle = vcx.debug_bounds("member-handle").expect("handle");
+            let divider = vcx.debug_bounds(DIVIDER_SELECTOR).expect("divider");
+            (
+                row.size,
+                handle.origin.y - row.origin.y,
+                divider.origin.y - row.origin.y,
+                vcx.debug_bounds(identity::LIFTED_SELECTOR),
+            )
+        };
+        let text = lay(cx, "Sam Rivera");
+        let emoji = lay(cx, "🧙🏽\u{200d}♂\u{fe0f}");
+        let mixed = lay(cx, "Cato 🌳");
+        assert_eq!(emoji.0, text.0, "row size");
+        assert_eq!(emoji.1, text.1, "handle offset in the row");
+        assert_eq!(emoji.2, text.2, "divider offset in the row");
+        assert_eq!(mixed.0, text.0, "row size (mixed)");
+        assert_eq!(mixed.1, text.1, "handle offset in the row (mixed)");
+        assert!(
+            text.3.is_none() && mixed.3.is_none(),
+            "text and mixed names are not lifted"
+        );
+        assert!(
+            emoji.3.is_some(),
+            "the emoji name is drawn lifted onto the baseline"
+        );
     }
 
     /// Headless GPUI render: a 1-row and a 3-row section draw without a panic

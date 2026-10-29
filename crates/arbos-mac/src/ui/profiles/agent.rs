@@ -237,9 +237,9 @@ pub(super) fn page(
         (None, false, None) => "Agent".into(),
     };
     let subtitle_color = if label.is_some() {
-        theme.text_muted
+        theme.label_muted()
     } else {
-        theme.text_faint
+        theme.label_faint()
     };
     let p_label = pid.clone();
     let subtitle_click = (mine && !editing_description).then(|| {
@@ -288,6 +288,7 @@ pub(super) fn page(
         _ if outside.is_some() => crate::ui::connect_agent::details_sections(
             &pid,
             outside.as_ref().expect("outside"),
+            shell,
             &theme,
             cx,
         ),
@@ -477,7 +478,7 @@ fn label_editor(shell: &Shell, theme: &Theme) -> Div {
         .px(px(10.0))
         .py(px(5.0))
         .rounded(px(10.0))
-        .bg(theme.field)
+        .bg(theme.field_fill())
         .border_1()
         .border_color(theme.primary)
         .text_size(px(TEXT_SMALL))
@@ -609,7 +610,7 @@ fn details_sections(
                         .child(sf_symbols::glyph(
                             "chevron.left.forwardslash.chevron.right",
                             18.0,
-                            theme.text_muted,
+                            theme.label_muted(),
                         ))
                         .into_any_element()
                 };
@@ -682,7 +683,7 @@ fn details_sections(
                             false,
                             theme,
                         )
-                        .text_color(theme.text_muted)
+                        .text_color(theme.label_muted())
                         .into_any_element(),
                     );
                 }
@@ -912,7 +913,7 @@ fn computer_sections(
                             false,
                             theme,
                         )
-                        .text_color(theme.text_muted)
+                        .text_color(theme.label_muted())
                         .into_any_element(),
                     ),
                     Some(r) if !r.reachable => rows.push(
@@ -926,7 +927,7 @@ fn computer_sections(
                             false,
                             theme,
                         )
-                        .text_color(theme.text_muted)
+                        .text_color(theme.label_muted())
                         .into_any_element(),
                     ),
                     Some(r) => {
@@ -993,7 +994,7 @@ fn computer_sections(
                                     false,
                                     theme,
                                 )
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .into_any_element(),
                             );
                         }

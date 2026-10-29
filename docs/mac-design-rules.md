@@ -99,6 +99,32 @@ discs 20 px apart; v0.6.212–0.6.214 had the right discs centred at 21 pt
 (top 3) in a 44 pt band with the filter capsules at 50 — 9 pt too high
 against Grok, Jacob's "the top bar on mac is now too high".
 
+## Sidebar pinning (Jacob 2026-10-28, [feedback sidebar-pinning-mac-2026-10-28]; relay [feedback sidebar-pinning-relay-2026-10-28]; iPhone [feedback sidebar-pinning-ios-2026-10-28])
+
+Jacob (Arbonites, 16:44 UTC): "the ability to pin chats/servers/agents on the side bar
+with the control click." Mockup approved 17:10 UTC (project store
+`media/feedback/sidebar-pinning/sheet-sidebar-pinning-mock.png`, design
+`docs/sidebar-pinning-design.md`) with two decisions: **cap 5, no tiers**; iPhone gets the
+same header, pins servers too and migrates its device-local pins into the synced list.
+
+| Item | Rule | Code |
+|---|---|---|
+| Pin / Unpin | the **first item** of every row menu (agent, person, group, server), above today's items, which do not move; SF `pin` / `pin.slash`, the iPhone's names. A new pin lands at the **top**; Unpin returns the row to its place by activity. At the cap the click answers with the shared error element ("You can pin up to 5 chats.") | `sidebar::row_menu` (`row-menu-pin`), `AppState::set_pinned` |
+| Pinned section | "Pinned" `TEXT_SMALL` 13 medium `text_muted` at the rows' text inset (list 8 + row 12 = **20**) in a **26** pt band (`PINNED_HEADER_H`) under the filter row; the pinned rows **in the user's order only** — never re-sorted by unread or activity, unread stays the count pill / bold name; then a 1 pt `border` hairline inset 12 in a 9 pt band (`PINNED_DIVIDER_H` = `glass::MENU_DIVIDER_HEIGHT`); then the rest in today's order, no second header | `sidebar::list_sections`, `pinned_header`, `pinned_divider` |
+| Pinned row | a normal row plus **`pin.fill` 11 pt semibold** in `text_muted` before the time (`row-pin-<id>`). No colour, no dot | `pin_mark` |
+| Zero pins | **nothing is drawn** — no header, hairline or marks; the list is exactly as before | pinned by `pin_tests::zero_pins_draws_no_section` |
+| Filter | All · Agents · People · Servers: the section shows only the pins the segment admits; header and hairline hide when none passes | `list_sections` over the filtered rows; `pin_tests::the_filter_shows_only_the_pins_it_admits` |
+| Reorder | **drag** a pinned row within the section: the row lifts (the highlight token's pressed step, `highlight::lifted`), the others slide to open the slot under the pointer, the drop — or a mouse-up anywhere — saves the shown order; pins the filter hid keep their places (`AppState::reorder_pins`). No drag across the hairline; pin / unpin is the menu | `PinDrag` / `pin_draggable` / `pin_drop_target`, `Shell::{begin_pin_drag, pin_slot_at, finish_pin_drag}` |
+| Rail | the collapsed rail draws the same order (pins first); its metrics are unchanged — no hairline tile | `rail` reads `sidebar::list_entries` |
+| Archive / delete | unpin (a pin is a row you see); pinning an archived row unarchives it first | `set_space_archived`, `delete_project`, `delete_people_chat`, `leave_group` |
+| Data | one relay list per user, top first: row keys `agent:<project id>` / `chat:<people chat id>` / `server:<server id>` (`AppState::pins`, `pin_key`); `GET /me/pins` at launch after the cached copy (`store::KEY_PINS`), `PUT /me/pins {pins}` replaces the whole list (`ClientCommand::SetPins`; the relay's answer is the truth, a refusal re-reads), `pins_changed` from another device replaces it (`SyncEvent::Pins`). Cap from the relay (`pin_cap`, default 5) | `sync/relay.rs` `refresh_pins` / `apply_pins`, `fixture.rs` `ARBOS_RIG_PINS=<name>[,…]` |
+
+Pinned by `sidebar::pin_tests::{zero_pins_draws_no_section,
+pinned_rows_lead_in_the_users_order_under_a_header, the_filter_shows_only_the_pins_it_admits,
+the_row_menu_leads_with_pin_then_unpin, pins_land_on_top_stop_at_the_cap_and_go_to_the_relay,
+reordering_keeps_hidden_pins_in_place, a_pin_drag_previews_the_order_and_commits_on_drop}`;
+relay `pins::tests`.
+
 ## Collapsed sidebar = icon rail (Jacob 2026-10-26, [feedback mac-sidebar-rail-2026-10-26])
 
 **The sidebar toggle collapses the chat list to Grok Bot's 84 pt icon rail; it
@@ -172,6 +198,35 @@ handle's 50. Pinned by `sidebar_fit::tests::{the_width_breakpoints_keep_every_pa
 the_rows_time_shrinks_then_hides_before_the_name_gives,
 dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width}`.
 Rig: `<config>/sidebar_width` (the saved width) + `ARBOS_SIDEBAR_COLLAPSED=0`.
+
+## Split handles: a wide grab, a hairline look (Jacob 2026-10-28, [feedback sidebar-slide-handle-minimal-2026-10-28])
+
+**Every split / resize handle on the Mac is macOS's split-view divider: what
+the pointer grabs is wide and invisible, what the eye sees is at most a 1 pt
+low-contrast hairline that brightens a little on hover and a little more while
+dragging. Never a thick bar, never a coloured fill.** Jacob (2026-10-28 15:15 UTC, v0.6.331): "the
+slide highlight on the side bar is wrong. Should make this much more minimal"
+— the sidebar's handle lit its whole 10 pt band in `primary` at 45 % on hover,
+a fat light-grey bar down the sidebar's edge. #2082's tester note ("fidgety")
+was about the grab, not the look; the grab stays generous, the look goes.
+Rules (`ui/split_handle.rs`):
+
+| Part | Rule |
+|---|---|
+| Hit band | `HIT_WIDTH` **10** pt inside the pane's right edge, full height, `col-resize` cursor, **never drawn** (8–10 pt is the range: easy to start, does not eat the list) |
+| Idle | nothing of the handle's own; the pane's separator is the only line — the sidebar's and the rail's `border_r_1` in `theme.border` (white 8 % / black 10 %), the right info pane's `pane_edge` hairline |
+| Hover | a `LINE_WIDTH` **1** pt hairline flush with the edge, over the separator, text colour at `HOVER_ALPHA` **0.18** — a step above the border, still low contrast |
+| Dragging | the same hairline at `DRAG_ALPHA` **0.30** — one step more, held for the whole gesture (GPUI suppresses hover styles during a drag; `split_handle::DragState` carries the state, raised with the drag's ghost view and lowered when GPUI drops it at mouse up) |
+| Where | one builder, `split_handle::right_edge(id, theme, dragging)`; the sidebar's `sidebar-resize` and the rail's `rail-resize` are that element with the drag wiring (`sidebar::resize_handle`). The right info pane has a fixed width (`Shell::pane_width`) and so no handle — its hairline rule is the one above. Any new divider uses the same builder |
+| Snap / width rules | unchanged: `SIDEBAR_WIDTH_MIN` 220, hysteresis 16, rail snap and restore (`ui/sidebar_fit.rs`, § above) |
+
+Pinned by `split_handle::tests::{the_hit_band_is_generous_and_the_line_is_a_hairline,
+the_line_is_dark_at_rest_and_brightens_in_two_steps,
+the_drag_state_lowers_itself_when_the_ghost_drops,
+the_rendered_hit_band_is_wide_and_the_drawn_line_is_one_point}` (a headless
+render measures the hit band at 10 × full height and the drawable line at
+1 × full height, both flush with the pane's edge). The `// hover-fill:
+exception handle` marker in `highlight`'s lint is this hairline's.
 
 ## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
 
@@ -264,9 +319,10 @@ backdrop): the chat behind gets no wheel and no key while it is up; Esc,
 
 | Item | Value (measured on `ref-grok-command-palette.png`, 2 px/pt) |
 |---|---|
-| Panel | 558 wide (`palette::WIDTH`), radius 12, `card()` fill, hangs at 12 % of the window height (≥ 48), at most 72 % tall |
-| Field row | 49 tall, magnifier 17 (12.5 visible) inset 16.5, "Search" at 17 pt; 1 pt hairline under it |
-| List | inset 10, 8 over the first row; rows 49 tall, 2 apart, radius 12, highlight `surface_2` |
+| Panel | 558 wide (`palette::WIDTH`), radius 12, hangs at 12 % of the window height (≥ 48), at most 72 % tall |
+| Material | **one plate** ([feedback search-popup-single-layer-2026-10-28], Jacob 2026-10-28 "double transparency on search pop up is annoying"; Scout's report of the same): `glass::popup_plate` — on **Glass** the window frosted under the panel at `glass::POPUP_BLUR` 24 (the sheet's), the card tint at the popup floor `theme.popup()` (`POPUP_WASH_FLOOR` 0.80, adaptive above it), the glass family's 1 pt rim + top highlight, the sheet's lift shadow; on **Matte** the flat `surface_1` card with a 1 pt `border_strong` hairline. **Nothing else between the chat and the rows**: the backdrop does not dim (`modal::PASSTHROUGH_BACKDROP_ALPHA` 0 — Spotlight does not dim the desktop), the rows have no fill of their own, the field row and the list sit straight on the plate. Readability: a 15 pt line of transcript under the panel must not be legible — the blur erases it, the tint flattens what is left (`PopupMaterial::backdrop_bleed` ≤ 0.2) |
+| Field row | 49 tall, magnifier 17 (12.5 visible) inset 16.5, "Search" at 17 pt; 1 pt hairline under it — the panel's one inner line |
+| List | inset 10, 8 over the first row; rows 49 tall, 2 apart, radius 12; rows transparent, the highlighted / hovered row is the `ui::highlight` tint on top (`Shape::Own`) |
 | Row | picture 24 (chat disc / server square / `#` tile / thumbnail or glyph tile), name 13.5 medium, subtitle 12.5 muted |
 | Shortcut badge | ⌘1–⌘9 on the first nine rows: 27 × 19, radius 6, 8 from the row's right edge |
 | Keys | ↑↓ move the highlight (`ComposerInput::on_arrow`), ⏎ opens, ⌘1–9 open that row, Esc closes |
@@ -312,7 +368,7 @@ app-wide, the bar is this chat only. Code: `crate::chat_search` (rules),
 | Count | "n of m" over the loaded rows, 1 = the oldest loaded (Find's order); the cursor starts on the newest hit; "No matches"; nothing while nothing is typed |
 | Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism |
 | Keys | **⌘F toggles** (Jacob 2026-10-27, [feedback search-toggle-click-outside-mac-2026-10-27]): closed → opens and focuses the field; open → closes exactly like ✕ / Esc (marks go, the composer types again), also with the field focused — the chord is a root action, the text input never swallows it. Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention. **⌘⇧F / ⌘K toggle the palette** the same way |
-| Click outside | a mouse-down anywhere outside the bar closes it, and anywhere outside the palette's panel dismisses the palette — **without swallowing the click**: the message, sidebar row or button under it answers in the same click (`Shell::click_outside`, capture phase against the bar's / panel's last-painted bounds; the palette's backdrop is see-through for the mouse — `modal::modal_overlay_top_passthrough` — and still dims and still swallows the wheel). A click inside the bar / panel keeps it. The Forward picker and the media viewer stay true modals (#1632) |
+| Click outside | a mouse-down anywhere outside the bar closes it, and anywhere outside the palette's panel dismisses the palette — **without swallowing the click**: the message, sidebar row or button under it answers in the same click (`Shell::click_outside`, capture phase against the bar's / panel's last-painted bounds; the palette's backdrop is see-through for the mouse — `modal::modal_overlay_top_passthrough` — does not dim (§ Command palette, Material) and still swallows the wheel). A click inside the bar / panel keeps it. The Forward picker and the media viewer stay true modals (#1632) |
 | Beyond the loaded rows | ‹ on the oldest loaded hit of a **server channel** asks the relay for a page (`ChannelLoadOlder`), shows "searching older…", moves on to the page's older hit when it lands, keeps paging while rows come without a hit, and wraps once the room says there is nothing above (`SyncEvent::ChannelHistoryEnd`). A chat doc (agent, DM, group) is whole on this Mac, so ‹ wraps at once |
 | Not | no second field in the header, no dropdown of senders, no match counter in the pill, no sidebar field |
 
@@ -380,6 +436,37 @@ below's start, so no empty sliver is highlighted at the end of the row above.
 Pinned by `ui::composer::caret_tests` (every move and extend on a wrapped
 two-paragraph draft in a 360 pt field, ⌘⌫, ⌥ arrows, focused vs blurred
 routing — all through the real keymap) and `keymap_tests::caret_chords_route_to_the_focused_composer_only`.
+
+### Composer — keyboard layouts (Scout 2026-10-28, [feedback mention-hotkey-layout-2026-10-28])
+
+There is no `@` hotkey: the mention picker opens when an `@` is **typed** at a
+word start, and every layout types it differently (US ⇧2, German ⌥L **and**
+⌃⌥L, Spanish ⌥G, Swiss ⌥G, French/Italian/Norwegian a plain key, Finnish /
+Portuguese ⌥2 — read off the real layouts with `UCKeyTranslate`). GPUI's macOS
+layer drops the character of any chord with Control held and AppKit never
+hands such a chord to `insertText:`, so German ⌃⌥L reached the composer as a
+bare `ctrl-alt-l` and typed nothing (on German the whole ⌃⌥ column repeats
+the ⌥ column — Q `«`, F `ƒ`, Y `¥` — AltGr by another name). Rule: **a
+Control+Option chord no binding took types what the layout says it types**,
+when that is printable — the composer's `on_key_down` asks
+`ui::key_layout::typed_text` (Carbon TIS + `UCKeyTranslate`, the table
+`NSTextView` uses) and inserts the result. Nothing is special-cased to `@` or
+to German; US ⌃⌥L is still a control character and types nothing, as in
+TextEdit; plain Control chords are left alone (US ⌃2 reports "2" but is not
+typed). Bindings run first, so ⌃⌥F stays Send Feedback on German rather than
+typing `ƒ`. Chords that arrive with their character (⌥L = `alt-l` + `@`) are
+the platform's to type and are not typed twice.
+
+Shortcut audit: GPUI reports every letter chord under ⌘ by the character the
+layout gives that key with ⌘ held (non-ASCII layouts fall back to the ⌘ table),
+so ⌘B / ⌘I / ⌘⇧X / ⌘F / ⌘⇧F / ⌘K / ⌘G and the caret chords (named keys) work
+on QWERTZ, AZERTY and friends. Only `cmd-{` / `cmd-}` (tabs) are unreachable
+where braces need ⌥; **⌃⇥ / ⌃⇧⇥** are bound as the layout-independent tab
+chords. Pinned by `ui::key_layout::tests` (layout tables read off the real
+German / US / French / Spanish layouts), `ui::composer::layout_chord_tests`
+(the chords dispatched exactly as the platform builds them, through the real
+keymap, into a focused composer) and
+`keymap_tests::non_us_at_sign_chords_are_nobodys_and_tabs_have_layout_free_chords`.
 
 ### Composer — formatting chords and live styling (Jacob 2026-10-27, [feedback chat-markdown-composer-2026-10-27])
 
@@ -859,6 +946,52 @@ ack rises by exactly the reply's row; scrolled into history → no row). Record:
 project store `internal/feedback-loop/status-row-gap-2026-10-26.md`, shots in
 `media/feedback/status-row-gap/`.
 
+### iPhone bottom bars: rows stay readable behind the glass pills, a soft fade toward the edge (Jacob 2026-10-28, [feedback iphone-composer-see-through-2026-10-28]; supersedes [feedback iphone-composer-bottom-fade-2026-10-28])
+
+Jacob on TestFlight 202610281715985037: "yes this is not it. we should actually
+see the text behind the search bar." Grok Bot (his dark chats-list shot): the
+next row scrolls visibly UNDER a glass round button and a glass "Search"
+capsule — text and avatar dimmed but readable through and between the pills,
+no opaque band anywhere, a soft fade darkening the content toward the bottom
+edge. The opaque band shipped earlier that day is gone; this rule holds for the
+chat composer and Home's search capsule alike, light + dark, Matte + Glass,
+keyboard open.
+
+| Item | Rule (pt / alpha) | Code |
+| --- | --- | --- |
+| Layer | one layer at the canvas's bottom, over the content, under the controls — the page colour masked by a ramp; the bar has no background of its own | `BottomBarFadeView`, the canvas `.overlay(alignment: .bottom)` in `ChatView` / `HomeView` |
+| Ramp | clear **28** above the bar's top edge → **0.3** at that edge → **0.5** at the controls' bottom edge → **0.8** at the screen's (or keyboard's) edge; never 1 — no band, no hard edge; readable over every control (≤ **0.6**) | `BottomBarFade.fade / edgeWash / controlsWash / bottomWash / readableMax`, `.chat` / `.home` |
+| Controls | glass pills on Glass (Liquid Glass on iOS 26, frost before; the Search-in-chat bar's light `field` tint so a placeholder reads), the field colour on Matte; sizes are the control family's | `ControlSurface`, `HeaderGlassBackground`, `GlassCircle` |
+| Lists | the last row / result at rest sits above the fade: transcript tail = Home's trailing clear row = the fade | `Theme.transcriptTail`, `HomeChrome.listBottom` |
+| Keyboard | the keyboard is the bar's safe area: the layer ends on it and moves with it | `BottomBarFadeView` (GeometryReader reads the inset) |
+| System edge effect | none under the bar on iOS 26+ (`scrollEdgeEffectHidden(for: .bottom)`): one fade, ours | `NoBottomScrollEdgeEffect` |
+
+Pinned by `ArbosTests/BottomBarFadeTests`. Record: project store
+`internal/feedback-loop/iphone-composer-see-through-2026-10-28.md`, shots in
+`media/feedback/iphone-composer-fade/`.
+
+### iPhone Home: the bars float over the list, rows fade out under them (Jacob 2026-10-28, [feedback iphone-home-bar-fades-2026-10-28])
+
+Grok's chat list: the top buttons and the bottom search bar float over the list;
+rows stay visible and fade out under them while scrolling. Ours cut the list
+hard — an opaque block through the discs and the whole tab bar at the top
+(#1988's answer to rows behind the status bar) and an opaque block behind the
+search capsule at the bottom. Supersedes #1988's opaque-through-the-tabs rule;
+nothing still reads behind the status bar itself.
+
+| Item | Rule (pt / alpha) | Code |
+| --- | --- | --- |
+| Top layer | opaque through the status bar + **4**, then one eased ramp: **0.75** at the disc row's bottom, **0.55** at the tab bar's bottom, **0** where the first row rests (`listTop`, unchanged); search mode has no tabs: 0.75 at the discs, 0 at `barOnlyListTop` | `ListTopFade.Screen.home/.homeSearch`, `HomeChrome.topSolid / discsWash / tabsWash` |
+| Bottom layer | the shared see-through fade of the rule above (`BottomBarFade.home`): clear 28 above the capsule, 0.3 at its top edge, 0.5 at its bottom edge, 0.8 at the home indicator / keyboard — rows readable behind the capsule | `BottomBarFadeView`, `BottomBarFade.home` |
+| Lists | leading clear row = the top layer's height (first row reachable at rest), trailing clear row = the bottom fade (last row / result reachable) | `HomeChrome.listTop`, `listBottom` |
+| Controls | unchanged: glass discs / capsules of the control family (`GlassCircle`, `controlField()`) | — |
+| Material | top layer — Matte: the page colour, Glass: `.ultraThinMaterial` under the 0.94 wash; bottom layer — the page colour on both; same geometry | `ListTopFade`, `BottomBarFadeView` |
+
+The chat bar floats the same way (rule above). Pinned by
+`ArbosTests/HomeBarFadeTests` and `ListTopFadeTests`. Record: project store
+`internal/feedback-loop/iphone-home-bar-fades-2026-10-28.md`, shots in
+`media/feedback/iphone-home-bar-fades/`.
+
 ## iPhone control family — one size for every round button, pill, field and bar (iPhone only; Jacob 2026-10-26, [feedback iphone-header-composer-sizing-2026-10-26])
 
 **iPhone only.** The Mac keeps its own `CONTROL` family (36 pt discs and pill, 44 pt
@@ -1023,6 +1156,47 @@ this is the correctness of the existing surface):
 | Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte, except the header pill rule. | — |
 
 Pinned by `theme::glass_contrast_tests` (white / black / photo × light / dark × 0 / 50 / 100 %, sampled and unsampled; the floors over the friendly desktop), `backdrop::tests` (throttle, change gate, bands, coverage) and `vibrancy::tests` (Liquid on 26, under-window before, none on Matte, kept across dark → light → dark).
+
+### Right pane components on Glass (Jacob 2026-10-28, [feedback right-pane-glass-cards-2026-10-28]; approved 18:17 UTC on the Xvfb sheet)
+
+Jacob's Members-tab shot: the pane wore the adaptive wash but its cards
+("Add members / Description", the member list), the Members · Library
+capsule, the glyph tiles and the fields were still painted with their Matte
+tokens — `pane_card`, `surface_2`, `field`, `bubble`, opaque hex colours on
+every surface — so they sat as solid slabs on a see-through pane while the
+sidebar beside them was frosted. "We can still have the glass for basically
+every component in the pane when we go glass."
+
+**On Glass every pane component is a wash of the text colour** (white-alpha
+in dark, black-alpha in light — the material's own plusL / plusD idiom), so
+the desktop shows through it as through the pane and it rides the adaptive
+wash; **Matte returns the old tokens untouched.**
+
+| Component | Matte | Glass dark | Glass light | Code |
+| --- | --- | --- | --- | --- |
+| Grouped card (`kit::card`: members, settings, Connection / Key cards, Library lists) | `pane_card` | white 8 % + 1 pt rim white 10 % (inset shadow: no layout cost) | white 55 % + rim black 6 % | `Theme::pane_card_fill` / `pane_card_rim`, `PANE_CARD_GLASS_*` |
+| Small controls: the round-button family — the pane's share / close / back discs, the sidebar strip's search · + · collapse and the collapsed rail's discs (Jacob 2026-10-28 16:58: "they should be glass"; hover and pressed stay `ui::highlight`'s two wash steps over the fill, the glyph the text colour) — the tab capsule, glyph tiles, Library thumbnails, hero glyph tile, Message pill, tag chips | `surface_2` | white 14 % | black 7 % | `Theme::control_fill` |
+| Sidebar filter's selected capsule (All · Agents · People · Servers) | `bubble_assistant` | white 14 % | black 7 % | `Theme::filter_on_fill` |
+| Fields in the pane (description / label / name editors, the handle field, Unarchive) | `field` | white 6 % | white 60 % | `Theme::field_fill` |
+| Settings icon tile | `#5c5c60` / `#6e6e73` | white 22 % | black 42 % (white glyph ≥ 3:1) | `Theme::tile_fill` |
+| Selected On / Off / Dark / Light segment | `bubble` | white 16 % | black 72 % | `Theme::segment_on_fill` |
+| Secondary text (subtitles, details, section titles, footnotes, unselected tab, empty lines) | `text_muted` | text at 72 % (vibrant) | text at 62 % | `Theme::label_muted` |
+| Tertiary (chevrons, placeholders) | `text_faint` | text at 45 % | text at 42 % | `Theme::label_faint` |
+| Hairlines between rows, the pane's left edge | unchanged | unchanged | unchanged | `kit::hairline_below`, `pane_edge` |
+
+Pinned by `theme::glass_contrast_tests::every_pane_component_reads_over_every_desktop_on_glass`
+(card, field on a card, tile on a card, control on the pane: body ≥ 4.5:1,
+vibrant muted ≥ 3:1 over white / black / photo × light / dark × 0 / 50 /
+100 %, sampled and unsampled; the selected segment's label ≥ 4.5:1, the
+icon tile's glyph ≥ 3:1), `…::on_glass_the_pane_components_are_translucent`
+and `…::on_matte_the_pane_components_keep_their_solid_tokens`.
+
+Rig: `ARBOS_MOCK_WALLPAPER=<pre-blurred png>` + `ARBOS_MOCK_BACKDROP_LUM=<0…1>`
+(`ui::mock_backdrop`) paint a stand-in desktop under the window and seed the
+sampler where there is no vibrancy (Linux / Xvfb previews); inert without the
+variables (`mock_backdrop::tests`). The iPhone's `PaneCard` takes the same
+card token (`Theme.paneCardFill` / `paneCardRim`, [feedback
+right-pane-glass-cards-ios-2026-10-28]) so both panes match on Glass.
 
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
@@ -1339,7 +1513,7 @@ a slightly stronger fill of the same shape; pressed = one step more.** One token
 | Fills | washes of `text` so one number reads the same on the chat, sidebar, card, frosted plate and Glass. Matte dark **0.055 / 0.09 / 0.13** (hover / selected / pressed), Matte light **0.045 / 0.08 / 0.12**, Glass dark **0.08 / 0.12 / 0.16**, Glass light **0.06 / 0.10 / 0.14**. A selected row keeps its step under the pointer; pressed is the third step for every row | `highlight::alphas`, `highlight::fills` |
 | Transparent buttons | an icon disc, a text button, a tab segment, a small ×: the same hover / pressed washes on its own rounded shape | `highlight::button`, `button_with` (extra hover styling), `segment` (the on segment is a filled control) |
 | Filled controls | the fill at rest, the wash composited over it under the pointer and while down — `surface_2` discs and pills, `field` pills, the glass circle, the blue update disc. Dark: the old chip rule (a shade lighter); light: a shade darker (lifting `#E8E8E8` toward white vanished on the `#F6F6F6` sidebar). `DISC_HOVER_LIFT` / `DISC_PRESSED_LIFT` are gone | `highlight::washed(el, base, theme)`, `highlight::over` |
-| Exceptions | a line that must set its own fill says why: `// hover-fill: exception <kind>` on it or the line above — `handle` (the sidebar resize hairline), `overlay` (white / black washes over a photo or video), `code-card` (the copy pill's four states), `danger` (a Delete label's `danger_soft`), `card-option` (the approval card's own palette), `choice` (a chosen chip / segment in a form, not a list selection), `removed-by-sibling`. The "Add agent" / "Add your agent" rows and the add-agent popover are untouched while [feedback add-agent-row-removal] removes them | `highlight::tests::EXCEPTION_KINDS` |
+| Exceptions | a line that must set its own fill says why: `// hover-fill: exception <kind>` on it or the line above — `handle` (a split handle's hover hairline, `ui/split_handle.rs`), `overlay` (white / black washes over a photo or video), `code-card` (the copy pill's four states), `danger` (a Delete label's `danger_soft`), `card-option` (the approval card's own palette), `choice` (a chosen chip / segment in a form, not a list selection), `removed-by-sibling`. The "Add agent" / "Add your agent" rows and the add-agent popover are untouched while [feedback add-agent-row-removal] removes them | `highlight::tests::EXCEPTION_KINDS` |
 | Focus | the keyboard focus ring is not part of this token and did not change | — |
 
 Pinned by `highlight::tests::no_hover_or_pressed_fill_outside_the_token` (scans `src/ui` for

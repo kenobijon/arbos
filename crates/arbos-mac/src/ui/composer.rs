@@ -19,8 +19,8 @@ use gpui::{
     ClipboardEntry, ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, Pixels, Point, Render, RenderImage, Role as AriaRole, ScrollWheelEvent,
+    IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, Role as AriaRole, ScrollWheelEvent,
     SharedString, Stateful, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
     WrappedLine,
 };
@@ -34,6 +34,7 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight;
+use crate::ui::key_layout::{self, KeyboardLayout, SystemLayout};
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
 use crate::ui::sf_symbols;
@@ -43,6 +44,11 @@ use crate::ui::theme::{
 };
 use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
+
+/// Emoji · Stickers · GIFs picker and the `+` attach menu (ARB-544).
+mod fun;
+/// The bundled starter stickers (generated).
+mod fun_starter;
 
 actions!(
     composer,
@@ -281,6 +287,10 @@ pub struct ComposerInput {
     /// display name in `content`; the caret never stops inside one, an edit
     /// that touches one removes it whole, and the sent text reads `@handle`.
     tokens: Vec<MentionToken>,
+    /// The keyboard layout consulted for Control chords GPUI delivers without
+    /// a character (German ⌃⌥L = `@`, [feedback
+    /// mention-hotkey-layout-2026-10-28]); the system's, a table in tests.
+    keyboard_layout: Rc<dyn KeyboardLayout>,
 }
 
 /// Separators that complete a typed `@handle` (#1596, behaviour 5): the token
@@ -321,7 +331,29 @@ impl ComposerInput {
             font_size: INPUT_FONT_SIZE,
             mentions: Mentions::empty(),
             tokens: Vec::new(),
+            keyboard_layout: Rc::new(SystemLayout),
         }
+    }
+
+    /// Tests: stand in a fixed layout table for the system's.
+    #[cfg(test)]
+    pub fn set_keyboard_layout(&mut self, layout: Rc<dyn KeyboardLayout>) {
+        self.keyboard_layout = layout;
+    }
+
+    /// A key no binding took. A Control+Option chord that the layout defines
+    /// as a character (German ⌃⌥L = `@`) reaches us with no `key_char` —
+    /// GPUI's macOS layer drops the character whenever Control is held and
+    /// AppKit never sends such a chord to `insertText:` — so the layout is
+    /// asked and its text typed, as `NSTextView` would. Everything else
+    /// propagates untouched.
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = key_layout::typed_text(&event.keystroke, self.keyboard_layout.as_ref())
+        else {
+            return;
+        };
+        self.replace_text_in_range(None, &text, window, cx);
+        cx.stop_propagation();
     }
 
     /// Who `@handle` resolves to while typing (composer accent highlight).
@@ -389,13 +421,20 @@ impl ComposerInput {
     /// range touches goes whole (the range grows to cover it), chips after it
     /// shift. Returns the range actually replaced.
     fn splice(&mut self, range: Range<usize>, new_text: &str) -> Range<usize> {
-        let mut range = range;
+        // Drop chips that no longer sit inside the buffer (a stale range used
+        // to grow the splice past `content.len()` and panic on backspace —
+        // [feedback app-01M61JH8TSB6RY0S44GJXYTAG9]).
+        let len = self.content.len();
+        self.tokens
+            .retain(|t| t.range.end <= len && t.range.start < t.range.end);
+        let mut range = clamp_byte_range(&self.content, range);
         for t in &self.tokens {
             if t.range.start < range.end && t.range.end > range.start {
                 range.start = range.start.min(t.range.start);
                 range.end = range.end.max(t.range.end);
             }
         }
+        range = clamp_byte_range(&self.content, range);
         let delta = new_text.len() as isize - range.len() as isize;
         self.tokens
             .retain(|t| t.range.end <= range.start || t.range.start >= range.end);
@@ -420,13 +459,14 @@ impl ComposerInput {
     /// Move an offset that fell inside a chip to its nearer edge (`forward`
     /// picks the end on a tie).
     fn snap(&self, offset: usize, forward: bool) -> usize {
+        let offset = clamp_byte_offset(&self.content, offset);
         match self.token_around(offset) {
             Some(t) => {
                 let (a, b) = (offset - t.range.start, t.range.end - offset);
                 if a < b || (a == b && !forward) {
                     t.range.start
                 } else {
-                    t.range.end
+                    t.range.end.min(self.content.len())
                 }
             }
             None => offset,
@@ -548,6 +588,22 @@ impl ComposerInput {
         self.last_followed_caret = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        cx.notify();
+    }
+
+    /// Put `text` where the caret is (replacing a selection), keeping the chips:
+    /// the picker's emoji land in the draft like typed characters (ARB-544).
+    pub fn insert_at_caret(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.record_undo();
+        let range = self
+            .marked_range
+            .take()
+            .unwrap_or(self.selected_range.clone());
+        let range = self.splice(range, text);
+        let end = range.start + text.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.caret_downstream = false;
         cx.notify();
     }
 
@@ -1236,17 +1292,19 @@ impl ComposerInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = clamp_byte_offset(&self.content, offset);
         self.selected_range = offset..offset;
         self.caret_downstream = false;
         cx.notify()
     }
 
     fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
+        let raw = if self.selection_reversed {
             self.selected_range.start
         } else {
             self.selected_range.end
-        }
+        };
+        clamp_byte_offset(&self.content, raw)
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
@@ -1277,6 +1335,7 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = clamp_byte_offset(&self.content, offset);
         self.caret_downstream = false;
         if self.selection_reversed {
             self.selected_range.start = offset
@@ -1326,6 +1385,7 @@ impl ComposerInput {
 
     /// One step left: a whole chip when the caret sits at its end.
     fn previous_boundary(&self, offset: usize) -> usize {
+        let offset = clamp_byte_offset(&self.content, offset);
         if let Some(t) = self.tokens.iter().find(|t| t.range.end == offset) {
             return t.range.start;
         }
@@ -1340,8 +1400,9 @@ impl ComposerInput {
 
     /// One step right: a whole chip when the caret sits at its start.
     fn next_boundary(&self, offset: usize) -> usize {
+        let offset = clamp_byte_offset(&self.content, offset);
         if let Some(t) = self.tokens.iter().find(|t| t.range.start == offset) {
-            return t.range.end;
+            return t.range.end.min(self.content.len());
         }
         let next = self
             .content
@@ -1477,6 +1538,26 @@ impl ComposerInput {
             layout.bounds.size.width,
             self.text_center,
         )
+    }
+}
+
+/// Byte offset inside `text`, snapped down to a char boundary.
+fn clamp_byte_offset(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// Byte range inside `text`, both ends on char boundaries.
+fn clamp_byte_range(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = clamp_byte_offset(text, range.start);
+    let end = clamp_byte_offset(text, range.end);
+    if start <= end {
+        start..end
+    } else {
+        end..start
     }
 }
 
@@ -2637,6 +2718,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -2734,6 +2816,8 @@ pub struct Composer {
     /// field once the mention table is known (`@s` leaves the picker open,
     /// `@sam deck ready?` shows the resolved chip).
     rig_draft: Option<String>,
+    /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
+    fun: fun::FunState,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -2777,6 +2861,20 @@ impl Composer {
                     .unwrap_or(false)
             }));
         });
+        // The picker's search field: its own single-line input; Esc closes the picker.
+        let fun_search = cx.new(ComposerInput::new);
+        let weak_fun_escape = cx.weak_entity();
+        fun_search.update(cx, |input, _| {
+            input.set_placeholder("Search emoji");
+            input.set_font_size(TEXT_SMALL);
+            input.on_mention_escape = Some(Rc::new(move |cx| {
+                weak_fun_escape
+                    .update(cx, |composer, cx| composer.dismiss_fun(cx))
+                    .unwrap_or(false)
+            }));
+        });
+        cx.observe(&fun_search, |this, _, cx| this.fun_search_changed(cx))
+            .detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         cx.observe(&input, |_, _, cx| cx.notify()).detach();
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
@@ -2826,6 +2924,7 @@ impl Composer {
             rig_draft: std::env::var("ARBOS_COMPOSER_DRAFT")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            fun: fun::FunState::new(fun_search),
         }
     }
 
@@ -2835,6 +2934,9 @@ impl Composer {
         if active == self.draft_chat {
             return;
         }
+        // The picker belongs to the chat it was opened in.
+        self.fun.open = false;
+        self.fun.menu_open = false;
         let text = self.input.read(cx).text().to_string();
         let tokens = self.input.read(cx).tokens().to_vec();
         if let Some(prev) = self.draft_chat.take() {
@@ -3781,7 +3883,9 @@ impl Render for Composer {
             .cursor_pointer()
             .map(|el| highlight::washed(el, theme.surface_2, &theme))
             .child(sf_symbols::glyph("plus", 16.0, theme.text_muted))
-            .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
+            // Option B (ARB-544): `+` opens the attach menu; "Photo or file…" is the
+            // old file prompt, the second row the Emoji · Stickers · GIFs picker.
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_attach_menu(cx)));
 
         let field_body = if recording {
             // iPhone recorder row: ✕ (discard) · red dot · timer · level bars.
@@ -4067,6 +4171,12 @@ impl Render for Composer {
             self.sync_mention_selection(mentions.len(), query.as_deref());
             let selected = self.mention_selected;
             column = column.child(glass::popover(self.render_mentions(mentions, selected, cx)));
+        }
+        if self.fun.menu_open {
+            column = column.child(self.render_attach_menu(cx));
+        }
+        if self.fun.open {
+            column = column.child(self.render_fun(cx));
         }
         column
     }
@@ -6250,5 +6360,132 @@ mod staged_tests {
                 "a disc never reaches its neighbour"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_chord_tests {
+    //! Typing `@` on a non-US layout ([feedback mention-hotkey-layout-2026-10-28],
+    //! Scout, German Mac): the chords are dispatched exactly as GPUI's macOS
+    //! layer delivers them — ⌃⌥L as a bare `ctrl-alt-l` with no character,
+    //! ⌥L as `alt-l` carrying `@` — through the real keymap (`bind_keys`) in a
+    //! headless window, against layout tables read off the real macOS layouts.
+    use super::*;
+    use crate::ui::key_layout::test_layouts::{GERMAN, US};
+    use gpui::{TestAppContext, VisualTestContext};
+
+    struct Harness {
+        input: Entity<ComposerInput>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(480.0))
+                .h(px(300.0))
+                .flex()
+                .child(self.input.clone())
+        }
+    }
+
+    fn field(
+        cx: &mut TestAppContext,
+        layout: Rc<dyn KeyboardLayout>,
+    ) -> (Entity<ComposerInput>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+            crate::bind_keys(cx);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| Harness {
+            input: cx.new(|cx| {
+                let mut input = ComposerInput::new(cx);
+                input.set_keyboard_layout(layout);
+                input
+            }),
+        });
+        let input = vcx.update(|_, cx| view.read(cx).input.clone());
+        vcx.update(|window, cx| {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        vcx.run_until_parked();
+        (input, vcx)
+    }
+
+    fn text(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| input.read(cx).text().to_string())
+    }
+
+    fn open_mention(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| input.read(cx).open_mention_token().map(str::to_string))
+    }
+
+    #[gpui::test]
+    fn german_control_option_l_types_at_and_opens_the_mention_picker(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(text(&input, cx), "@", "⌃⌥L on the German layout types @");
+        assert_eq!(
+            open_mention(&input, cx).as_deref(),
+            Some(""),
+            "an @ at a word start opens the mention picker with an empty query"
+        );
+        // The picker then filters on what follows, as with any typed @.
+        cx.simulate_keystrokes("s a");
+        assert_eq!(text(&input, cx), "@sa");
+        assert_eq!(open_mention(&input, cx).as_deref(), Some("sa"));
+    }
+
+    #[gpui::test]
+    fn german_option_l_arrives_with_its_character_and_is_typed_once(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        // What `parse_keystroke` builds for ⌥L on German: key `l`, key_char `@`.
+        cx.simulate_keystrokes("alt-l->@");
+        assert_eq!(
+            text(&input, cx),
+            "@",
+            "the platform's character is typed, and only once"
+        );
+        assert_eq!(open_mention(&input, cx).as_deref(), Some(""));
+    }
+
+    #[gpui::test]
+    fn control_option_l_mid_word_types_at_without_a_picker(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        cx.simulate_keystrokes("m a i l");
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(text(&input, cx), "mail@");
+        assert_eq!(
+            open_mention(&input, cx),
+            None,
+            "an @ glued to a word is an address, not a mention — same as a typed @"
+        );
+    }
+
+    #[gpui::test]
+    fn us_control_option_l_is_a_control_character_and_types_nothing(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(US));
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(
+            text(&input, cx),
+            "",
+            "TextEdit types nothing for ⌃⌥L on US; neither do we"
+        );
+        assert_eq!(open_mention(&input, cx), None);
+    }
+
+    #[gpui::test]
+    fn the_chord_reaches_only_the_focused_composer(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(text(&input, cx), "", "blurred: nothing is typed anywhere");
     }
 }

@@ -239,6 +239,15 @@ struct AgentProfileView: View {
     @State private var showVoice = false
     /// Connect an agent (#2142): Rotate key… pushes the reveal screen with the fresh key.
     @State private var rotated: ConnectReveal?
+    /// Wake URL form ([feedback outside-agents-wake-ios-2026-10-28]): the two drafts, what is in
+    /// flight ("saving" | "sending"), the last outcome line, and which agent the drafts were filled for.
+    @State private var wakeURLDraft = ""
+    @State private var wakeAuthDraft = ""
+    @State private var wakeBusy: String?
+    @State private var wakeNote: (ok: Bool, text: String)?
+    @State private var wakeFilledFor: Id?
+    /// Session log card → View all ([feedback sidecar-sessions-ios-2026-10-28]).
+    @State private var showLog = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
     /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
@@ -305,6 +314,9 @@ struct AgentProfileView: View {
             if let rotated {
                 ConnectRevealView(reveal: rotated, onDone: { self.rotated = nil })
             }
+        }
+        .navigationDestination(isPresented: $showLog) {
+            SessionLogView(projectId: projectId)
         }
         .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
             // The Coding row's elapsed time and the Computer tab's jobs move: poll while
@@ -502,9 +514,29 @@ struct AgentProfileView: View {
             AnyView(PaneRow(title: "Transport", value: info.transportLabel)),
             AnyView(PaneRow(title: "Protocol", value: info.proto)),
         ]))
-        out.append(.footnote("It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."))
-        out.append(.title("Key"))
+        // The Session log card (spec §13.3, approved 2026-10-28): under Connection; only on a
+        // relay that keeps the log (#2224).
+        if info.logSummary != nil {
+            out.append(contentsOf: sessionLogSections(project, info))
+        }
+        // The Can card (spec §4.3, the approved mockup): one switch per scope.
+        out.append(.title("Can"))
+        out.append(.card(OutsideAgentInfo.scopeRows.map { row -> AnyView in
+            let isOn = Binding<Bool>(
+                get: { model.outsideInfo[project.id]?.scope(row.name) ?? info.scope(row.name) },
+                set: { on in model.setOutsideScope(project.id, row.name, on: on) }
+            )
+            return AnyView(
+                PaneToggleRow(title: row.title, subtitle: row.subtitle, isOn: isOn)
+                    .accessibilityIdentifier("outside-scope-\(row.name)")
+            )
+        }))
+        out.append(.footnote("Changes apply at once. The agent sees only what is on."))
         let revoked = info.status == "revoked"
+        if info.hasWake, !revoked {
+            out.append(contentsOf: wakeSections(project, info))
+        }
+        out.append(.title("Key"))
         out.append(.card([
             AnyView(
                 Button {
@@ -526,6 +558,159 @@ struct AgentProfileView: View {
         ]))
         out.append(.footnote("Revoke stops it at once. Its messages stay."))
         return out
+    }
+
+    // MARK: Details for a connected agent — Session log ([feedback sidecar-sessions-ios-2026-10-28])
+
+    /// The card: the title with "Last reply 9.8 s · N wakes today", the newest four lines as
+    /// two-line rows, View all, a footnote.
+    private func sessionLogSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        let entries = model.outsideLogs[project.id] ?? []
+        var out: [PaneSection] = []
+        out.append(.custom(AnyView(
+            HStack(alignment: .firstTextBaseline) {
+                PaneSectionTitle("Session log")
+                Spacer(minLength: 8)
+                if let line = SessionLogView.headerLine(summary: info.logSummary, entries: entries) {
+                    Text(line)
+                        .font(theme.font(Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                        .padding(.trailing, PaneKit.inset * 2)
+                }
+            }
+        )))
+        let shown = Array(entries.reversed().filter(\.shown).prefix(4))
+        var rows: [AnyView] = shown.map { e in
+            AnyView(SessionLogRow(entry: e, chatTitle: e.chat.map { model.outsideLogChatTitle($0, agent: project.id) } ?? ""))
+        }
+        if shown.isEmpty {
+            rows.append(AnyView(PaneRow(title: "No wakes yet", subtitle: "Lines appear here when someone writes to the agent.")))
+        }
+        rows.append(AnyView(
+            Button { showLog = true } label: {
+                PaneRow(title: "View all", chevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("outside-log-all")
+        ))
+        out.append(.card(rows))
+        out.append(.footnote("Written by the sidecar on the agent's machine. Never message text or secrets."))
+        return out
+    }
+
+    // MARK: Details for a connected agent — Wake URL ([feedback outside-agents-wake-ios-2026-10-28])
+
+    /// What the line under the Wake URL buttons says: the in-flight word, the last Save / test
+    /// outcome, else the relay's last delivery (the Mac's `connect_agent::wake_note`).
+    static func wakeNoteLine(busy: String?, note: (ok: Bool, text: String)?, last: OutsideWakeLast?,
+                             now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> (ok: Bool, text: String)? {
+        if busy == "saving" { return (true, "Saving…") }
+        if busy == "sending" { return (true, "Sending…") }
+        if let note { return note }
+        if let last { return (last.error == nil, "Last wake · \(last.line(now: now))") }
+        return nil
+    }
+
+    /// **Wake URL** card: URL field, the Authorization value (secure, never shown back), Save and
+    /// Send test wake, the outcome line — the braille spinner while something is in flight.
+    private func wakeSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        let busy = wakeBusy != nil
+        let canTest = info.wakeURL != nil && info.wakeAuthSet && !busy
+        let line = Self.wakeNoteLine(busy: wakeBusy, note: wakeNote, last: info.wakeLast)
+        let urlRow = VStack(alignment: .leading, spacing: 6) {
+            Text("URL").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            TextField("", text: $wakeURLDraft, prompt: Text("https://…").foregroundStyle(theme.placeholder))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .keyboardType(.URL)
+                .textContentType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .controlField()
+                .accessibilityIdentifier("wake-url-field")
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        .onAppear { fillWakeForm(project.id, info) }
+        let authRow = VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Authorization header value").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                Spacer()
+                if info.wakeAuthSet {
+                    Text("saved · paste again to replace").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+            }
+            SecureField("", text: $wakeAuthDraft, prompt: Text("Paste the Authorization header value").foregroundStyle(theme.placeholder))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .controlField()
+                .accessibilityIdentifier("wake-auth-field")
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        let buttonsRow = VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                PanePillButton(glyph: "checkmark", title: "Save") { saveWake(project.id) }
+                    .disabled(busy)
+                    .opacity(busy ? 0.5 : 1)
+                    .accessibilityIdentifier("wake-save")
+                PanePillButton(glyph: "antenna.radiowaves.left.and.right", title: "Send test wake") { testWake(project.id) }
+                    .disabled(!canTest)
+                    .opacity(canTest ? 1 : 0.5)
+                    .accessibilityIdentifier("wake-test")
+            }
+            if let line {
+                HStack(spacing: 6) {
+                    if busy { WorkingSpinner() }
+                    // A delivery readout ("Last wake · Failed · HTTP 401 · 3 min ago"), muted
+                    // like the status rows — not an error note.
+                    Text(line.text)
+                        .font(theme.font(Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(2)
+                }
+                .accessibilityIdentifier("wake-note")
+            }
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        return [
+            .title("Wake URL"),
+            .card([AnyView(urlRow), AnyView(authRow), AnyView(buttonsRow)]),
+            .footnote("When a message needs an answer, Arbos posts a small signed nudge here at once — no message text. The value is sent as the Authorization header, verbatim, and is never shown again. Keep a slow poll as the fallback."),
+        ]
+    }
+
+    /// Fill the two fields the first time the pane shows this agent (the stored URL; the value
+    /// field starts empty because the value is never shown back).
+    private func fillWakeForm(_ projectId: Id, _ info: OutsideAgentInfo) {
+        guard wakeFilledFor != projectId else { return }
+        wakeFilledFor = projectId
+        wakeURLDraft = info.wakeURL ?? ""
+        wakeAuthDraft = ""
+        wakeNote = nil
+    }
+
+    private func saveWake(_ projectId: Id) {
+        guard wakeBusy == nil else { return }
+        wakeBusy = "saving"; wakeNote = nil
+        let url = wakeURLDraft, auth = wakeAuthDraft
+        Task {
+            let error = await model.saveOutsideWake(projectId, url: url, auth: auth)
+            wakeAuthDraft = ""
+            wakeBusy = nil
+            wakeNote = error.map { (ok: false, text: $0) } ?? (ok: true, text: "Saved")
+        }
+    }
+
+    private func testWake(_ projectId: Id) {
+        guard wakeBusy == nil else { return }
+        wakeBusy = "sending"; wakeNote = nil
+        Task {
+            let r = await model.testOutsideWake(projectId)
+            wakeBusy = nil
+            wakeNote = r
+        }
     }
 
     // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)
@@ -768,5 +953,124 @@ struct ReasoningPickerView: View {
             }
         }
         .presentationDetents([.medium])
+    }
+}
+
+
+// MARK: - Session log ([feedback sidecar-sessions-ios-2026-10-28])
+
+/// One log line: the time on the left, then the chat (or the session event) over the muted
+/// latency / detail. Only an error's sentence is red — no dots, no badges (2026-10-27 rule).
+struct SessionLogRow: View {
+    @Environment(\.theme) private var theme
+    let entry: OutsideLogEntry
+    let chatTitle: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: PaneKit.gap) {
+            Text(entry.clock)
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.muted)
+                .monospacedDigit()
+                .frame(width: 66, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.isSession ? entry.sessionTitle : chatTitle)
+                    .font(theme.font(Theme.body))
+                    .italic(entry.isSession)
+                    .foregroundStyle(entry.isSession ? theme.muted : theme.text)
+                    .lineLimit(1)
+                let detail = entry.detail
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(theme.font(Theme.small))
+                        .italic(entry.isSession)
+                        .foregroundStyle(entry.isError ? theme.danger : theme.muted)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, PaneKit.inset)
+        .padding(.vertical, 6)
+        .frame(minHeight: PaneKit.rowHeight)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The View all page: every line, newest first, grouped by day, with the pane's tab pill as
+/// the filter (All · Replies · Errors · Sessions) — the same labels as the Mac page.
+struct SessionLogView: View {
+    @Environment(\.theme) private var theme
+    @EnvironmentObject private var model: AppModel
+    let projectId: Id
+    @State private var filter = "All"
+
+    static let filters = ["All", "Replies", "Errors", "Sessions"]
+
+    /// "Last reply 9.8 s · 12 wakes today" for the card's header.
+    static func headerLine(summary: OutsideLogSummary?, entries: [OutsideLogEntry]) -> String? {
+        var parts: [String] = []
+        if let ms = summary?.lastReplyMs { parts.append(String(format: "Last reply %.1f s", Double(ms) / 1000)) }
+        let today = entries.filter { $0.kind == "wake" && $0.day == "Today" }.count
+        if today > 0 { parts.append("\(today) wake\(today == 1 ? "" : "s") today") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Which lines a filter keeps.
+    static func keeps(_ e: OutsideLogEntry, filter: String) -> Bool {
+        switch filter {
+        case "Replies": return e.kind == "reply" || e.kind == "post"
+        case "Errors": return e.isError
+        case "Sessions": return e.isSession
+        default: return e.shown
+        }
+    }
+
+    private var sections: [PaneSection] {
+        let entries = (model.outsideLogs[projectId] ?? []).reversed().filter { Self.keeps($0, filter: filter) }
+        var out: [PaneSection] = []
+        var day = ""
+        var rows: [AnyView] = []
+        for e in entries {
+            if e.day != day {
+                if !rows.isEmpty { out.append(.card(rows)); rows = [] }
+                out.append(.title(e.day))
+                day = e.day
+            }
+            rows.append(AnyView(SessionLogRow(entry: e, chatTitle: e.chat.map { model.outsideLogChatTitle($0, agent: projectId) } ?? "")))
+        }
+        if !rows.isEmpty { out.append(.card(rows)) }
+        if out.isEmpty {
+            switch filter {
+            case "Replies": out.append(.empty("No replies yet"))
+            case "Errors": out.append(.empty("No errors"))
+            case "Sessions": out.append(.empty("No session events yet"))
+            default: out.append(.empty("No wakes yet"))
+            }
+        }
+        out.append(.footnote("Written by the sidecar on the agent's machine. Never message text or secrets."))
+        return out
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    ProfilePane(
+                        hero: PaneHero(picture: .glyph("list.bullet.rectangle"), name: "Session log",
+                                       subtitle: model.project(projectId)?.name ?? ""),
+                        tabs: Self.filters,
+                        selected: $filter,
+                        body: sections
+                    )
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar(screen: .agentPage) { EmptyView() }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: projectId) { await model.refreshOutsideLog(projectId) }
     }
 }

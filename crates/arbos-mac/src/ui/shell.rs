@@ -43,6 +43,7 @@ use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
 use crate::ui::member_menu;
 use crate::ui::message_menu;
+use crate::ui::mock_backdrop;
 use crate::ui::modal;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
@@ -57,6 +58,7 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sf_symbols;
 use crate::ui::sidebar;
+use crate::ui::sidebar_fit;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
@@ -266,7 +268,7 @@ pub struct Shell {
     /// Likewise the Search-in-chat bar.
     pub(crate) chat_search_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The palette's result list scroll (keeps the highlight in view).
-    palette_scroll: ScrollHandle,
+    pub(crate) palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
@@ -346,11 +348,18 @@ pub struct Shell {
     pub(crate) morph: rail::Morph,
     /// The rail picture under the pointer (its name tip is drawn at the root).
     pub(crate) rail_hover: Option<crate::model::Id>,
+    /// Whether the sidebar's edge handle is mid-drag: its hairline shows the
+    /// drag state while GPUI suppresses hover styles (`ui::split_handle`).
+    pub(crate) split_drag: crate::ui::split_handle::DragState,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
     /// The sidebar filter capsules' horizontal scroll (a narrow column,
     /// [feedback sidebar-narrow-wrap-2026-10-27]).
     pub(crate) filter_scroll: ScrollHandle,
+    /// Scrolls the selected capsule into view once per selection / width, so
+    /// the strip stays scrollable back to "All" ([feedback
+    /// server-strip-scroll-2026-10-28]).
+    pub(crate) filter_pin: sidebar_fit::FilterPin,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
     /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
@@ -381,6 +390,8 @@ pub struct Shell {
     pub(crate) server_leave_armed: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// A pinned sidebar row mid-drag to a new slot ([feedback sidebar-pinning-mac-2026-10-28]).
+    pub(crate) pin_drag: Option<sidebar::PinDragState>,
     /// Right-click menu on a channel row of the server's channel list (D88): server, channel,
     /// and where the click landed. Archive for everyone, Delete for owners/admins.
     pub(crate) channel_menu: Option<(
@@ -427,6 +438,11 @@ pub struct Shell {
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
     pub(crate) description_input: Entity<ComposerInput>,
+    /// Connected agent's Connection card: the Wake URL and its Authorization value (masked).
+    pub(crate) wake_url_input: Entity<ComposerInput>,
+    pub(crate) wake_auth_input: Entity<ComposerInput>,
+    /// The agent whose Wake URL the two fields were last filled for.
+    pub(crate) wake_form_project: Option<crate::model::Id>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
     /// Header name (#1068): a single click opens the profile only after
@@ -816,6 +832,18 @@ impl Shell {
         });
         cx.observe(&description_input, |_, _, cx| cx.notify())
             .detach();
+        let wake_url_input = cx.new(ComposerInput::new);
+        wake_url_input.update(cx, |input, _| {
+            input.set_placeholder("https://…");
+        });
+        cx.observe(&wake_url_input, |_, _, cx| cx.notify()).detach();
+        let wake_auth_input = cx.new(ComposerInput::new);
+        wake_auth_input.update(cx, |input, _| {
+            input.set_placeholder("Paste the Authorization header value");
+            input.set_masked(true);
+        });
+        cx.observe(&wake_auth_input, |_, _, cx| cx.notify())
+            .detach();
         let agent_name_input = cx.new(ComposerInput::new);
         {
             let weak = cx.weak_entity();
@@ -1125,6 +1153,7 @@ impl Shell {
             },
             settings_scroll,
             row_menu: None,
+            pin_drag: None,
             channel_menu: None,
             channel_delete_armed: false,
             run_by_chip: Default::default(),
@@ -1174,8 +1203,10 @@ impl Shell {
             list_filter: sidebar::ListFilter::load(),
             morph: Default::default(),
             rail_hover: None,
+            split_drag: Default::default(),
             rail_scroll: ScrollHandle::new(),
             filter_scroll: ScrollHandle::new(),
+            filter_pin: sidebar_fit::FilterPin::default(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
@@ -1193,6 +1224,9 @@ impl Shell {
             server_leave_armed: false,
             people_input,
             description_input,
+            wake_url_input,
+            wake_auth_input,
+            wake_form_project: None,
             agent_name_input,
             name_click_serial: 0,
             model_search_input,
@@ -1327,6 +1361,8 @@ impl Shell {
             || focused(&self.handle_input)
             || focused(&self.agent_name_input)
             || focused(&self.description_input)
+            || focused(&self.wake_url_input)
+            || focused(&self.wake_auth_input)
             || focused(&self.avatar_prompt_input)
             || focused(&self.model_search_input)
             || focused(&self.tab_rename_input)
@@ -4869,7 +4905,7 @@ impl Render for Shell {
         let project_space = state.selected().filter(|p| !p.is_people()).cloned();
         let selected = state.selected().cloned();
 
-        let mut root = div()
+        let root = div()
             .id("shell-root")
             .key_context("Shell")
             .track_focus(&self.focus_handle)
@@ -4954,10 +4990,17 @@ impl Render for Shell {
             .flex()
             .flex_row()
             .size_full()
-            .bg(theme.shell())
             .text_color(theme.text)
             .font_family(theme.font_sans)
             .text_size(px(TEXT_BODY));
+        // Rig (`ui::mock_backdrop`): the stand-in desktop under the shell
+        // wash, where the window has no material of its own.
+        let mut root = match mock_backdrop::layer(cx).filter(|_| theme.is_frost()) {
+            Some(desktop) => root
+                .child(desktop)
+                .child(div().absolute().inset_0().bg(theme.shell())),
+            None => root.bg(theme.shell()),
+        };
 
         if let Some(pairing) = pairing {
             self.signing_in = true;

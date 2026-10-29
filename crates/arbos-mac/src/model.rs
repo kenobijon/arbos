@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 pub use arbos_core::doc::ReplyRef;
@@ -199,9 +201,107 @@ pub struct OutsideInfo {
     pub last_seen_at: Option<i64>,
     #[serde(default)]
     pub connected_at: Option<i64>,
+    /// The nine switches (spec §4.3), effective values: `"files.read" → true`.
+    #[serde(default)]
+    pub scopes: std::collections::HashMap<String, bool>,
+    /// The Wake URL (`agent.wake`), absent on a relay without it.
+    #[serde(default)]
+    pub wake: Option<WakeInfo>,
 }
 
+/// An outside agent's Wake URL as the relay reports it: the URL is shown back, the
+/// `Authorization` value never is (`auth_set` only).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WakeInfo {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub url_set: bool,
+    #[serde(default)]
+    pub auth_set: bool,
+    /// `Authorization`.
+    #[serde(default)]
+    pub header: String,
+    #[serde(default)]
+    pub last: Option<WakeLast>,
+}
+
+/// The last nudge the relay sent to the Wake URL.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WakeLast {
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl WakeLast {
+    /// "Delivered · HTTP 200 · 12 s ago" / "Failed · HTTP 500: boom · 3 min ago".
+    pub fn line(&self, now: i64) -> String {
+        let when = ago_seconds(now, self.at);
+        match (&self.error, self.status) {
+            (None, Some(s)) => format!("Delivered · HTTP {s} · {when}"),
+            (None, None) => format!("Delivered · {when}"),
+            (Some(e), _) => format!("Failed · {e} · {when}"),
+        }
+    }
+}
+
+/// "12 s ago", "3 min ago", "2 h ago", "4 d ago" — the connection lines' clock, with seconds
+/// (unlike [`ago`], which starts at "just now").
+fn ago_seconds(now: i64, t: i64) -> String {
+    let s = ((now - t).max(0) / 1000).max(0);
+    if s < 60 {
+        format!("{s} s ago")
+    } else if s < 3600 {
+        format!("{} min ago", s / 60)
+    } else if s < 86_400 {
+        format!("{} h ago", s / 3600)
+    } else {
+        format!("{} d ago", s / 86_400)
+    }
+}
+
+/// The switches of the Can card, in the mockup's order: wire name, title, subtitle.
+pub const OUTSIDE_SCOPES: [(&str, &str, Option<&str>); 9] = [
+    (
+        "chat.read",
+        "Read messages",
+        Some("in chats it is a member of"),
+    ),
+    ("chat.post", "Post, edit and delete its own messages", None),
+    ("chat.react", "React", None),
+    ("presence", "Show typing and status", None),
+    (
+        "approval.request",
+        "Ask you to approve actions",
+        Some("approval cards in chat"),
+    ),
+    (
+        "secret.use",
+        "Use your secrets",
+        Some("by name only, never the value"),
+    ),
+    ("members.manage", "Add members or agents", None),
+    (
+        "files.read",
+        "Open files shared in chat",
+        Some("pictures, files, GIFs it was sent"),
+    ),
+    ("calls.join", "Join voice calls", None),
+];
+
 impl OutsideInfo {
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    pub fn scope(&self, name: &str) -> bool {
+        self.scopes.get(name).copied().unwrap_or(matches!(
+            name,
+            "chat.read" | "chat.post" | "chat.react" | "presence" | "approval.request"
+        ))
+    }
+
     /// The transport as the Details pane names it.
     pub fn transport_label(&self) -> &'static str {
         match self.transport.as_str() {
@@ -214,18 +314,7 @@ impl OutsideInfo {
     /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
     /// "Disconnected".
     pub fn status_line(&self, now: i64) -> String {
-        let ago = |t: i64| {
-            let s = ((now - t).max(0) / 1000).max(0);
-            if s < 60 {
-                format!("{s} s ago")
-            } else if s < 3600 {
-                format!("{} min ago", s / 60)
-            } else if s < 86_400 {
-                format!("{} h ago", s / 3600)
-            } else {
-                format!("{} d ago", s / 86_400)
-            }
-        };
+        let ago = |t: i64| ago_seconds(now, t);
         match (self.status.as_str(), self.last_seen_at) {
             ("revoked", _) => "Disconnected".to_owned(),
             ("connected", Some(t)) => format!("Connected · {}", ago(t)),
@@ -1309,6 +1398,8 @@ pub enum AttachmentKind {
     Sheet,
     Pdf,
     Audio,
+    /// A picker sticker (ARB-544): drawn at a fixed size with no bubble.
+    Sticker,
     #[serde(other)]
     File,
 }
@@ -1323,6 +1414,7 @@ impl AttachmentKind {
             AttachmentKind::Sheet => "Spreadsheet",
             AttachmentKind::Pdf => "PDF",
             AttachmentKind::Audio => "Audio",
+            AttachmentKind::Sticker => "Sticker",
             AttachmentKind::File => "File",
         }
     }
@@ -1365,6 +1457,79 @@ pub struct AttachmentSource {
     pub page_url: String,
 }
 
+/// One GIF the relay's search returned (`GET /gif/search` item): the grid shows `preview`,
+/// the message carries `url` + `source`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GifItem {
+    pub id: String,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub url: String,
+    pub preview: GifPreview,
+    pub page_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GifPreview {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A page of GIF results, or why there is none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GifPage {
+    Items {
+        items: Vec<GifItem>,
+        next: Option<String>,
+    },
+    /// The relay has no provider key (`503 gif_unavailable`).
+    Unavailable,
+    /// Our budget or the provider's rate limit (`429 gif_busy`).
+    Busy,
+    /// Anything else went wrong.
+    Failed,
+}
+
+/// One sticker pack of the relay's manifest (`GET /stickers/packs`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickerPack {
+    pub id: String,
+    pub name: String,
+    pub publisher: String,
+    pub license: String,
+    pub license_url: String,
+    pub attribution: String,
+    pub animated: bool,
+    pub page_url: String,
+    pub mime: String,
+    pub items: Vec<StickerItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StickerItem {
+    pub id: String,
+    pub name: String,
+    pub emoji: String,
+    pub mime: String,
+    pub path: String,
+}
+
+/// What the picker sends with one tap (ARB-544): a sticker (bytes already fetched, stored in
+/// the chat slot like any picture) or a GIF (provider URL, nothing stored).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaPick {
+    Sticker {
+        pack: Box<StickerPack>,
+        item: StickerItem,
+        bytes: Arc<Vec<u8>>,
+    },
+    Gif(Box<GifItem>),
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -1385,16 +1550,42 @@ pub struct Attachment {
     /// ([feedback chart-bubble-mac-2026-10-26]).
     #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
     pub chart_part: Option<String>,
+    /// A picture that lives with its provider (a picked GIF, ARB-544): no `ref`, the bytes
+    /// come through the relay's pass-through (`GET /gif/media?u=`). See [`Self::preview_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
     /// Boxed so [`Attachment`] stays small inside enums (Outgoing, library Entry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Box<AttachmentSource>>,
 }
 
+/// The thumbnail-cache key prefix for a provider-hosted picture (`url:<https://…>`); the
+/// sync layer fetches these through the relay's GIF pass-through instead of `/blob`.
+pub const URL_KEY_PREFIX: &str = "url:";
+/// The thumbnail-cache key prefix for a relay-hosted sticker (`sticker:<pack>/<id>`).
+pub const STICKER_KEY_PREFIX: &str = "sticker:";
+
 impl Attachment {
     pub fn kind(&self) -> AttachmentKind {
         self.kind
             .unwrap_or_else(|| AttachmentKind::from_name_and_mime(&self.name, &self.mime))
+    }
+
+    /// The key the picture's bytes are cached and fetched under: the blob `ref`, or
+    /// `url:<url>` for a provider-hosted GIF with no copy in the chat slot.
+    pub fn preview_key(&self) -> Option<String> {
+        self.blob_ref.clone().or_else(|| {
+            self.url
+                .as_ref()
+                .filter(|u| !u.is_empty())
+                .map(|u| format!("{URL_KEY_PREFIX}{u}"))
+        })
+    }
+
+    /// A picker sticker: fixed square, no bubble, no caption.
+    pub fn is_sticker(&self) -> bool {
+        self.kind() == AttachmentKind::Sticker
     }
 
     pub fn title(&self) -> &str {
@@ -3195,6 +3386,10 @@ pub struct DeviceView {
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: Option<i64>,
+    /// Set once the device signed out or was revoked; such a row is no
+    /// longer a session and the Devices list leaves it out.
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
     /// The device that made the request — this Mac.
     #[serde(default)]
     pub current: bool,

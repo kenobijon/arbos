@@ -540,6 +540,13 @@ impl Db {
         )?;
         c.execute_batch(SCHEMA)?;
         c.execute_batch(crate::outside::SCHEMA)?;
+        c.execute_batch(crate::outside_log::SCHEMA)?;
+        for m in crate::outside::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
+        for m in crate::outside_wake::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
         // Forward-only, additive migrations (D50).
         let _ = c.execute(
             "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",
@@ -631,6 +638,7 @@ impl Db {
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
+        c.execute_batch(crate::pins::PINS_SCHEMA)?;
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         crate::shell_grants::ensure_schema(&c);

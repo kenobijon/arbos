@@ -131,6 +131,18 @@ pub enum SyncEvent {
         project_id: Id,
         info: crate::model::OutsideInfo,
     },
+    /// The Wake URL form was saved (`PATCH /outside-agents/{id}`); `error` is the relay's
+    /// short reason when it refused.
+    OutsideAgentWakeSaved {
+        project_id: Id,
+        error: Option<String>,
+    },
+    /// "Send test wake" came back: `text` is "Delivered · HTTP 200" or the short error.
+    OutsideAgentWakeTested {
+        project_id: Id,
+        ok: bool,
+        text: String,
+    },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
     /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
@@ -247,6 +259,14 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// My sidebar pins, top first (`GET /me/pins`, the local cache at launch, a
+    /// `pins_changed` push from another device, or the relay's answer to `SetPins`):
+    /// row keys `agent:<project>` / `chat:<people chat>` / `server:<server>`; `cap` is
+    /// the relay's limit ([feedback sidebar-pinning-mac-2026-10-28]).
+    Pins {
+        pins: Vec<String>,
+        cap: usize,
+    },
     /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
     /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
     /// unread total after that read.
@@ -357,6 +377,16 @@ pub enum SyncEvent {
     Thumbnail {
         key: String,
         bytes: Arc<Vec<u8>>,
+    },
+    /// Picker (ARB-544): a page of GIF results for `query` (empty = trending), or why none.
+    GifResults {
+        query: String,
+        pos: Option<String>,
+        page: crate::model::GifPage,
+    },
+    /// Picker: the relay's sticker packs (`None` when the relay could not be reached).
+    StickerPacks {
+        packs: Option<Vec<crate::model::StickerPack>>,
     },
     /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
     /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
@@ -826,6 +856,12 @@ pub enum ClientCommand {
         chat_id: Id,
         archived: bool,
     },
+    /// Replace my sidebar pins (`PUT /me/pins {pins}`): the whole list, top first —
+    /// one command for pin, unpin and reorder. The relay's answer comes back as
+    /// `SyncEvent::Pins` ([feedback sidebar-pinning-mac-2026-10-28]).
+    SetPins {
+        pins: Vec<String>,
+    },
     /// Rename a chat tab (`PATCH /projects/{id}/chats/{chat}` + a `retitle`
     /// command in the chat doc so the box's local index matches).
     Retitle {
@@ -957,6 +993,24 @@ pub enum ClientCommand {
     OutsideAgentRevoke {
         project_id: Id,
     },
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card →
+    /// [`SyncEvent::OutsideAgentStatus`] with the effective set.
+    OutsideAgentScope {
+        project_id: Id,
+        scope: String,
+        on: bool,
+    },
+    /// `PATCH /outside-agents/{id} {wake_url, wake_auth}`: `None` leaves a field alone, an
+    /// empty string clears it → [`SyncEvent::OutsideAgentWakeSaved`] + a status refresh.
+    OutsideAgentWakeSet {
+        project_id: Id,
+        url: Option<String>,
+        auth: Option<String>,
+    },
+    /// `POST /outside-agents/{id}/wake/test` → [`SyncEvent::OutsideAgentWakeTested`].
+    OutsideAgentWakeTest {
+        project_id: Id,
+    },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
     DeletePeopleChat {
         chat_id: Id,
@@ -1025,10 +1079,31 @@ pub enum ClientCommand {
         key: String,
         save: bool,
     },
-    /// Fetch an image attachment's bytes for the inline thumbnail (F10).
+    /// Fetch an image attachment's bytes for the inline thumbnail (F10). Keys that start
+    /// with `url:` (a picked GIF) or `sticker:` (a relay-hosted sticker) are fetched
+    /// through the relay's picker endpoints instead of `/blob` (ARB-544).
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Picker (ARB-544): one tap sends a sticker or a GIF as its own message.
+    SendMedia {
+        chat_id: Id,
+        message_id: Id,
+        pick: crate::model::MediaPick,
+        reply_to: Option<String>,
+    },
+    /// Picker: search the GIF provider through the relay (`q` empty = trending).
+    GifSearch {
+        query: String,
+        pos: Option<String>,
+    },
+    /// Picker: the relay's sticker-pack manifest.
+    StickerPacks,
+    /// Picker: tell the provider a GIF was sent (ranking signal; never an error).
+    GifShare {
+        id: String,
+        query: String,
     },
     /// Copy of a message: the full original bytes of every attachment in `keys` (blob
     /// slot `project_id`), answered together as `SyncEvent::CopyBlobs { request, .. }`

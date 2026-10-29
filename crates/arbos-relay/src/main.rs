@@ -32,6 +32,7 @@ mod export;
 mod features;
 mod feedback;
 mod fleet;
+mod gifs;
 mod goals;
 mod groups;
 mod image_sniff;
@@ -46,8 +47,12 @@ mod moderation;
 mod notices;
 mod notify;
 mod outside;
+mod outside_log;
+mod outside_sidecar;
+mod outside_wake;
 mod people;
 mod perf;
+mod pins;
 mod proxy;
 mod push;
 mod releases;
@@ -64,6 +69,7 @@ mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod stickers;
 mod unfurl;
 mod upgrade;
 mod upgrade_carry;
@@ -443,6 +449,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/avatars/{file}", get(signin::get_avatar))
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
+        .route("/me/pins", get(pins::get_pins).put(pins::put_pins))
         .route("/me/unread", get(notify::me_unread))
         .route(
             "/me/notifications",
@@ -590,15 +597,29 @@ async fn main() -> anyhow::Result<()> {
         .route("/outside-agents", get(outside::list).post(outside::create))
         .route(
             "/outside-agents/{id}",
-            get(outside::get).delete(outside::revoke),
+            get(outside::get)
+                .patch(outside::patch)
+                .delete(outside::revoke),
         )
         .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        .route("/outside-agents/{id}/wake/test", post(outside::wake_test))
         // … and the agent side (bearer arbk_ key).
         .route("/asp/me", get(outside::me))
+        .route("/asp/wake/test", post(outside::asp_wake_test))
         .route("/asp/inbox", get(outside::inbox))
         .route("/asp/events", post(outside::events))
         .route("/asp/socket", get(outside::socket))
+        .route("/asp/files/{slot}/{key}", get(outside::file))
+        .route("/asp/chats/{id}/messages", get(outside::history))
         .route("/asp/connect/{id}", get(outside::connect_page))
+        // Sidecar support (#2189): members, and the public texts an agent is handed.
+        .route("/asp/chats/{id}/members", get(outside_sidecar::members))
+        .route("/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        // Session log (spec §13.3): the sidecar uploads, the owner reads.
+        .route("/asp/log", post(outside_log::upload))
+        .route("/outside-agents/{id}/log", get(outside_log::read))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
@@ -863,6 +884,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
         .route("/unfurl/icon", get(site_icons::get))
+        // Emoji / stickers / GIFs picker (ARB-544): GIF search + media pass-through via
+        // KLIPY (key server-side only), relay-hosted open sticker packs.
+        .route("/gif/search", get(gifs::search))
+        .route("/gif/trending", get(gifs::trending))
+        .route("/gif/categories", get(gifs::categories))
+        .route("/gif/share", post(gifs::share))
+        .route("/gif/media", get(gifs::media))
+        .route("/stickers/packs", get(stickers::packs))
+        .route("/stickers/{pack}/{id}", get(stickers::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))

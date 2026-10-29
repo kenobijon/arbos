@@ -22,11 +22,12 @@ use crate::model::{
     MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
-    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
-    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
-    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
+    ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
+    JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
+    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
+    ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -44,6 +45,9 @@ const NOTIFY_TICK_MS: u64 = 5_000;
 /// → `activity.jobs[]`) while a job row is live or the drawer lists one —
 /// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
 pub const JOBS_POLL_MS: u64 = 1_000;
+/// Sidebar pins the relay allows until `GET /me/pins` says otherwise (Jacob 2026-10-28:
+/// 5, no tiers; [feedback sidebar-pinning-mac-2026-10-28]).
+pub const PIN_CAP_DEFAULT: usize = 5;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -417,6 +421,7 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                url: None,
                 source: None,
             },
             by: name.to_owned(),
@@ -593,6 +598,17 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// The Wake URL form on a connected agent's Connection card ([feedback
+/// outside-agents-wake-mac-2026-10-28]): what is in flight and the last outcome line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WakeForm {
+    pub project_id: Id,
+    pub saving: bool,
+    pub sending: bool,
+    /// `(ok, text)` of the last Save or Send test wake, shown under the buttons.
+    pub note: Option<(bool, String)>,
+}
+
 /// The reveal sheet after Connect an agent (#2141): the key, shown once, and the live
 /// connection while the sheet is up.
 #[derive(Clone, Debug, PartialEq)]
@@ -750,6 +766,18 @@ pub struct AppState {
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// Picker (ARB-544): the GIF results on screen — the query they answer and the page
+    /// (`None` while the first page is on its way).
+    pub gif_results: Option<(String, GifPage)>,
+    /// Picker: the query a GIF fetch is in flight for (a stale answer is dropped).
+    gif_query_pending: Option<String>,
+    /// Picker: the relay's sticker packs once fetched (`Some(None)` = the relay failed).
+    pub sticker_packs: Option<Option<Vec<StickerPack>>>,
+    /// Picker: the sticker-pack fetch is in flight or answered this session.
+    sticker_packs_requested: bool,
+    /// Picker: raw bytes of fetched stickers by `sticker:<pack>/<id>` key — a tap uploads
+    /// these into the chat slot (the thumbnail cache holds only the decoded picture).
+    sticker_raw: HashMap<String, Arc<Vec<u8>>>,
     /// The Copy whose attachment bytes are on their way
     /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
     /// older answer is dropped by its `request` number.
@@ -774,6 +802,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// My sidebar pins, top first — row keys `agent:<project>` / `chat:<people chat>` /
+    /// `server:<server>`, one list for every device through the relay (`/me/pins`;
+    /// [feedback sidebar-pinning-mac-2026-10-28]). The Pinned section draws them in this
+    /// order; `pin_cap` is the relay's limit (Jacob 2026-10-28: 5, no tiers).
+    pub pins: Vec<String>,
+    pub pin_cap: usize,
     /// Chat a home-search hit opened; kept visible while single-chat would hide it.
     search_chat: Option<Id>,
     /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
@@ -818,6 +852,8 @@ pub struct AppState {
     pub connect_open: bool,
     /// Connect an agent: the key reveal sheet, after the relay answered.
     pub connect_reveal: Option<ConnectReveal>,
+    /// The Wake URL form of the connected agent whose pane is open.
+    pub wake_form: Option<WakeForm>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -998,6 +1034,8 @@ pub struct AppState {
     /// D88: rooms that already got their second page of history (one extra page per session,
     /// asked for when the first page came back full).
     pub channel_paged: HashSet<String>,
+    /// Servers whose member list was asked for this session (`want_server_rosters`).
+    pub server_rosters_requested: HashSet<Id>,
     /// D88: the channel open in the centre (clears `selected_project` for the transcript).
     pub selected_channel: Option<ChannelSel>,
     /// D88: the server whose channel list the left pane slid into.
@@ -1254,6 +1292,11 @@ impl AppState {
             link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            gif_results: None,
+            gif_query_pending: None,
+            sticker_packs: None,
+            sticker_packs_requested: false,
+            sticker_raw: HashMap::new(),
             copy_request: None,
             copy_request_seq: 0,
             notices: Vec::new(),
@@ -1264,6 +1307,8 @@ impl AppState {
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            pins: Vec::new(),
+            pin_cap: PIN_CAP_DEFAULT,
             search_chat: None,
             reveal_message: None,
             reveal_nonce: 0,
@@ -1285,6 +1330,7 @@ impl AppState {
             new_project_open: false,
             connect_open: false,
             connect_reveal: None,
+            wake_form: None,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1370,6 +1416,7 @@ impl AppState {
             matrix_connected: false,
             channel_rows: HashMap::new(),
             channel_paged: HashSet::new(),
+            server_rosters_requested: HashSet::new(),
             selected_channel: None,
             open_server: None,
             server_sheet: None,
@@ -1402,8 +1449,9 @@ impl AppState {
             UpdateEvent::Available(available) => {
                 let available = *available;
                 self.update.last_checked_at = Some(now_ms());
-                // An installed build waiting for its relaunch outranks whatever the feed says now.
-                if !self.update.busy() && self.pending_relaunch.is_none() {
+                if self.pending_relaunch.is_some() {
+                    self.supersede_pending_install(available, cx);
+                } else if !self.update.busy() {
                     // Never offer a build that is not strictly newer than what is running.
                     if !arbos_update::version::is_newer(
                         &available.item.version,
@@ -1476,7 +1524,9 @@ impl AppState {
                     available,
                     deadline_ms: now_ms() + update::RELAUNCH_COUNTDOWN_MS,
                 };
-                self.pending_relaunch = Some(installed);
+                // A newer build installed over one that was already waiting keeps the watcher
+                // that is running for it.
+                let watching = self.pending_relaunch.replace(installed).is_some();
                 update::log(format!(
                     "auto-update: {version} installed; waiting for a safe moment to relaunch"
                 ));
@@ -1487,23 +1537,25 @@ impl AppState {
                     "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
                      or when you pause. Press the blue update button at the bottom of the chat list to do it at once."
                 ));
-                cx.spawn(async move |this, cx| loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(1000))
-                        .await;
-                    let done = this.update(cx, |state, cx| {
-                        if state.pending_relaunch.is_none() {
-                            return true;
+                if !watching {
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1000))
+                            .await;
+                        let done = this.update(cx, |state, cx| {
+                            if state.pending_relaunch.is_none() {
+                                return true;
+                            }
+                            let relaunched = state.try_relaunch(cx);
+                            cx.notify();
+                            relaunched
+                        });
+                        if done.unwrap_or(true) {
+                            break;
                         }
-                        let relaunched = state.try_relaunch(cx);
-                        cx.notify();
-                        relaunched
-                    });
-                    if done.unwrap_or(true) {
-                        break;
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+                }
             }
             UpdateEvent::Failed(message) => {
                 if let Some(a) = self.update.available() {
@@ -1537,6 +1589,10 @@ impl AppState {
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        // A newer build is being swapped into the bundle the relaunch would open.
+        if self.update.busy() {
             return false;
         }
         if !self.window_active {
@@ -1577,6 +1633,41 @@ impl AppState {
         update::log("auto-update: safe moment — relaunching");
         self.relaunch_into(installed, cx);
         true
+    }
+
+    /// A newer build announced while an older one waits for its relaunch (the app sat
+    /// unfocused while releases landed) is installed over it first, so the user gets one
+    /// restart into the newest build instead of one restart per release they missed.
+    /// Manual mode keeps the waiting build: the user already chose to restart into it.
+    fn supersede_pending_install(
+        &mut self,
+        available: arbos_update::client::Available,
+        cx: &mut Context<Self>,
+    ) {
+        let UpdatePhase::Installed {
+            available: waiting, ..
+        } = &self.update.phase
+        else {
+            return;
+        };
+        let version = available.item.version.clone();
+        if !self.update.auto
+            || self.auto_update_failed.as_deref() == Some(version.as_str())
+            || !arbos_update::version::is_newer(&version, &waiting.item.version)
+        {
+            return;
+        }
+        update::log(format!(
+            "auto-update: {version} supersedes the waiting {}; installing it before the relaunch",
+            waiting.item.version
+        ));
+        self.update.phase = UpdatePhase::Downloading {
+            available,
+            got: 0,
+            total: None,
+        };
+        let _ = self.update_commands.send(UpdateCommand::Install);
+        cx.notify();
     }
 
     /// One frame shows "Restarting", then the relauncher takes over.
@@ -1751,6 +1842,25 @@ impl AppState {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
                     p.outside = Some(info);
                 }
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentWakeSaved { project_id, error } => {
+                let form = self.wake_form_mut(&project_id);
+                form.saving = false;
+                form.note = Some(match error {
+                    None => (true, "Saved".to_owned()),
+                    Some(e) => (false, e),
+                });
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentWakeTested {
+                project_id,
+                ok,
+                text,
+            } => {
+                let form = self.wake_form_mut(&project_id);
+                form.sending = false;
+                form.note = Some((ok, text));
                 cx.notify();
             }
             SyncEvent::NeedsPairing { relay_url } => {
@@ -2073,6 +2183,9 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
+                if key.starts_with(crate::model::STICKER_KEY_PREFIX) {
+                    self.sticker_raw.insert(key.clone(), bytes.clone());
+                }
                 if let Some((image, trimmed)) = decode_image_pair(&bytes) {
                     self.thumbnails_failed.remove(&key);
                     match trimmed {
@@ -2103,6 +2216,14 @@ impl AppState {
                 if let Some(chat_id) = self.active_chat_id() {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
                 }
+                cx.notify();
+            }
+            SyncEvent::GifResults { query, pos, page } => {
+                self.gif_results_arrived(query, pos, page);
+                cx.notify();
+            }
+            SyncEvent::StickerPacks { packs } => {
+                self.sticker_packs = Some(packs);
                 cx.notify();
             }
             SyncEvent::CopyBlobs { request, blobs } => {
@@ -2637,6 +2758,11 @@ impl AppState {
                 for p in projects {
                     self.enforce_tab(&p);
                 }
+                cx.notify();
+            }
+            SyncEvent::Pins { pins, cap } => {
+                self.pins = pins;
+                self.pin_cap = cap.max(1);
                 cx.notify();
             }
             SyncEvent::StoreUsage { bytes, chats } => {
@@ -4298,6 +4424,260 @@ impl AppState {
         self.send_with(text, attachments, None, reply_to, false, mentions, cx);
     }
 
+    // ----- emoji / stickers / GIFs picker (ARB-544) --------------------------
+
+    /// One tap in the picker: the sticker or GIF goes out as its own message at once
+    /// (Jacob: "tap sends immediately"). The row shows at once — a sticker from the bytes
+    /// the picker already holds, a GIF through the relay pass-through — and the server's
+    /// frame with the same id replaces it.
+    pub fn send_media(&mut self, pick: MediaPick, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
+        if crate::jobtabs::is_job_chat(&chat_id) || self.selected_channel.is_some() {
+            return;
+        }
+        self.send_errors.remove(&chat_id);
+        let message_id = new_id();
+        let reply_to = {
+            let ui = self.chat_ui.entry(chat_id.clone()).or_default();
+            ui.reply_ref = None;
+            ui.editing = None;
+            ui.reply_to.take()
+        };
+        let att_id = new_id();
+        let attachment = match &pick {
+            MediaPick::Sticker { pack, item, bytes } => {
+                let key = format!("local:{att_id}");
+                if let Some((image, trimmed)) = decode_image_pair(bytes) {
+                    self.thumbnails.insert(key.clone(), Arc::new(image));
+                    if let Some(t) = trimmed {
+                        self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                    }
+                }
+                self.thumbnails_requested.insert(key.clone());
+                Attachment {
+                    name: format!(
+                        "{}.{}",
+                        item.id,
+                        if item.mime == "image/webp" {
+                            "webp"
+                        } else {
+                            "png"
+                        }
+                    ),
+                    mime: item.mime.clone(),
+                    blob_ref: Some(key),
+                    bytes: Some(bytes.len() as u64),
+                    kind: Some(AttachmentKind::Sticker),
+                    title: None,
+                    chart_part: None,
+                    url: None,
+                    source: Some(Box::new(AttachmentSource {
+                        provider: pack.name.clone(),
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url.clone(),
+                    })),
+                }
+            }
+            MediaPick::Gif(gif) => {
+                let attachment = Attachment {
+                    name: format!("{}.gif", gif.id),
+                    mime: "image/gif".into(),
+                    blob_ref: None,
+                    bytes: None,
+                    kind: Some(AttachmentKind::Image),
+                    title: None,
+                    chart_part: None,
+                    url: Some(gif.url.clone()),
+                    source: Some(Box::new(AttachmentSource {
+                        provider: "KLIPY".into(),
+                        id: gif.id.clone(),
+                        page_url: gif.page_url.clone(),
+                    })),
+                };
+                if let Some(key) = attachment.preview_key() {
+                    self.request_fun_thumbnail(key);
+                }
+                attachment
+            }
+        };
+        let parts = vec![
+            Part::Attachment {
+                id: att_id,
+                attachment,
+            },
+            Part::Text {
+                id: new_id(),
+                text: String::new(),
+            },
+        ];
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                notice: None,
+                worker: false,
+                job: None,
+                hidden: false,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: reply_to.clone(),
+                forwarded_from: None,
+                reply_ref: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+                preview: None,
+            });
+        if let MediaPick::Gif(gif) = &pick {
+            let query = self
+                .gif_results
+                .as_ref()
+                .map(|(q, _)| q.clone())
+                .unwrap_or_default();
+            self.command(ClientCommand::GifShare {
+                id: gif.id.clone(),
+                query,
+            });
+        }
+        self.command(ClientCommand::SendMedia {
+            chat_id: chat_id.clone(),
+            message_id,
+            pick,
+            reply_to,
+        });
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    /// Picker: ask the relay for GIFs matching `query` (empty = trending). The answer lands
+    /// in `gif_results`; an answer for an older query is dropped.
+    pub fn gif_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if self
+            .gif_results
+            .as_ref()
+            .is_some_and(|(q, page)| *q == query && !matches!(page, GifPage::Failed))
+        {
+            return;
+        }
+        if self.gif_query_pending.as_deref() == Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.gif_results = None;
+        self.command(ClientCommand::GifSearch { query, pos: None });
+        cx.notify();
+    }
+
+    /// Picker: the next page of the current GIF results, if there is one.
+    pub fn gif_more(&mut self, cx: &mut Context<Self>) {
+        let Some((
+            query,
+            GifPage::Items {
+                next: Some(pos), ..
+            },
+        )) = self.gif_results.clone()
+        else {
+            return;
+        };
+        if self.gif_query_pending.is_some() {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.command(ClientCommand::GifSearch {
+            query,
+            pos: Some(pos),
+        });
+        cx.notify();
+    }
+
+    fn gif_results_arrived(&mut self, query: String, pos: Option<String>, page: GifPage) {
+        if self.gif_query_pending.as_deref() != Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = None;
+        match (pos, self.gif_results.take()) {
+            (Some(_), Some((q, GifPage::Items { mut items, next: _ }))) if q == query => {
+                if let GifPage::Items { items: more, next } = page {
+                    items.extend(more);
+                    self.gif_results = Some((query, GifPage::Items { items, next }));
+                } else {
+                    self.gif_results = Some((query, GifPage::Items { items, next: None }));
+                }
+            }
+            _ => self.gif_results = Some((query, page)),
+        }
+        if let Some((_, GifPage::Items { items, .. })) = &self.gif_results {
+            let keys: Vec<String> = items
+                .iter()
+                .map(|g| format!("{}{}", crate::model::URL_KEY_PREFIX, g.preview.url))
+                .collect();
+            for key in keys {
+                self.request_fun_thumbnail(key);
+            }
+        }
+    }
+
+    /// Picker: fetch the sticker-pack manifest once per session.
+    pub fn ensure_sticker_packs(&mut self, cx: &mut Context<Self>) {
+        if self.sticker_packs_requested {
+            return;
+        }
+        self.sticker_packs_requested = true;
+        self.command(ClientCommand::StickerPacks);
+        cx.notify();
+    }
+
+    /// Picker: fetch a sticker's or a GIF preview's bytes into the thumbnail cache
+    /// (`sticker:<pack>/<id>` / `url:<url>` keys; the sync layer routes them).
+    pub fn request_fun_thumbnail(&mut self, key: String) {
+        if !self.thumbnails_requested.insert(key.clone()) {
+            return;
+        }
+        self.command(ClientCommand::FetchThumbnail {
+            project_id: self.selected_project.clone().unwrap_or_default(),
+            key,
+        });
+    }
+
+    /// Picker: the raw bytes of a fetched sticker (`sticker:<pack>/<id>`), for a send.
+    pub fn sticker_bytes(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        self.sticker_raw.get(key).cloned()
+    }
+
     /// Guide: inject `text` into the agent's running turn instead of queuing a
     /// follow-up; `mentions` as for [`Self::send`].
     pub fn guide(
@@ -4598,6 +4978,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 };
                 if probe.is_image() {
@@ -4625,6 +5006,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 },
             });
@@ -4640,6 +5022,7 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 },
             });
@@ -5367,7 +5750,13 @@ impl AppState {
         if m.sender.is_empty() {
             m.sender = row.sender.clone();
         }
-        if m.sender_name.as_deref().is_none_or(str::is_empty) && !row.sender_name.is_empty() {
+        let person = m.sender.starts_with("user:");
+        // An agent's Matrix display name is its name; a person's is their handle, never
+        // their name ([feedback server-member-names-2026-10-28]) — see `fill_channel_sender`.
+        if !person
+            && m.sender_name.as_deref().is_none_or(str::is_empty)
+            && !row.sender_name.is_empty()
+        {
             m.sender_name = Some(row.sender_name.clone());
         }
         if m.created_at == 0 && row.created_at > 0 {
@@ -5382,8 +5771,121 @@ impl AppState {
         if m.sender.eq_ignore_ascii_case(&self.me_member()) {
             m.sender = self.me_member();
             m.sender_handle = Some(self.me_handle());
+        } else if person {
+            self.fill_channel_sender(&mut m);
         }
         Some(m)
+    }
+
+    /// Who a channel row is from, as the rosters know them: the servers' member lists (by
+    /// user id, then handle), then every people chat's members and the directory. A Matrix
+    /// row only names its sender by handle (`arbos_matrix::message_row`), so this is where
+    /// a channel bubble gets the display name a group bubble shows
+    /// ([feedback server-member-names-2026-10-28]; Affinity, Arbonites 2026-10-28: "we are
+    /// referred to as our handles instead of our usernames in server").
+    pub fn channel_sender(&self, sender: &str, handle: Option<&str>) -> Option<Person> {
+        let id = sender.strip_prefix("user:")?;
+        let handle = handle.filter(|h| !h.is_empty());
+        self.servers
+            .iter()
+            .flat_map(|s| s.members.iter())
+            .find(|p| {
+                (!p.id.is_empty() && p.id.eq_ignore_ascii_case(id))
+                    || handle.is_some_and(|h| p.handle.eq_ignore_ascii_case(h))
+            })
+            .cloned()
+            .or_else(|| handle.and_then(|h| self.person_by_handle(h)))
+            .or_else(|| {
+                self.people_directory
+                    .iter()
+                    .find(|p| p.id.eq_ignore_ascii_case(id))
+                    .cloned()
+            })
+    }
+
+    /// Fill a person's channel row from the roster: the display name (when the roster has
+    /// one), the picture (when the row carries none) and the relay's spelling of the user id
+    /// (the Matrix localpart is lower-case; the disc's gradient is seeded by the id, so a
+    /// bubble and the Members row would otherwise draw two colours for one person). Returns
+    /// whether anything changed.
+    fn fill_channel_sender(&self, m: &mut Message) -> bool {
+        let Some(p) = self.channel_sender(&m.sender, m.sender_handle.as_deref()) else {
+            return false;
+        };
+        let mut changed = false;
+        if !p.id.is_empty() {
+            let member = format!("user:{}", p.id);
+            if m.sender != member && m.sender.eq_ignore_ascii_case(&member) {
+                m.sender = member;
+                changed = true;
+            }
+        }
+        if m.sender_name.as_deref().is_none_or(str::is_empty) {
+            if let Some(name) = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                m.sender_name = Some(name.to_owned());
+                changed = true;
+            }
+        }
+        if m.sender_avatar.as_deref().is_none_or(str::is_empty) && !p.avatar_url.is_empty() {
+            m.sender_avatar = Some(p.avatar_url.clone());
+            changed = true;
+        }
+        changed
+    }
+
+    /// A roster arrived (server members, the list): name the channel rows it now knows.
+    /// Decoded rows are kept, so a channel opened before its server's detail came back
+    /// would otherwise keep reading handles.
+    fn refresh_channel_senders(&mut self, cx: &mut Context<Self>) {
+        let rooms: Vec<Id> = self.channel_rows.keys().cloned().collect();
+        let mut changed_rooms = Vec::new();
+        let mut avatars = Vec::new();
+        for room_id in rooms {
+            let Some(rows) = self.channel_rows.get(&room_id) else {
+                continue;
+            };
+            let mut rows = rows.clone();
+            let mut changed = false;
+            for m in rows.iter_mut().filter(|m| {
+                m.sender.starts_with("user:")
+                    && (m.sender_name.as_deref().is_none_or(str::is_empty)
+                        || m.sender_avatar.as_deref().is_none_or(str::is_empty))
+            }) {
+                if self.fill_channel_sender(m) {
+                    changed = true;
+                    if let Some(url) = m.sender_avatar.clone().filter(|u| !u.is_empty()) {
+                        avatars.push(url);
+                    }
+                }
+            }
+            if changed {
+                self.channel_rows.insert(room_id.clone(), rows);
+                changed_rooms.push(room_id);
+            }
+        }
+        for url in avatars {
+            self.want_avatar(url);
+        }
+        for room_id in changed_rooms {
+            cx.emit(AppEvent::TranscriptChanged { chat_id: room_id });
+        }
+    }
+
+    /// Members come only with `GET /servers/{id}`: ask once per server per session for
+    /// any server the list brought without them, so channel bubbles and the list's
+    /// previews can name people from the first paint.
+    fn want_server_rosters(&mut self) {
+        let wanted: Vec<Id> = self
+            .servers
+            .iter()
+            .filter(|s| s.members.is_empty())
+            .map(|s| s.id.clone())
+            .filter(|id| !self.server_rosters_requested.contains(id))
+            .collect();
+        for server_id in wanted {
+            self.server_rosters_requested.insert(server_id.clone());
+            self.command(ClientCommand::ServerFetch { server_id });
+        }
     }
 
     /// Composer send in a channel: optimistic row (id = ULID) that the echo replaces.
@@ -5505,6 +6007,8 @@ impl AppState {
             self.drop_server(&id, cx);
         }
         self.want_member_avatars();
+        self.want_server_rosters();
+        self.refresh_channel_senders(cx);
         self.resolve_pending_channel(cx);
         self.apply_open_server_hook(cx);
         cx.notify();
@@ -5594,6 +6098,7 @@ impl AppState {
             None => self.servers.push(server),
         }
         self.want_member_avatars();
+        self.refresh_channel_senders(cx);
         self.resolve_pending_channel(cx);
         cx.notify();
     }
@@ -5609,6 +6114,7 @@ impl AppState {
             None => self.servers.push(server),
         }
         self.want_member_avatars();
+        self.want_server_rosters();
         self.enter_server(id, cx);
     }
 
@@ -7241,11 +7747,129 @@ impl AppState {
                 .count()
     }
 
+    // ---- Sidebar pins ([feedback sidebar-pinning-mac-2026-10-28]) ------------------------
+
+    /// The relay's row key for a sidebar space, or `None` for something the list does not
+    /// show: `agent:` for an agent (own or shared), `chat:` for a DM or a people group
+    /// (their space id is the chat id), `server:` for a server.
+    pub fn pin_key(&self, space_id: &str) -> Option<String> {
+        if let Some(p) = self.projects.iter().find(|p| p.id == space_id) {
+            return Some(if p.is_people() {
+                format!("chat:{space_id}")
+            } else {
+                format!("agent:{space_id}")
+            });
+        }
+        self.servers
+            .iter()
+            .any(|s| s.id == space_id)
+            .then(|| format!("server:{space_id}"))
+    }
+
+    /// The space a pin names, if it is in my list today.
+    pub fn pinned_space_id(key: &str) -> Option<&str> {
+        key.split_once(':')
+            .filter(|(kind, id)| matches!(*kind, "agent" | "chat" | "server") && !id.is_empty())
+            .map(|(_, id)| id)
+    }
+
+    pub fn is_pinned(&self, space_id: &str) -> bool {
+        self.pin_index(space_id).is_some()
+    }
+
+    /// Position in the Pinned section (0 = top), or `None` when not pinned.
+    pub fn pin_index(&self, space_id: &str) -> Option<usize> {
+        let key = self.pin_key(space_id)?;
+        self.pins.iter().position(|k| *k == key)
+    }
+
+    /// Pin (a new pin lands at the top, the iPhone's rule) or unpin a sidebar row, on
+    /// every device. At the cap the pin is refused with one sentence; archived rows come
+    /// back first (a pin is a row you see).
+    pub fn set_pinned(&mut self, space_id: Id, pinned: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.pin_key(&space_id) else {
+            return;
+        };
+        let mut pins = self.pins.clone();
+        pins.retain(|k| *k != key);
+        if pinned {
+            if pins.len() >= self.pin_cap {
+                self.push_failure(
+                    UserError::of(
+                        "pin the chat",
+                        ErrorClass::Refused {
+                            message: Some(format!("You can pin up to {} chats.", self.pin_cap)),
+                        },
+                        "",
+                    ),
+                    None,
+                );
+                cx.notify();
+                return;
+            }
+            if self.is_space_archived(&space_id) {
+                self.set_space_archived(space_id.clone(), false, cx);
+            }
+            pins.insert(0, key);
+        }
+        self.store_pins(pins, cx);
+    }
+
+    /// Drop of a pin drag: `shown` is the Pinned section as the list drew it (the pinned
+    /// rows the filter admits, in their new order). Those pins take that order among
+    /// themselves; pins the filter hid keep their places.
+    pub fn reorder_pins(&mut self, shown: &[Id], cx: &mut Context<Self>) {
+        let shown_keys: Vec<String> = shown
+            .iter()
+            .filter_map(|id| self.pin_key(id))
+            .filter(|k| self.pins.contains(k))
+            .collect();
+        let mut next = shown_keys.iter().cloned();
+        let pins: Vec<String> = self
+            .pins
+            .iter()
+            .map(|k| {
+                if shown_keys.contains(k) {
+                    next.next().unwrap_or_else(|| k.clone())
+                } else {
+                    k.clone()
+                }
+            })
+            .collect();
+        self.store_pins(pins, cx);
+    }
+
+    fn unpin_if_pinned(&mut self, space_id: &str) {
+        let Some(key) = self.pin_key(space_id) else {
+            return;
+        };
+        if self.pins.contains(&key) {
+            self.pins.retain(|k| *k != key);
+            self.command(ClientCommand::SetPins {
+                pins: self.pins.clone(),
+            });
+        }
+    }
+
+    /// The new list, shown at once and sent to the relay (its answer is the truth).
+    fn store_pins(&mut self, pins: Vec<String>, cx: &mut Context<Self>) {
+        if pins == self.pins {
+            return;
+        }
+        self.pins = pins.clone();
+        self.command(ClientCommand::SetPins { pins });
+        cx.notify();
+    }
+
     /// Archive (hide) or unarchive a sidebar space for me, on every device.
     /// Nothing is deleted; an archived agent keeps running its routines. A
     /// people chat goes through the chat archive the relay already has.
     pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
         let at = archived.then(now_ms);
+        if archived {
+            // A hidden row is not a pinned row (the iPhone's rule).
+            self.unpin_if_pinned(&space_id);
+        }
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
             p.archived_at = at;
             let people = p.is_people();
@@ -9706,6 +10330,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::LeaveChat { chat_id });
@@ -9937,9 +10562,86 @@ impl AppState {
         cx.notify();
     }
 
+    /// Details pane → Can → a switch: one scope on or off (`PATCH /outside-agents/{id}`). The
+    /// row flips at once; the relay's answer confirms the effective set.
+    pub fn set_outside_scope(
+        &mut self,
+        project_id: Id,
+        scope: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(o) = p.outside.as_mut() {
+                o.scopes.insert(scope.to_owned(), on);
+            }
+        }
+        self.command(ClientCommand::OutsideAgentScope {
+            project_id,
+            scope: scope.to_owned(),
+            on,
+        });
+        cx.notify();
+    }
+
     /// Details pane: refresh the connection line when the pane opens on an outside agent.
     pub fn refresh_outside_status(&mut self, project_id: Id) {
         self.command(ClientCommand::OutsideAgentStatus { project_id });
+    }
+
+    /// The Wake URL form for this agent; a form left over from another agent is replaced.
+    fn wake_form_mut(&mut self, project_id: &Id) -> &mut WakeForm {
+        if self
+            .wake_form
+            .as_ref()
+            .is_none_or(|f| &f.project_id != project_id)
+        {
+            self.wake_form = Some(WakeForm {
+                project_id: project_id.clone(),
+                ..Default::default()
+            });
+        }
+        self.wake_form.as_mut().expect("just set")
+    }
+
+    /// Connection card → Wake URL → Save: an empty URL clears the URL and the header value
+    /// together; an empty header value with a URL keeps the stored value (it is never shown
+    /// back, so leaving the field blank means "unchanged").
+    pub fn save_wake_url(
+        &mut self,
+        project_id: Id,
+        url: String,
+        auth: String,
+        cx: &mut Context<Self>,
+    ) {
+        let url = url.trim().to_owned();
+        let auth = auth.trim().to_owned();
+        let (url, auth) = if url.is_empty() {
+            (Some(String::new()), Some(String::new()))
+        } else {
+            (Some(url), (!auth.is_empty()).then_some(auth))
+        };
+        let form = self.wake_form_mut(&project_id);
+        form.saving = true;
+        form.note = None;
+        self.command(ClientCommand::OutsideAgentWakeSet {
+            project_id,
+            url,
+            auth,
+        });
+        cx.notify();
+    }
+
+    /// Connection card → Wake URL → Send test wake.
+    pub fn send_test_wake(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let form = self.wake_form_mut(&project_id);
+        if form.sending {
+            return;
+        }
+        form.sending = true;
+        form.note = None;
+        self.command(ClientCommand::OutsideAgentWakeTest { project_id });
+        cx.notify();
     }
 
     /// Grok / iPhone "Fork": a new agent with the same look and workspace
@@ -10042,6 +10744,7 @@ impl AppState {
         }
         self.active_tab.remove(&project_id);
         self.last_chats.remove(&project_id);
+        self.unpin_if_pinned(&project_id);
         self.projects.retain(|p| p.id != project_id);
         self.muted.remove(&project_id);
         self.command(ClientCommand::DeleteProject { project_id });
@@ -10061,6 +10764,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::DeletePeopleChat { chat_id });
@@ -10400,9 +11104,12 @@ impl AppState {
                         }
                     }
                     Part::Attachment { attachment, .. }
-                        if attachment.kind() == AttachmentKind::Image =>
+                        if matches!(
+                            attachment.kind(),
+                            AttachmentKind::Image | AttachmentKind::Sticker
+                        ) =>
                     {
-                        attachment.blob_ref.clone()
+                        attachment.preview_key()
                     }
                     _ => None,
                 };
@@ -11832,10 +12539,108 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Cap on GIF/WebP frames kept for a chat bubble (feedback
-/// app-01M5TGH18WV3QCK5KZT6XKG7FG). Past this, only the first frame is shown.
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+/// Past this, only the first frame is shown.
 pub const ANIM_MAX_FRAMES: usize = 300;
-/// Cap on decoded RGBA bytes across all frames. Past this, only the first frame.
-pub const ANIM_MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
+/// Cap on decoded RGBA bytes across all animation frames. Past this at the
+/// side floor, only the first frame is shown.
+pub const ANIM_MAX_DECODED_BYTES: usize = 48 * 1024 * 1024;
+/// Starting longer side for animation frames (never upscale past the canvas).
+pub const ANIM_SIDE_START: u32 = 480;
+/// Smallest longer side tried before falling back to the first frame.
+pub const ANIM_SIDE_FLOOR: u32 = 200;
+
+/// Target longer side for animation frames, or `None` → show the first frame
+/// only. Starts at [`ANIM_SIDE_START`] (capped to the canvas, never upscaled);
+/// shrinks until `frame_count × scaled_w × scaled_h × 4` fits in
+/// [`ANIM_MAX_DECODED_BYTES`]; floor [`ANIM_SIDE_FLOOR`]. More than
+/// [`ANIM_MAX_FRAMES`], or not fitting at the floor, means first-frame-only.
+/// At 200 px, 300 square frames always fit (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
+pub fn animation_frame_side(frame_count: usize, width: u32, height: u32) -> Option<u32> {
+    if frame_count == 0 || frame_count > ANIM_MAX_FRAMES {
+        return None;
+    }
+    let width = width.max(1);
+    let height = height.max(1);
+    let long = width.max(height);
+    let start = ANIM_SIDE_START.min(long);
+    if anim_decoded_bytes(frame_count, width, height, ANIM_SIDE_FLOOR) > ANIM_MAX_DECODED_BYTES {
+        return None;
+    }
+    // Highest side in [FLOOR, start] that fits the budget.
+    let mut lo = ANIM_SIDE_FLOOR;
+    let mut hi = start;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if anim_decoded_bytes(frame_count, width, height, mid) <= ANIM_MAX_DECODED_BYTES {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(lo)
+}
+
+/// RGBA byte cost of `frame_count` frames scaled so the longer side is `side`.
+fn anim_decoded_bytes(frame_count: usize, width: u32, height: u32, side: u32) -> usize {
+    let long = width.max(height).max(1);
+    let scale = side as f64 / long as f64;
+    let sw = ((width as f64) * scale).round().max(1.0) as usize;
+    let sh = ((height as f64) * scale).round().max(1.0) as usize;
+    frame_count
+        .saturating_mul(sw)
+        .saturating_mul(sh)
+        .saturating_mul(4)
+}
+
+/// Shrink `img` so its longer side is at most `side` (never enlarged).
+fn downscale_to_side(img: image::RgbaImage, side: u32) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if side == 0 || long <= side {
+        return img;
+    }
+    let scale = side as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Re-scale already-decoded animation frames down to `side`.
+fn rescale_anim_frames(frames: Vec<image::Frame>, side: u32) -> Vec<image::Frame> {
+    frames
+        .into_iter()
+        .map(|frame| {
+            let delay = frame.delay();
+            let left = frame.left();
+            let top = frame.top();
+            image::Frame::from_parts(
+                downscale_to_side(frame.into_buffer(), side),
+                left,
+                top,
+                delay,
+            )
+        })
+        .collect()
+}
+
+fn frame_rgba_bytes(frame: &image::Frame) -> usize {
+    let (w, h) = frame.buffer().dimensions();
+    (w as usize).saturating_mul(h as usize).saturating_mul(4)
+}
+
+/// `page_url` is safe to open from a "via <provider>" caption: only `https`.
+pub fn is_https_page_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+}
 
 /// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
 enum DecodedPixels {
@@ -11870,9 +12675,13 @@ fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
     Some(DecodedPixels::Still(decode_rgba(bytes)?))
 }
 
-/// All frames of a GIF or WebP, each scaled to [`CHAT_IMAGE_MAX_SIDE`]. A still
-/// WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`]. Over the
-/// frame or memory cap → first frame only.
+/// All frames of a GIF or WebP, each scaled to the animation side helper.
+/// A still WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`].
+/// Frame count is unknown up front: decode one frame at a time at the current
+/// side; when the running total would pass the budget at frame `n`, ask the
+/// helper with `2n` frames, rescale held frames, and continue — or fall back
+/// to the first frame when the helper says so (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
 fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
     use image::AnimationDecoder;
     use std::io::Cursor;
@@ -11888,23 +12697,60 @@ fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
 
     let mut frames: Vec<image::Frame> = Vec::new();
     let mut decoded_bytes: usize = 0;
+    let mut side = ANIM_SIDE_START;
+    let mut canvas: Option<(u32, u32)> = None;
     for result in frames_iter {
         let frame = result.ok()?;
         let delay = frame.delay();
         let left = frame.left();
         let top = frame.top();
-        let scaled = downscale_for_chat(frame.into_buffer());
-        let (w, h) = scaled.dimensions();
-        let frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-        if frames.len() >= ANIM_MAX_FRAMES
-            || decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES
-        {
-            // Cap hit: keep only the first frame as a still.
+        let buffer = frame.into_buffer();
+        let (cw, ch) = buffer.dimensions();
+        if canvas.is_none() {
+            canvas = Some((cw.max(1), ch.max(1)));
+            side = ANIM_SIDE_START.min(cw.max(ch).max(1));
+        }
+        if frames.len() >= ANIM_MAX_FRAMES {
             return frames
                 .into_iter()
                 .next()
-                .map(|f| DecodedPixels::Still(f.into_buffer()))
-                .or(Some(DecodedPixels::Still(scaled)));
+                .map(|f| DecodedPixels::Still(f.into_buffer()));
+        }
+        let mut scaled = downscale_to_side(buffer, side);
+        let mut frame_bytes = {
+            let (w, h) = scaled.dimensions();
+            (w as usize).saturating_mul(h as usize).saturating_mul(4)
+        };
+        if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+            // Running total would pass the budget at frame n (1-based).
+            let n = frames.len() + 1;
+            let (cw, ch) = canvas.expect("canvas set on first frame");
+            match animation_frame_side(n.saturating_mul(2), cw, ch) {
+                None => {
+                    return frames
+                        .into_iter()
+                        .next()
+                        .map(|f| DecodedPixels::Still(f.into_buffer()))
+                        .or(Some(DecodedPixels::Still(scaled)));
+                }
+                Some(new_side) => {
+                    if new_side < side {
+                        frames = rescale_anim_frames(frames, new_side);
+                        decoded_bytes = frames.iter().map(frame_rgba_bytes).sum();
+                        side = new_side;
+                        scaled = downscale_to_side(scaled, side);
+                        let (w, h) = scaled.dimensions();
+                        frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                    }
+                    if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+                        return frames
+                            .into_iter()
+                            .next()
+                            .map(|f| DecodedPixels::Still(f.into_buffer()))
+                            .or(Some(DecodedPixels::Still(scaled)));
+                    }
+                }
+            }
         }
         decoded_bytes += frame_bytes;
         frames.push(image::Frame::from_parts(scaled, left, top, delay));
@@ -12294,6 +13140,430 @@ mod new_message_first_paint_tests {
 }
 
 #[cfg(test)]
+mod update_restart_chain_tests {
+    //! Affinity (Arbonites, 2026-10-28 21:47 UTC): "bubble just caused my arbos to restart".
+    //! No chat event did it: her Mac had 0.6.334 installed and waiting since 17:57, relaunched
+    //! into it at 21:38, into 0.6.338 at 21:47 and into 0.6.339 at 22:00 — a build that waits
+    //! for its relaunch ignored every newer one, so each missed release was one more restart
+    //! ([feedback mac-update-restart-chain-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use arbos_update::client::{Available, Install};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn build(version: &str) -> Available {
+        Available {
+            item: arbos_update::appcast::Item {
+                title: format!("Arbos {version}"),
+                version: version.into(),
+                build: "1".into(),
+                ..Default::default()
+            },
+            url: format!("https://arbos.life/updates/mac/Arbos-{version}-macos-universal.tar.gz"),
+            length: 1,
+            ed_signature: String::new(),
+        }
+    }
+
+    fn bundle() -> Install {
+        Install::MacBundle("/Applications/Arbos.app".into())
+    }
+
+    /// Auto-update on, running 0.6.333, the window in the background (no relaunch yet).
+    #[allow(clippy::type_complexity)]
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        gpui::Entity<AppState>,
+        mpsc::UnboundedReceiver<UpdateCommand>,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.update(cx, |s, _| {
+            s.update_commands = tx;
+            s.update.auto = true;
+            s.update.needs_relocation = false;
+            s.update.current_version = "0.6.333".into();
+            s.window_active = false;
+        });
+        (rt, state, rx)
+    }
+
+    fn installs(rx: &mut mpsc::UnboundedReceiver<UpdateCommand>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|c| matches!(c, UpdateCommand::Install))
+            .count()
+    }
+
+    fn waiting_version(state: &AppState, _: &App) -> Option<String> {
+        match &state.update.phase {
+            UpdatePhase::Installed { available, .. } => Some(available.item.version.clone()),
+            _ => None,
+        }
+    }
+
+    /// Install `version` through the automatic path the way the worker reports it.
+    fn land(cx: &mut TestAppContext, state: &gpui::Entity<AppState>, version: &str) {
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Installing, cx);
+            s.apply_update(UpdateEvent::Installed(bundle()), cx);
+        });
+        let waiting = state.read_with(cx, waiting_version);
+        assert_eq!(
+            waiting.as_deref(),
+            Some(version),
+            "{version} waits for its relaunch"
+        );
+    }
+
+    #[gpui::test]
+    fn a_newer_release_replaces_the_waiting_build_so_there_is_one_restart(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        assert_eq!(installs(&mut rx), 1, "0.6.334 installs in the background");
+        land(cx, &state, "0.6.334");
+
+        // Releases that land while 0.6.334 waits are installed over it.
+        for newer in ["0.6.338", "0.6.339"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(newer))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                1,
+                "{newer} is installed over the waiting build"
+            );
+            state.read_with(cx, |s, _| {
+                assert!(s.update.busy(), "{newer} is downloading");
+                assert!(s.pending_relaunch.is_some(), "the relaunch still waits");
+            });
+            land(cx, &state, newer);
+        }
+
+        // The same or an older build in the feed changes nothing.
+        for same in ["0.6.339", "0.6.338"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(same))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                0,
+                "{same} is not newer than the waiting 0.6.339"
+            );
+            assert_eq!(
+                state.read_with(cx, waiting_version).as_deref(),
+                Some("0.6.339")
+            );
+        }
+    }
+
+    /// The relaunch never fires while the newer build is being swapped into the bundle.
+    #[gpui::test]
+    fn no_relaunch_while_the_newer_build_installs(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+            let long_ago = now_ms().saturating_sub(10 * update::IDLE_RELAUNCH_MS);
+            s.window_active = true;
+            s.became_active_at = long_ago;
+            s.last_input_at = long_ago;
+            assert!(!s.relaunch_is_safe(), "downloading 0.6.338");
+            s.apply_update(UpdateEvent::Installing, cx);
+            assert!(!s.relaunch_is_safe(), "installing 0.6.338");
+            assert!(!s.try_relaunch(cx));
+            assert!(s.pending_relaunch.is_some());
+        });
+        assert_eq!(installs(&mut rx), 2);
+    }
+
+    /// Manual mode: the waiting build is what the user clicked for; the feed does not move it.
+    #[gpui::test]
+    fn manual_mode_keeps_the_waiting_build(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        let _ = installs(&mut rx);
+        state.update(cx, |s, cx| {
+            s.update.auto = false;
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+        });
+        assert_eq!(installs(&mut rx), 0);
+        assert_eq!(
+            state.read_with(cx, waiting_version).as_deref(),
+            Some("0.6.334")
+        );
+    }
+}
+
+#[cfg(test)]
+mod channel_sender_tests {
+    //! Affinity (Arbonites, 2026-10-28 16:52 UTC, confirmed by Scout): "bug where we are
+    //! referred to as our handles instead of our usernames in server" — a channel bubble
+    //! read "A" where a group bubble reads "Scout". The homeserver names a person by handle;
+    //! the display name comes from the server's roster ([feedback
+    //! server-member-names-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ServerInfo};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const ROOM: &str = "!general:arbos.life";
+    const SERVER: &str = "01SERVERTEST0000000000000";
+
+    /// A homeserver event by `mxid` through the real row mapper, with the Matrix display
+    /// name the relay registers (the handle).
+    fn matrix_row(id: &str, mxid: &str, handle: &str, text: &str, at: i64) -> MessageRow {
+        let ev = serde_json::json!({
+            "type": "m.room.message", "event_id": format!("${id}"), "sender": mxid,
+            "origin_server_ts": at,
+            "content": { "msgtype": "m.text", "body": text, "life.arbos.id": id },
+        });
+        arbos_matrix::rows::message_row(&ev, &|_| Some(handle.to_owned())).expect("row")
+    }
+
+    fn scout() -> Person {
+        Person {
+            id: "test_01SCOUT".into(),
+            handle: "A".into(),
+            name: Some("Scout".into()),
+            avatar_url: "https://relay.test/a/scout.png".into(),
+            ..Person::default()
+        }
+    }
+
+    fn server(members: Vec<Person>) -> ServerInfo {
+        ServerInfo {
+            id: SERVER.into(),
+            name: "test server".into(),
+            members,
+            ..ServerInfo::default()
+        }
+    }
+
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, gpui::Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, _| {
+            s.account = Some(AccountView {
+                id: "test_01ME".into(),
+                login: "affinity".into(),
+                name: "Affinity".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+        });
+        (rt, state)
+    }
+
+    fn names(state: &AppState) -> Vec<(String, Option<String>, Option<String>)> {
+        state
+            .channel_rows
+            .get(ROOM)
+            .map(|rows| {
+                rows.iter()
+                    .map(|m| {
+                        (
+                            m.sender_handle.clone().unwrap_or_default(),
+                            m.sender_name.clone(),
+                            m.sender_avatar.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// With the server's members known, a channel row by Scout (`@A`) is named "Scout" and
+    /// gets their picture; my own row keeps my member string; the handle stays the handle.
+    #[gpui::test]
+    fn a_channel_row_is_named_from_the_server_roster(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.servers.push(server(vec![scout()]));
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![
+                    matrix_row("m1", "@test_01scout:arbos.life", "A", "yo", 1_000),
+                    matrix_row("m2", "@test_01me:arbos.life", "affinity", "who is A", 2_000),
+                ],
+                cx,
+            );
+        });
+        let got = state.read_with(cx, |s, _| names(s));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "A".into(),
+                    Some("Scout".into()),
+                    Some("https://relay.test/a/scout.png".into())
+                ),
+                ("affinity".into(), None, None),
+            ],
+            "Scout by display name, picture from the roster; mine untouched"
+        );
+        let senders: Vec<String> = state.read_with(cx, |s, _| {
+            s.channel_rows[ROOM]
+                .iter()
+                .map(|m| m.sender.clone())
+                .collect()
+        });
+        assert_eq!(
+            senders,
+            vec![
+                "user:test_01SCOUT".to_string(),
+                "user:test_01ME".to_string()
+            ],
+            "member strings take the relay's spelling of the id (one disc colour per person)"
+        );
+        // The bubble's name label comes from `Person::display_name()` of the row's sender.
+        let shown = state.read_with(cx, |s, _| {
+            let m = &s.channel_rows[ROOM][0];
+            Person {
+                handle: m.sender_handle.clone().unwrap_or_default(),
+                name: m.sender_name.clone(),
+                ..Person::default()
+            }
+            .display_name()
+        });
+        assert_eq!(shown, "Scout");
+    }
+
+    /// The roster can come after the rows (a channel opened before `GET /servers/{id}`
+    /// answered): the rows are named when it lands, and never read the handle as a name
+    /// in between. The list asks for every server's roster once.
+    #[gpui::test]
+    fn rows_are_renamed_when_the_roster_arrives(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.on_servers(vec![server(vec![])], cx);
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![matrix_row(
+                    "m1",
+                    "@test_01scout:arbos.life",
+                    "A",
+                    "yo",
+                    1_000,
+                )],
+                cx,
+            );
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| names(s)),
+            vec![("A".into(), None, None)],
+            "no roster yet: no name (the handle is not written as the name)"
+        );
+        assert!(
+            state.read_with(cx, |s, _| s.server_rosters_requested.contains(SERVER)),
+            "the list asked for the server's members"
+        );
+        state.update(cx, |s, cx| s.on_server_detail(server(vec![scout()]), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| names(s)),
+            vec![(
+                "A".into(),
+                Some("Scout".into()),
+                Some("https://relay.test/a/scout.png".into())
+            )],
+            "named once the roster landed"
+        );
+    }
+
+    /// A member with no display name set stays by handle (the display-name fallback).
+    #[gpui::test]
+    fn a_member_without_a_name_keeps_the_handle(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            let mut nameless = scout();
+            nameless.name = None;
+            s.servers.push(server(vec![nameless]));
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![matrix_row(
+                    "m1",
+                    "@test_01scout:arbos.life",
+                    "A",
+                    "yo",
+                    1_000,
+                )],
+                cx,
+            );
+        });
+        let got = state.read_with(cx, |s, _| names(s));
+        assert_eq!(got[0].0, "A");
+        assert_eq!(
+            got[0].1, None,
+            "no name to show: display_name() falls back to the handle"
+        );
+        assert_eq!(
+            got[0].2.as_deref(),
+            Some("https://relay.test/a/scout.png"),
+            "the picture still comes from the roster"
+        );
+    }
+}
+
+#[cfg(test)]
 mod people_sheet_matcher_tests {
     //! Jacob, Mac v0.6.268, 2026-10-26 09:16 CR: "Give a person access" with
     //! "aff" typed listed only "Andreas F @aff" — the sheet showed the relay's
@@ -12615,8 +13885,11 @@ mod chat_image_scale_tests {
 #[cfg(test)]
 mod animated_image_tests {
     //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
-    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
-    use super::{decode_image, decode_image_pair, ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES};
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    use super::{
+        animation_frame_side, decode_image, decode_image_pair, is_https_page_url,
+        ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES, ANIM_SIDE_FLOOR, ANIM_SIDE_START,
+    };
     use image::{Delay, Frame, Rgba, RgbaImage};
     use std::io::Cursor;
 
@@ -12656,6 +13929,41 @@ mod animated_image_tests {
     }
 
     #[test]
+    fn animation_side_fits_common_reaction_gifs() {
+        assert_eq!(animation_frame_side(60, 480, 270), Some(480));
+        let side = animation_frame_side(150, 480, 480).expect("150 square frames animate");
+        assert!((ANIM_SIDE_FLOOR..=ANIM_SIDE_START).contains(&side));
+        let side = animation_frame_side(300, 1000, 1000).expect("300 large frames animate");
+        assert!(side >= ANIM_SIDE_FLOOR);
+        let (sw, sh) = {
+            let scale = side as f64 / 1000.0;
+            (
+                (1000.0 * scale).round().max(1.0) as usize,
+                (1000.0 * scale).round().max(1.0) as usize,
+            )
+        };
+        assert!(
+            300usize
+                .saturating_mul(sw)
+                .saturating_mul(sh)
+                .saturating_mul(4)
+                <= ANIM_MAX_DECODED_BYTES
+        );
+        assert_eq!(animation_frame_side(301, 480, 270), None);
+    }
+
+    #[test]
+    fn https_page_url_accepts_only_https() {
+        assert!(is_https_page_url("https://example.com/g/1"));
+        assert!(is_https_page_url("HTTPS://Example.COM/g"));
+        assert!(!is_https_page_url("http://example.com/g/1"));
+        assert!(!is_https_page_url("file:///tmp/x.gif"));
+        assert!(!is_https_page_url("javascript:alert(1)"));
+        assert!(!is_https_page_url("arbos://gif/1"));
+        assert!(!is_https_page_url("not a url"));
+    }
+
+    #[test]
     fn a_three_frame_gif_keeps_every_frame() {
         let bytes = encode_gif(three_color_frames());
         let image = decode_image(&bytes).expect("gif decodes");
@@ -12663,6 +13971,25 @@ mod animated_image_tests {
         let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
         assert_eq!(full.frame_count(), 3);
         assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn a_120_frame_reaction_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..120)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(480, 270, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 120);
     }
 
     #[test]

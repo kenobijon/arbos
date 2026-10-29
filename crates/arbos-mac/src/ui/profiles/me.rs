@@ -74,7 +74,7 @@ impl Shell {
             String::new()
         };
         let devices_view = state.devices.clone();
-        let devices_summary = match state.devices.items.len() {
+        let devices_summary = match devices::live(&state.devices.items).count() {
             0 => String::new(),
             1 => "1 device".to_string(),
             n => format!("{n} devices"),
@@ -131,7 +131,7 @@ impl Shell {
             div()
                 .flex_shrink_0()
                 .text_size(px(TEXT_BODY))
-                .text_color(theme.text_muted)
+                .text_color(theme.label_muted())
                 .child(text)
         };
         let link_button_text =
@@ -163,7 +163,7 @@ impl Shell {
                     .gap(px(2.0))
                     .p(px(2.0))
                     .rounded_full()
-                    .bg(theme.field)
+                    .bg(theme.field_fill())
                     .border_1()
                     .border_color(theme.field_border)
                     .child(segs),
@@ -266,7 +266,7 @@ impl Shell {
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(sub),
                     )
             };
@@ -418,7 +418,7 @@ impl Shell {
                                     el.child(
                                         div()
                                             .text_size(px(TEXT_TINY))
-                                            .text_color(theme.text_muted)
+                                            .text_color(theme.label_muted())
                                             .child("Not taken from credits"),
                                     )
                                 }),
@@ -461,7 +461,7 @@ impl Shell {
                                             el.child(
                                                 div()
                                                     .text_size(px(TEXT_TINY))
-                                                    .text_color(theme.text_muted)
+                                                    .text_color(theme.label_muted())
                                                     .child(t),
                                             )
                                         }),
@@ -515,7 +515,7 @@ impl Shell {
                                         "chevron.right"
                                     },
                                     13.0,
-                                    theme.text_faint,
+                                    theme.label_faint(),
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_machine_breakdown(cx);
@@ -733,7 +733,7 @@ impl Shell {
                             .flex_shrink_0()
                             .w(px(44.0))
                             .text_size(px(TEXT_BODY))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(pct),
                     ),
                 );
@@ -1083,7 +1083,7 @@ impl Shell {
                 ));
             } else if !view.loaded && view.items.is_empty() {
                 body = body.child(kit::empty("Loading…", &theme));
-            } else if view.items.is_empty() {
+            } else if devices::live(&view.items).next().is_none() {
                 body = body.child(kit::empty("No devices yet", &theme));
             } else {
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -1128,9 +1128,9 @@ impl Shell {
                                 .px(px(6.0))
                                 .py(px(1.0))
                                 .rounded_full()
-                                .bg(theme.surface_2)
+                                .bg(theme.control_fill())
                                 .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .whitespace_nowrap()
                                 .child(tag),
                         );
@@ -1139,7 +1139,7 @@ impl Shell {
                         trailing.child(
                             div()
                                 .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .whitespace_nowrap()
                                 .child("This Mac"),
                         )
@@ -1284,7 +1284,7 @@ impl Shell {
             None => div()
                 .size(px(profiles::HERO_AVATAR))
                 .rounded_full()
-                .bg(theme.surface_2),
+                .bg(theme.control_fill()),
         }
         .into_any_element();
         // The crayon: the agents' avatar picker (Generate | Upload, Reset) for my picture; it
@@ -1326,7 +1326,7 @@ impl Shell {
                         .child(
                             div()
                                 .text_size(px(TEXT_BODY))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .child("@"),
                         )
                         .child(
@@ -1335,7 +1335,7 @@ impl Shell {
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .rounded(px(10.0))
-                                .bg(theme.field)
+                                .bg(theme.field_fill())
                                 .border_1()
                                 .border_color(theme.field_border)
                                 .text_size(px(TEXT_BODY))
@@ -1367,7 +1367,7 @@ impl Shell {
             name: name_el,
             badge: None,
             subtitle: Some(who.clone().into()),
-            subtitle_color: theme.text_muted,
+            subtitle_color: theme.label_muted(),
             subtitle_click: None,
             subtitle_element: None,
             editor,
