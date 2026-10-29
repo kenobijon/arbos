@@ -2952,7 +2952,10 @@ impl Transcript {
                                         .then(|| pending_glyph(&theme).mr(px(8.0))),
                                 )
                                 .child(own_bubble(
-                                    bubble.debug_selector(|| format!("own-bubble#{}", row.id)),
+                                    // One selector per element: a ghost keeps "secret-ghost".
+                                    bubble.when(ghost.is_none(), |b| {
+                                        b.debug_selector(|| format!("own-bubble#{}", row.id))
+                                    }),
                                     delivery,
                                 ))
                         })
