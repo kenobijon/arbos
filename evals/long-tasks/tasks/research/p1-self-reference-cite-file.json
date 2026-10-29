@@ -25,5 +25,5 @@
       ]
     }
   ],
-  "regression": "agent self-reference to its repo (bc-b07f76af, docs/agent-self-reference-repo.md); needs image ≥ 0.1.93"
+  "regression": "agent self-reference to its repo (bc-b07f76af, docs/agent-self-reference-repo.md); needs image ≥ 0.1.93; run 12: relay restart 01:54:23 30 s into the turn, rows done but the replica never saw the finish — re-graded PASS"
 }
