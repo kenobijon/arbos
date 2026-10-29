@@ -7586,6 +7586,9 @@ impl Agent {
                     );
                 }
             }
+            if let Some(fields) = self.people_sender_fields(chat_id) {
+                h.doc.set_message_fields(&msg_id, &fields);
+            }
         }
         if let Some(j) = &job {
             let _ = self.store.set_job_subagent(&j.id, &subagent_id);
