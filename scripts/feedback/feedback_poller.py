@@ -3901,6 +3901,21 @@ class Loop:
         # before the run that carried it to TestFlight 202610271329463223 was created).
         paused = (st.get("ship_paused_min") or 0) + (minutes_between(st["ship_pause_started"], iso()) if st.get("ship_pause_started") else 0)
         waited_eff = waited - paused
+        if waited_eff > self.cfg.ship_timeout_min and st.get("expects_ios") and not st.get("ios_done"):
+            # The iOS lane on main is red (watch_main_red: ios.yml failing on main, a `main-red` issue open) — e.g.
+            # Apple's "PLA Update available" / no iOS Distribution certificate on 2026-10-29 00:05–, which no fix
+            # can pass. Like a red Release lane, that is not this item's failure: the clock stays paused and the
+            # first green iOS build after the lane recovers adopts the item (#2239 and its follow-up were failed
+            # "nothing shipped within 90 min" at 02:21 for exactly this).
+            lane = (self.store.cursor().get("main_red") or {}).get("iOS")
+            if lane:
+                st.setdefault("ship_pause_started", iso())
+                if st.get("ios_lane_red") != lane.get("sha"):
+                    st["ios_lane_red"] = lane.get("sha")
+                    self.store.event(fid, "ios_lane_red", sha=lane.get("sha"), issue=lane.get("issue"))
+                    log(f"[{fid}] the iOS lane on main is red (#{lane.get('issue')}); not this fix's failure, ship clock stays paused")
+                self.store.save_state(fid, st)
+                return
         if waited_eff > self.cfg.ship_timeout_min:
             pending = None
             if st.get("expects_ios") and not st.get("ios_done"):
