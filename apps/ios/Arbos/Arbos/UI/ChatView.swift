@@ -689,9 +689,9 @@ struct ChatSession: View {
             let slug = member.isAgent ? mentionSlug(member.project?.name ?? member.handle) : member.handle
             return "Message @\(slug)"
         }
-        // No chip pick: match the header name ("Message Kenobi"), not "@handle".
+        // No chip pick: match the header name ("Message Kenobi", "Message Arbonites"), not "@handle".
         if let people {
-            return "Message \(counterpart?.displayName ?? people.title)"
+            return "Message \(people.composerName(me: model.user?.id))"
         }
         return "Message \(name)"
     }
