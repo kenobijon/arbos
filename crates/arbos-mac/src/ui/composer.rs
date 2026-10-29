@@ -109,6 +109,10 @@ const UNDO_LIMIT: usize = 100;
 
 pub const MAX_LINES: usize = 10;
 pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
+/// The `+` disc's distance from the pill's left edge. The trailing discs keep
+/// it too: phone → right edge and mic → phone, so the pair never reads as one
+/// cramped blob ([feedback glass-composer-button-spacing-mac-2026-10-29]).
+const BUTTON_INSET: f32 = (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
 
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Returns true when the @-mention menu handled the key (skip caret / send).
@@ -3938,7 +3942,7 @@ impl Render for Composer {
         let mut trailing = div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(BUTTON_INSET))
             // In the pill the row is the pill's height; in the card the
             // circles set it and the card's padding does the rest.
             .h(px(if staged {
@@ -4000,8 +4004,8 @@ impl Render for Composer {
                 .flex()
                 .items_end()
                 .gap(px(4.0))
-                .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
-                .pr(px((COMPOSER_HEIGHT - 2.0 - SEND_BUTTON) / 2.0))
+                .pl(px(BUTTON_INSET))
+                .pr(px(BUTTON_INSET))
                 .child(
                     div()
                         .h(px(COMPOSER_HEIGHT - 2.0))
