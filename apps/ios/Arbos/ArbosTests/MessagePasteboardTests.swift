@@ -209,6 +209,7 @@ final class MessagePasteboardTests: XCTestCase {
     func testHtmlNextToPlainTextPastesTheWordsOnly() {
         let html = Data("<meta charset=\"utf-8\"><b>\(sentence)</b>".utf8)
         UIPasteboard.general.setItems([[MessagePasteboard.text: sentence, "public.html": html]], options: [:])
+        XCTAssertFalse(MessagePasteboard.hasMedia())
         XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
         XCTAssertEqual(UIPasteboard.general.string, sentence)
     }
@@ -253,8 +254,10 @@ final class MessagePasteboardTests: XCTestCase {
     func testAFileStagesOnlyWithoutWords() {
         let pdf = Data("%PDF-1.4\n%%EOF\n".utf8)
         UIPasteboard.general.setItems([["com.adobe.pdf": pdf]], options: [:])
+        XCTAssertTrue(MessagePasteboard.hasMedia())
         XCTAssertEqual(MessagePasteboard.pendingAttachments().map(\.mime), ["application/pdf"])
         UIPasteboard.general.setItems([["com.adobe.pdf": pdf, MessagePasteboard.text: "notes.pdf"]], options: [:])
+        XCTAssertFalse(MessagePasteboard.hasMedia())
         XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
     }
 

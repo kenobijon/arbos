@@ -145,8 +145,10 @@ enum MessagePasteboard {
     // MARK: - Reading back (the composer's paste)
 
     /// Does the general pasteboard hold a picture or a file the composer can stage?
+    /// Declared types only: this runs from `canPerformAction` when the edit menu opens, and
+    /// reading another app's bytes there puts up iOS's "Allow Paste" prompt and blocks the app.
     static func hasMedia(_ pb: UIPasteboard = .general) -> Bool {
-        !pendingAttachments(from: pb).isEmpty
+        picks(pb.types(forItemSet: nil) ?? []).contains { $0 != .nothing }
     }
 
     /// The flavors a text copy carries next to its plain words (Notes, Safari, Mail, Pages,
