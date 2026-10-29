@@ -289,7 +289,7 @@ struct MediaViewer: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 36, height: 36)
-                    .background(Circle().fill(Color.white.opacity(0.22)))
+                    .background(ViewerChromeBackground(shape: Circle(), interactive: true))
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -305,6 +305,7 @@ struct MediaViewer: View {
                     // app-01M61EZD0GJ2XGV1EW4SCVXENK).
                     MediaViaCaption(source: item.source, fallback: item.subline)
                 }
+                .modifier(ViewerTextShadow())
             }
 
             Spacer(minLength: 0)
@@ -315,6 +316,7 @@ struct MediaViewer: View {
                     .foregroundStyle(.white.opacity(0.67))
                     .monospacedDigit()
                     .frame(minWidth: 36, alignment: .trailing)
+                    .modifier(ViewerTextShadow())
             } else {
                 Color.clear.frame(width: 36, height: 36)
             }
@@ -332,7 +334,7 @@ struct MediaViewer: View {
                     .font(theme.font(13, weight: .medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Capsule().fill(Color.white.opacity(0.18)))
+                    .background(ViewerChromeBackground(shape: Capsule()))
                     .padding(.bottom, 10)
                     .transition(.opacity)
             }
@@ -342,6 +344,7 @@ struct MediaViewer: View {
                         Circle().fill(Color.white.opacity(i == index ? 1 : 0.35)).frame(width: 6, height: 6)
                     }
                 }
+                .modifier(ViewerTextShadow())
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
@@ -378,7 +381,7 @@ struct MediaViewer: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
             .frame(height: 38)
-            .background(Capsule().fill(Color.white.opacity(0.16)))
+            .background(ViewerChromeBackground(shape: Capsule(), interactive: true))
         }
         .buttonStyle(.plain)
     }
@@ -444,6 +447,104 @@ struct MediaViewer: View {
         case .file:
             shareURL = MediaFetch.tempFile(data, name: item.name).map(ShareFile.init)
         }
+    }
+}
+
+// MARK: - Chrome over the picture
+
+/// The viewer's × , pills and toast sit over the picture itself
+/// ([feedback image-viewer-close-button-2026-10-29]: a white image hid the ×,
+/// whose white 22 % disc took the picture's colour). They wear a dark plate of
+/// their own, the Mac hover rail's capsule recipe: on Glass the system glass
+/// (frost before iOS 26) under a black plate and a thin text-colour wash; on
+/// Matte an opaque dark fill. Both have a 1 pt rim and a 1 pt lift, so the
+/// white glyphs read on white, dark and busy pictures alike.
+enum ViewerChrome {
+    /// Black over the glass: what keeps a white picture from showing through.
+    static let glassPlate: Double = 0.6
+    /// White over the plate (the round-button wash).
+    static let glassWash: Double = 0.08
+    /// Matte: the face's grey level, opaque.
+    static let solidLevel: Double = 0.16
+    /// The rim, white, so the edge still reads on a black picture.
+    static let rimAlpha: Double = 0.18
+    static let liftAlpha: Double = 0.28
+    /// WCAG AA for the 13–15 pt labels and the 15 pt × glyph.
+    static let minContrast: Double = 4.5
+
+    static func material(surface: Surface, liquidGlassAvailable: Bool = ChatHeaderGlass.liquidGlassAvailable) -> HeaderMaterial {
+        ChatHeaderGlass.material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+    }
+
+    /// The face's sRGB grey level over a picture of grey level `under` (1 = white),
+    /// leaving out the glass's own blur, which only darkens it further in the viewer's
+    /// dark scheme.
+    static func faceLevel(material: HeaderMaterial, over under: Double) -> Double {
+        switch material {
+        case .solid:
+            return solidLevel
+        case .liquidGlass, .frosted:
+            return under * (1 - glassPlate) * (1 - glassWash) + glassWash
+        }
+    }
+
+    /// WCAG contrast of the white glyph against a grey face.
+    static func glyphContrast(onFace level: Double) -> Double {
+        func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        return 1.05 / (linear(level) + 0.05)
+    }
+}
+
+/// The plate under a viewer control (`ViewerChrome`).
+struct ViewerChromeBackground<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    /// Buttons take the interactive glass (press feedback); the toast does not.
+    var interactive: Bool = false
+
+    var body: some View {
+        face
+            .overlay(shape.strokeBorder(Color.white.opacity(ViewerChrome.rimAlpha), lineWidth: 1))
+            .compositingGroup()
+            .shadow(color: .black.opacity(ViewerChrome.liftAlpha), radius: 1.5, y: 1)
+    }
+
+    @ViewBuilder
+    private var face: some View {
+        switch ViewerChrome.material(surface: theme.surface) {
+        case .liquidGlass:
+            if #available(iOS 26.0, *) {
+                plate.glassEffect(interactive ? Glass.regular.interactive() : .regular, in: shape)
+            } else {
+                frosted
+            }
+        case .frosted:
+            frosted
+        case .solid:
+            shape.fill(Color(white: ViewerChrome.solidLevel))
+        }
+    }
+
+    private var plate: some View {
+        ZStack {
+            shape.fill(Color.black.opacity(ViewerChrome.glassPlate))
+            shape.fill(Color.white.opacity(ViewerChrome.glassWash))
+        }
+    }
+
+    private var frosted: some View {
+        ZStack {
+            shape.fill(.ultraThinMaterial)
+            plate
+        }
+    }
+}
+
+/// The caption, counter and page dots have no plate; a soft dark halo keeps them
+/// readable where the picture runs under the bars.
+private struct ViewerTextShadow: ViewModifier {
+    func body(content: Content) -> some View {
+        content.shadow(color: .black.opacity(0.55), radius: 3, y: 0.5)
     }
 }
 
