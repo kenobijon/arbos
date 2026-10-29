@@ -992,6 +992,9 @@ struct BlobImage: View {
 /// fixture's `fixture_png`), or a one-page PDF naming the file.
 enum FixtureMedia {
     static func bytes(ref: String, item: MediaItem) -> (Data, String)? {
+        if item.kind == .image, let kind = DebugHooks.fixturePicture {
+            return portraitPNG(kind).map { ($0, "image/png") }
+        }
         switch item.kind {
         case .image where item.name.contains("Screenshot"):
             return pagePNG().map { ($0, "image/png") }
@@ -1024,6 +1027,31 @@ enum FixtureMedia {
             cg.stroke(CGRect(x: 0, y: 0, width: w, height: hgt))
         }
         return img.pngData()
+    }
+
+    /// A 390 × 844 portrait that fills the viewer (`ARBOS_FIXTURE_PICTURE`): `white`, `dark`
+    /// (near-black), or `busy` (bright stripes and blocks with white among them).
+    private static func portraitPNG(_ kind: String) -> Data? {
+        let (w, h) = (390, 844)
+        return UIGraphicsImageRenderer(size: CGSize(width: w, height: h)).image { ctx in
+            let cg = ctx.cgContext
+            switch kind {
+            case "dark":
+                cg.setFillColor(UIColor(white: 0.04, alpha: 1).cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            case "busy":
+                let colors: [UIColor] = [.white, .systemYellow, .systemPink, .white, .systemTeal, .systemOrange, .white, .systemGreen]
+                for (i, y) in stride(from: 0, to: h, by: 28).enumerated() {
+                    cg.setFillColor(colors[i % colors.count].cgColor)
+                    cg.fill(CGRect(x: 0, y: y, width: w, height: 28))
+                }
+                for (i, x) in stride(from: 0, to: w, by: 46).enumerated() where i % 2 == 0 {
+                    cg.setFillColor(colors[(i + 3) % colors.count].withAlphaComponent(0.8).cgColor)
+                    cg.fill(CGRect(x: x, y: 0, width: 23, height: h))
+                }
+            default:
+                cg.setFillColor(UIColor.white.cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            }
+        }.pngData()
     }
 
     /// A 640 × 400 "page screenshot": white, empty top 22 %, title bar, line, blue
