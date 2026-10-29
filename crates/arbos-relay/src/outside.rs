@@ -2404,6 +2404,7 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("abc123".into()),
+                        url: None,
                         source: None,
                     }],
                     sender: Some(format!("user:{o2}")),
@@ -2449,6 +2450,7 @@ mod tests {
                             mime: "image/gif".into(),
                             kind: Some("image".into()),
                             blob_ref: Some("g1".into()),
+                            url: None,
                             source: None,
                         },
                         UserAttachment {
@@ -2456,6 +2458,7 @@ mod tests {
                             mime: "audio/mp4".into(),
                             kind: Some("audio".into()),
                             blob_ref: Some("a1".into()),
+                            url: None,
                             source: None,
                         },
                         UserAttachment {
@@ -2463,6 +2466,7 @@ mod tests {
                             mime: "application/pdf".into(),
                             kind: None,
                             blob_ref: Some("p1".into()),
+                            url: None,
                             source: None,
                         },
                         UserAttachment {
@@ -2470,6 +2474,7 @@ mod tests {
                             mime: "video/mp4".into(),
                             kind: Some("video".into()),
                             blob_ref: Some("v1".into()),
+                            url: None,
                             source: None,
                         },
                     ],

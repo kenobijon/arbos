@@ -1313,13 +1313,9 @@ struct RowView: View, Equatable {
     /// Search-in-chat hit: soft accent wash so the keyword match stands out while
     /// searching ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     var searchHit: Bool = false
-    /// A message row: swipe right on it replies (the long-press Reply item's twin;
-    /// `BubbleSwipe`). False on system / channel / non-message rows.
-    var canReply: Bool = false
-    /// Reply swipe (owned by the transcript's one recognizer, `TranscriptSwipeHost`): how far
-    /// this bubble follows the finger to the right, and whether releasing now replies.
-    var replyDrag: CGFloat = 0
-    var replyArmed: Bool = false
+    /// A message row (long-press menu, `bubble:<id>` for the UI tests). False on system /
+    /// channel / non-message rows.
+    var isMessage: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
     /// When true (held-bubble overlay), list everyone under every reaction chip so
@@ -1347,9 +1343,7 @@ struct RowView: View, Equatable {
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
             && lhs.people == rhs.people
-            && lhs.canReply == rhs.canReply
-            && lhs.replyDrag == rhs.replyDrag
-            && lhs.replyArmed == rhs.replyArmed
+            && lhs.isMessage == rhs.isMessage
             && lhs.theme == rhs.theme
             && lhs.showReactionSenders == rhs.showReactionSenders
         #if DEBUG
@@ -1414,8 +1408,8 @@ struct RowView: View, Equatable {
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
         .animation(.easeOut(duration: 0.18), value: searchHit)
-        // iMessage: drag left → times; drag right → reply. Exclusive by direction.
-        .offset(x: replyDrag - timeReveal)
+        // iMessage: drag left → times.
+        .offset(x: -timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -1428,21 +1422,8 @@ struct RowView: View, Equatable {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
-        .overlay(alignment: .leading) {
-            // The reply arrow slides out from behind the bubble's leading edge.
-            if canReply, replyDrag > 0.5 {
-                Image(systemName: "arrowshape.turn.up.left")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(replyArmed ? theme.accent : theme.muted)
-                    .frame(width: BubbleSwipe.revealWidth, alignment: .leading)
-                    .offset(x: replyDrag - BubbleSwipe.revealWidth)
-                    .opacity(Double(min(1, replyDrag / (BubbleSwipe.revealWidth * 0.55))))
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
-        }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(canReply ? "bubble:\(row.messageId)" : "row:\(row.id)")
+        .accessibilityIdentifier(isMessage ? "bubble:\(row.messageId)" : "row:\(row.id)")
     }
 
     @ViewBuilder
@@ -1728,6 +1709,23 @@ struct RowView: View, Equatable {
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
+            }
+        case .image(let item, let fromUser, _, let lane, _, _, let sender, let named, _) where item.sticker:
+            // A picker sticker (ARB-544): the picture alone, fixed square, no bubble — like
+            // Telegram / iMessage stickers; same lane rules as a picture.
+            if let sender {
+                mediaRow(sender: sender, named: named) {
+                    StickerBubble(item: item, chatId: chatId)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                }
+            } else {
+                HStack(spacing: 0) {
+                    if fromUser { Spacer(minLength: 0) }
+                    if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    StickerBubble(item: item, chatId: chatId)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
+                    if !fromUser { Spacer(minLength: 0) }
+                }
             }
         case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, let sender, let named, let quote):
             // Same left edge and cap as an incoming bubble: after the avatar lane in a
@@ -2993,7 +2991,7 @@ struct ImageBubble: View {
         }
         // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
         // natural size keeps the row's height steady while the picture comes back.
-        if let ref = item.blobRef, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+        if let ref = item.cacheKey, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
             return Self.fit(known, maxWidth: bubbleWidth)
         }
         return Self.placeholder
@@ -3026,11 +3024,10 @@ struct ImageBubble: View {
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
             }
-            // Tap opens the viewer. Not a Button: the transcript's reply swipe
-            // owns the row pan, and a SwiftUI Button still counts a right pan
-            // that starts here as a tap on lift ([feedback
-            // app-01M5Z71ZQQ9G8EG5WF8SVNGM85]). onTapGesture yields once the
-            // pan moves; the flag covers the case where the swipe already claimed.
+            // Tap opens the viewer. Not a Button: a SwiftUI Button still counts a
+            // right pan that starts here as a tap on lift, and the row pans belong to
+            // the back swipe / time peek ([feedback app-01M5Z71ZQQ9G8EG5WF8SVNGM85]).
+            // onTapGesture yields once the pan moves.
             pictureTile
                 .contentShape(Rectangle())
                 .onTapGesture(perform: openViewer)
@@ -3065,7 +3062,7 @@ struct ImageBubble: View {
         .background(fill)
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         .accessibilityIdentifier("photo-bubble")
-        .task(id: item.blobRef) { await load() }
+        .task(id: item.cacheKey) { await load() }
         .onAppear { animate = stillFrame != nil }
         .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
@@ -3088,7 +3085,7 @@ struct ImageBubble: View {
                     Image(uiImage: shown)
                         .resizable()
                         .scaledToFit()
-                } else if failed || item.blobRef == nil {
+                } else if failed || item.cacheKey == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
                         .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
@@ -3106,17 +3103,15 @@ struct ImageBubble: View {
                minHeight: picture.height, idealHeight: picture.height, maxHeight: .infinity)
     }
 
-    /// Open the full-screen viewer for this picture. Skipped while a reply
-    /// swipe owns the drag so a right pan on the image only replies.
+    /// Open the full-screen viewer for this picture.
     private func openViewer() {
-        guard !BackSwipe.bubbleSwipeActive else { return }
         viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
     }
 
     private func load() async {
         // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
         // no decode, no placeholder flash.
-        if let ref = item.blobRef, let hit = ChatImageCache.decoded(for: ref) {
+        if let ref = item.cacheKey, let hit = ChatImageCache.decoded(for: ref) {
             show(hit)
             return
         }
@@ -3131,7 +3126,7 @@ struct ImageBubble: View {
             failed = true
             return
         }
-        if let ref = item.blobRef { ChatImageCache.store(decoded, for: ref) }
+        if let ref = item.cacheKey { ChatImageCache.store(decoded, for: ref) }
         show(decoded)
     }
 
