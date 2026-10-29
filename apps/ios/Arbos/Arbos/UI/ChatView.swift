@@ -2832,9 +2832,6 @@ struct ChatSession: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if let q = mentionQuery, isPeople, let people {
-                mentionList(people, query: q)
-            }
             if let e = editing {
                 editPreview(e)
             } else if let r = replyRef {
@@ -2901,6 +2898,17 @@ struct ChatSession: View {
                     attachButton
                 }
                 textField
+            }
+        }
+        // The mention list floats 8 pt above the composer, over the transcript. As a row of
+        // the stack it grew the bar's safe-area inset by its height and every bubble slid up
+        // while it was open ([feedback mention-list-overlay-ios-2026-10-29]).
+        .overlay(alignment: .top) {
+            if let q = mentionQuery, isPeople, let people {
+                mentionList(people, query: q)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 8)
+                    .alignmentGuide(.top) { d in d[.bottom] }
             }
         }
         .quickLookPreview($pendingPreviewURL)
