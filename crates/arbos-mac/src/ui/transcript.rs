@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, canvas, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
-    Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful,
-    TextRun, Window,
+    BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
+    Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -809,6 +809,8 @@ const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 pub const RAIL_BUTTON: f32 = 24.0;
 pub const RAIL_GLYPH: f32 = 16.0;
 pub const RAIL_GAP: f32 = 2.0;
+/// The Glass capsule's inset either side of the rail's buttons.
+pub const RAIL_PLATE_PAD_X: f32 = 2.0;
 
 /// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
 /// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
@@ -2086,10 +2088,24 @@ impl Transcript {
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
         let more_opacity = if just_copied { 1.0 } else { opacity };
         let more_glyph = if just_copied { "checkmark" } else { "ellipsis" };
+        // On Glass the three sit in one capsule over the desktop; the capsule
+        // fades as a whole, so the buttons inside carry only what differs
+        // from it (the smiley and reply keep fading under a held checkmark).
+        let plate = theme.rail_plate();
+        let glyph_color = if plate.is_some() {
+            theme.text
+        } else {
+            theme.text_muted
+        };
+        let (group_opacity, opacity, more_opacity) = match plate {
+            Some(_) if just_copied => (1.0, opacity, 1.0),
+            Some(_) => (opacity, 1.0, 1.0),
+            None => (1.0, opacity, more_opacity),
+        };
         let more_color = if just_copied {
             theme.online
         } else {
-            theme.text_muted
+            glyph_color
         };
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
@@ -2111,12 +2127,30 @@ impl Transcript {
             .flex()
             .items_center()
             .gap(px(RAIL_GAP))
+            .when_some(plate, |el, plate| {
+                el.debug_selector(|| "rail-plate".into())
+                    .h(px(RAIL_BUTTON))
+                    .px(px(RAIL_PLATE_PAD_X))
+                    .rounded_full()
+                    .opacity(group_opacity)
+                    // Every row carries a rail; only a revealed one paints its plate.
+                    .when(group_opacity > 0.0, |el| {
+                        el.bg(highlight::over(plate, theme.control_fill()))
+                            .shadow(vec![
+                                BoxShadow::new(px(0.0), px(0.0), theme.pane_card_rim())
+                                    .spread_radius(px(1.0))
+                                    .inset(),
+                                BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.28))
+                                    .blur_radius(px(3.0)),
+                            ])
+                    })
+            })
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#react")),
                     "face.smiling",
                     opacity,
-                    theme.text_muted,
+                    glyph_color,
                 )
                 .on_click(cx.listener(
                     move |_, event: &gpui::ClickEvent, _, cx| {
@@ -2135,7 +2169,7 @@ impl Transcript {
                     SharedString::from(format!("{row_id}#reply")),
                     "arrowshape.turn.up.left",
                     opacity,
-                    theme.text_muted,
+                    glyph_color,
                 )
                 .on_click(cx.listener(move |_, _, _, cx| {
                     if let Some(chat_id) = chat_id.clone() {
