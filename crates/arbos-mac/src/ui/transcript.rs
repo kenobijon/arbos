@@ -2444,8 +2444,6 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                // The bubble sits under this line: an emoji-only sender name is
-                // lifted onto the baseline like every other stacked name.
                 identity::name(name, CHAT_BODY)
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .font_weight(FontWeight::SEMIBOLD)
