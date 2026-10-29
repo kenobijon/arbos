@@ -2210,12 +2210,14 @@ struct BlockView: View {
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
+                    .mentionPills()
             }
         case .heading(let level, let text):
             // Bolder, larger text; never an anchor (Mac: 20 / 17 / 15 pt on a 13 pt body).
             Markdown.inlineText(text, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
                 .font(theme.font(Self.headingSize(level), weight: .bold))
                 .tint(theme.accent)
+                .mentionPills()
                 .padding(.top, 4)
                 .accessibilityIdentifier("heading-\(level)")
         case .quote(let inner):
@@ -2252,6 +2254,7 @@ struct BlockView: View {
                             Markdown.inlineText(item, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
                                 .font(theme.font(Theme.body))
                                 .tint(theme.accent)
+                                .mentionPills()
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -2465,6 +2468,7 @@ struct TableBlock: View {
                 Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                     .font(theme.font(14, weight: head ? .semibold : .regular))
                     .tint(theme.accent)
+                    .mentionPills()
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: widths[ci], alignment: .topLeading)
@@ -3147,6 +3151,7 @@ struct ImageBubble: View {
                             .font(theme.font(Theme.body))
                             .lineSpacing(Theme.bodyLineSpacing)
                             .tint(theme.accent)
+                            .mentionPills()
                             .multilineTextAlignment(.leading)
                             .accessibilityIdentifier("photo-caption")
                             .accessibilityLabel("Description")

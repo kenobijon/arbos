@@ -78,6 +78,10 @@ enum DebugHooks {
     /// `ARBOS_FIXTURE_REPLY_DM=1`: rows in the fixture DM that answer messages in other chats
     /// (Reply in DM rig, #1836).
     static var fixtureReplyDM: Bool { value("ARBOS_FIXTURE_REPLY_DM") == "1" }
+    /// `ARBOS_FIXTURE_CHIPS=1` ([feedback mention-chip-highlight-2026-10-28]): the fixture group
+    /// ends with a member's and my own bubble, each with an agent and a person chip (mine has one
+    /// inside a code span).
+    static var fixtureChips: Bool { value("ARBOS_FIXTURE_CHIPS") == "1" }
     /// `ARBOS_FIXTURE_LINKS=1`: four links from unconst in the fixture DM, for the Links tab's
     /// tiles ([feedback link-icons-ios-tile-2026-10-27]).
     static var fixtureLinks: Bool { value("ARBOS_FIXTURE_LINKS") == "1" }

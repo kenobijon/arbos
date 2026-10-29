@@ -153,6 +153,7 @@
 		A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000001 /* NoAnswerLineTests.swift */; };
 		A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000003 /* MarkdownTableTests.swift */; };
 		A1F100000000000000000008 /* LinkIconTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000007 /* LinkIconTests.swift */; };
+		A1C4E1000000000000000002 /* MentionChipSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4E1000000000000000001 /* MentionChipSnapshotTests.swift */; };
 		A1F100000000000000000103 /* LinkTileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000102 /* LinkTileTests.swift */; };
 		A1F10000000000000000000C /* MathTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000B /* MathTextTests.swift */; };
 		A1F100000000000000000010 /* CodeHighlightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000F /* CodeHighlightTests.swift */; };
@@ -395,6 +396,7 @@
 		A1F100000000000000000001 /* NoAnswerLineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoAnswerLineTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000003 /* MarkdownTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000007 /* LinkIconTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIconTests.swift; sourceTree = "<group>"; };
+		A1C4E1000000000000000001 /* MentionChipSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChipSnapshotTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000102 /* LinkTileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTileTests.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000B /* MathTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathTextTests.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000F /* CodeHighlightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlightTests.swift; sourceTree = "<group>"; };
@@ -734,6 +736,7 @@
 				A1F100000000000000000001 /* NoAnswerLineTests.swift */,
 				A1F100000000000000000003 /* MarkdownTableTests.swift */,
 				A1F100000000000000000007 /* LinkIconTests.swift */,
+				A1C4E1000000000000000001 /* MentionChipSnapshotTests.swift */,
 				A1F100000000000000000102 /* LinkTileTests.swift */,
 				A1F10000000000000000000B /* MathTextTests.swift */,
 				A1F10000000000000000000F /* CodeHighlightTests.swift */,
@@ -1115,6 +1118,7 @@
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,
 				A1F100000000000000000008 /* LinkIconTests.swift in Sources */,
+				A1C4E1000000000000000002 /* MentionChipSnapshotTests.swift in Sources */,
 				A1F100000000000000000103 /* LinkTileTests.swift in Sources */,
 				A1F10000000000000000000C /* MathTextTests.swift in Sources */,
 				A1F100000000000000000010 /* CodeHighlightTests.swift in Sources */,
