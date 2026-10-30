@@ -170,6 +170,10 @@ struct ChatSession: View {
     /// Newest rows dropped below the viewport while reading history; 0 when the
     /// window is the tail of the transcript.
     @State private var windowSkipEnd = 0
+    /// When `settleOnRevealed` repeats its `scrollTo`: just after the 0.35 s hop lands,
+    /// and once more. Short on purpose — a correction must not reach the reader's own
+    /// scroll, and `settleToBottom` corrects the tail the same way.
+    static let revealSettleDelays: [Double] = [0.4, 0.7]
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -2353,18 +2357,34 @@ struct ChatSession: View {
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
+        // Before the hops, so they can tell this reveal from the next one.
+        highlightedMessage = messageId
         if includeInWindow(messageId: messageId) {
             // The original was outside the window: let the grown VStack lay out first.
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
-            }
+            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId) }
         } else {
-            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+            settleOnRevealed(target.id, messageId: messageId)
         }
-        highlightedMessage = messageId
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
+        }
+    }
+
+    /// One animated hop to the revealed row, then two corrections once the rows have real
+    /// heights. The rows between the top of the window and the target are lazy, so the
+    /// first `scrollTo` resolves `.center` against estimated heights; the taller real ones
+    /// then push the target out of the viewport. Measured on a 420-row fixture group
+    /// (#2404): a tap on a search result left the transcript about 30 messages short of the
+    /// message it was given, with that message not even realized. The repeats stand down as
+    /// soon as another reveal claims the highlight.
+    private func settleOnRevealed(_ rowId: String, messageId: Id) {
+        withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(rowId, anchor: .center) }
+        for delay in Self.revealSettleDelays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard highlightedMessage == messageId else { return }
+                scroller?.scrollTo(rowId, anchor: .center)
+            }
         }
     }
 
