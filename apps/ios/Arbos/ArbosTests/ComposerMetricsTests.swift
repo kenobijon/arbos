@@ -100,10 +100,15 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     /// Typing fast, deleting fast or clearing the field mid-swap must never
-    /// leave the trailing slot empty, and must never show both sets as the
-    /// settled state. Every reachable combination has at least one control, and
-    /// only a recording — which wants both — has two.
-    func testOneSetOfTrailingControlsIsAlwaysTheOneOnScreen() {
+    /// leave the trailing slot without a control that answers a tap. The pill
+    /// is mounted in every state — the swap only trades the mark inside it —
+    /// so `sendShown` says which mark, and the property that can break is the
+    /// mic's: it may only leave once the mark has become the arrow. Both marks
+    /// show at once in two states, and neither is a glitch: a recording, which
+    /// wants the mic to finish it and the arrow to send it, and an empty draft
+    /// in a server channel, which has no call to offer (C1) so the arrow is
+    /// already there, dimmed.
+    func testTheMicOnlyLeavesOnceThePillHasBecomeSend() {
         for draftEmpty in [true, false] {
             for recording in [true, false] {
                 for isChannel in [true, false] {
@@ -112,8 +117,11 @@ final class ComposerMetricsTests: XCTestCase {
                     let send = ComposerTrailing.sendShown(
                         canSend: !draftEmpty, recording: recording, isChannel: isChannel)
                     let state = "empty \(draftEmpty) recording \(recording) channel \(isChannel)"
-                    XCTAssertTrue(mic || send, "neither control is on screen: \(state)")
-                    XCTAssertEqual(mic && send, recording, "both at once only while recording: \(state)")
+                    if !mic {
+                        XCTAssertTrue(send, "the mic left before the arrow arrived: \(state)")
+                    }
+                    XCTAssertEqual(mic && send, recording || (draftEmpty && isChannel),
+                                   "both marks at once: \(state)")
                 }
             }
         }
