@@ -82,8 +82,12 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
 /// `/var/lib/arbos-relay`, i.e. the host root volume in production);
 /// `disk_low` when free space is under `ARBOS_DISK_LOW_GB` (default 40).
 fn disk_json() -> serde_json::Value {
-    let path = std::env::var("ARBOS_DISK_WATCH_PATH").unwrap_or_else(|_| "/var/lib/arbos-relay".to_owned());
-    let low_gb: u64 = std::env::var("ARBOS_DISK_LOW_GB").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let path = std::env::var("ARBOS_DISK_WATCH_PATH")
+        .unwrap_or_else(|_| "/var/lib/arbos-relay".to_owned());
+    let low_gb: u64 = std::env::var("ARBOS_DISK_LOW_GB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
     // statvfs field widths differ per libc (u32 on macOS, u64 on Linux): the casts are needed on one of them.
     #[allow(clippy::unnecessary_cast)]
     match nix::sys::statvfs::statvfs(path.as_str()) {
