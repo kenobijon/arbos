@@ -2,22 +2,22 @@ import XCTest
 
 /// A tap on a Search-in-chat result must land the full transcript on that message. The
 /// fixture group padded with `ARBOS_FIXTURE_LONG_ROWS` is what makes this a real test:
-/// the hit sits far above the lazy window, so the reveal has to grow the window before it
-/// scrolls. `ChatSearchCloseUITests` covers the short-chat case, where the window already
-/// holds every row and nothing has to grow.
+/// the transcript is longer than the lazy window, so the reveal has to move the view.
+/// `ChatSearchCloseUITests` covers the short-chat case, where the content is shorter than
+/// the viewport and nothing can move.
 final class ChatSearchResultJumpUITests: XCTestCase {
     private let appear: TimeInterval = 150
     private let settle: TimeInterval = 20
-    /// Rows the long fixture writes, newest last. 420 rows puts `long-8` about 410 rows
-    /// above the tail — far outside the 80-row opening window and the 360-row maximum.
+    /// Rows the long fixture writes, newest last.
     private static let longRows = 420
-    /// `long-8` carries the fixture's "embargo" line (`lines[0]`, every eighth row) and is
-    /// the oldest hit a keyword search finds. `RowView` identifies bubbles by message id.
-    private static let oldHitId = "bubble:long-8"
+    /// The fixture's "embargo" line is `lines[0]`, every eighth synthetic row.
     private static let keyword = "embargo"
+    /// The fixture's own newest row (`Fixture.swift`, g9) — on screen when the transcript
+    /// sits at the tail instead of on the tapped result.
+    private static let newestRowText = "1,284 signups"
 
     override func setUpWithError() throws {
-        continueAfterFailure = false
+        continueAfterFailure = true
     }
 
     private func openLongLaunchWeekSearch() -> XCUIApplication {
@@ -48,103 +48,78 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         add(a)
     }
 
-    /// Scroll the filtered result list up until the oldest hit is on screen. With a keyword
-    /// set, a scroll keeps the bar open (`ChatSearchClose.scrollCloses`), so this is safe.
-    private func scrollResultsToOldestHit(_ app: XCUIApplication, _ hit: XCUIElement) -> Int {
-        var swipes = 0
-        while !(hit.exists && hit.isHittable), swipes < 40 {
-            app.swipeDown()
-            swipes += 1
+    /// Every realized transcript bubble, newest-to-oldest as the tree lists them, with the
+    /// part of each frame that is inside `screen`.
+    private func bubbles(_ app: XCUIApplication, screen: CGRect) -> [(id: String, frame: CGRect, onScreen: Bool)] {
+        let all = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:"))
+        var out: [(String, CGRect, Bool)] = []
+        for i in 0..<min(all.count, 60) {
+            let e = all.element(boundBy: i)
+            guard e.exists else { continue }
+            let f = e.frame
+            out.append((e.identifier, f, screen.intersects(f) && f.height > 0))
         }
-        return swipes
+        return out.map { (id: $0.0, frame: $0.1, onScreen: $0.2) }
     }
 
-    /// The topmost result row that is on screen, the one a reader taps without scrolling.
-    /// While a keyword filters the list every `bubble:long-…` in the tree is a hit.
-    private func topVisibleHit(_ app: XCUIApplication) -> XCUIElement? {
-        let hits = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:long-"))
-        for i in 0..<hits.count {
-            let e = hits.element(boundBy: i)
-            if e.exists, e.isHittable { return e }
-        }
-        return nil
+    private func describe(_ rows: [(id: String, frame: CGRect, onScreen: Bool)]) -> String {
+        rows.map { "\($0.id)@y\(Int($0.frame.minY))…\(Int($0.frame.maxY))\($0.onScreen ? "" : " (off)")" }
+            .joined(separator: ", ")
     }
 
-    /// What a reader actually does: type a keyword and tap a result at once, with the
-    /// keyboard still up. Closing the bar drops the keyboard, so the transcript's bottom
-    /// inset shrinks by the keyboard's height while the reveal is scrolling.
-    func testTappingAResultWithTheKeyboardUpLandsOnThatMessage() {
+    /// Observation pass. Types a keyword and taps a result the way a reader does — at once,
+    /// with the keyboard still up — then records where the transcript ended up: the tapped
+    /// bubble's frame, which bubbles are on screen, whether the tail is showing instead.
+    /// Deliberately reports everything in one failure so the run's log carries the evidence.
+    func testObserveWhereAResultTapLandsTheTranscript() {
         let app = openLongLaunchWeekSearch()
+        let screen = app.windows.firstMatch.frame
         let field = app.textFields["chat-search-field"]
+
+        let beforeTyping = bubbles(app, screen: screen)
         field.tap()
         field.typeText(Self.keyword)
-        XCTAssertTrue(app.descendants(matching: .any)[Self.oldHitId].waitForExistence(timeout: settle),
-                      "the filter is on: the oldest hit joined the result list")
-        XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
+        sleep(2)
+        let filtered = bubbles(app, screen: screen)
+        let keyboardsWhileTyping = app.keyboards.count
+        shot(app, "1-results-keyboard-up")
 
-        guard let hit = topVisibleHit(app) else {
-            return XCTFail("no result row is on screen to tap")
+        // The topmost result row on screen: what a reader taps without scrolling.
+        let chosen = filtered.first { $0.onScreen }
+        guard let chosen else {
+            return XCTFail("OBSERVE: no result row on screen. screen=\(screen) "
+                           + "beforeTyping=[\(describe(beforeTyping))] filtered=[\(describe(filtered))]")
         }
-        let id = hit.identifier
-        let screen = app.windows.firstMatch.frame
-        let before = hit.frame
-        shot(app, "1-hit-on-screen-keyboard-up")
-
-        hit.tap()
+        let target = app.descendants(matching: .any)[chosen.id]
+        target.tap()
 
         let deadline = Date().addingTimeInterval(settle)
         while field.exists, Date() < deadline { usleep(150_000) }
-        XCTAssertFalse(field.exists, "a result tap closes the bar")
-
-        let revealed = app.descendants(matching: .any)[id]
-        _ = revealed.waitForExistence(timeout: settle)
-        sleep(2)
-        shot(app, "2-after-the-tap-keyboard-up")
-
-        let after = revealed.exists ? revealed.frame : .null
-        XCTAssertTrue(revealed.exists,
-                      "\(id) is still in the transcript after the reveal (screen \(screen), was at \(before))")
-        XCTAssertTrue(screen.contains(after),
-                      "\(id) is wholly on screen after the reveal — it landed at \(after), screen \(screen) "
-                      + "(it was at \(before) in the results)")
-        XCTAssertTrue(revealed.isHittable, "…and visible (landed at \(after), screen \(screen))")
-    }
-
-    func testTappingAnOldResultLandsTheTranscriptOnThatMessage() {
-        let app = openLongLaunchWeekSearch()
-        let field = app.textFields["chat-search-field"]
-        field.tap()
-        field.typeText(Self.keyword)
-
-        let hit = app.descendants(matching: .any)[Self.oldHitId]
-        let swipes = scrollResultsToOldestHit(app, hit)
-        XCTAssertTrue(hit.exists && hit.isHittable,
-                      "the oldest hit \(Self.oldHitId) is reachable in the result list (gave up after \(swipes) swipes)")
-        let screen = app.windows.firstMatch.frame
-        let before = hit.frame
-        shot(app, "1-oldest-hit-in-results")
-
-        hit.tap()
-
-        // The bar goes with the tap; the reveal follows it.
-        let deadline = Date().addingTimeInterval(settle)
-        while field.exists, Date() < deadline { usleep(150_000) }
-        XCTAssertFalse(field.exists, "a result tap closes the bar")
-
-        // Give the reveal every chance to settle before reading where it landed.
-        _ = hit.waitForExistence(timeout: settle)
-        sleep(2)
+        let barClosed = !field.exists
+        sleep(3)
         shot(app, "2-after-the-result-tap")
 
-        let after = hit.exists ? hit.frame : .null
-        XCTAssertTrue(hit.exists,
-                      "the tapped message is still in the transcript after the reveal "
-                      + "(screen \(screen), it was at \(before) in the results, \(swipes) swipes)")
-        XCTAssertTrue(screen.contains(after),
-                      "the tapped message is wholly on screen after the reveal — it landed at \(after), "
-                      + "screen \(screen) (it was at \(before) in the results)")
-        XCTAssertTrue(hit.isHittable,
-                      "…and visible, not behind the chrome (landed at \(after), screen \(screen))")
+        let after = bubbles(app, screen: screen)
+        let landed = after.first { $0.id == chosen.id }
+        let newest = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", Self.newestRowText)).firstMatch
+        let tailShowing = newest.exists && screen.intersects(newest.frame)
+        let onScreenAfter = after.filter(\.onScreen)
+
+        XCTFail("""
+            OBSERVE result-tap landing
+              screen: \(screen)
+              bubbles before typing (\(beforeTyping.count)): \(describe(beforeTyping))
+              keyboards while typing: \(keyboardsWhileTyping)
+              bubbles with the filter on (\(filtered.count)): \(describe(filtered))
+              tapped: \(chosen.id) at \(chosen.frame)
+              bar closed: \(barClosed); keyboards after: \(app.keyboards.count)
+              tapped bubble after: \(landed.map { "\($0.id) at \($0.frame) onScreen=\($0.onScreen)" } ?? "NOT IN TREE")
+              tapped bubble hittable after: \(target.exists ? "\(target.isHittable)" : "n/a")
+              on screen after (\(onScreenAfter.count)): \(describe(onScreenAfter))
+              all bubbles after (\(after.count)): \(describe(after))
+              tail row showing: \(tailShowing) \(newest.exists ? "at \(newest.frame)" : "(absent)")
+            """)
     }
 }
