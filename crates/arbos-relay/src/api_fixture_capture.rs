@@ -1219,7 +1219,14 @@ fn skill_json_matches_fixture() {
 #[tokio::test]
 async fn local_devices_match_fixture() {
     let state = test_state(AuthMode::Github);
-    let (_, device) = person(&state, 503);
+    let (user, device) = person(&state, 503);
+    // `GET /local/devices` answers with the caller's own helpers, so the fixture's helper has to
+    // be a device this user actually paired — which is the only way a `local_devices` row is ever
+    // created (`ws_local` takes that device's own token and no other).
+    state
+        .db
+        .insert_device("ldev_fixture", "device", "hash", &user, "github")
+        .unwrap();
     state
         .db
         .local_device_hello("ldev_fixture", "fixture-host", "macos", "/Users/fixture")

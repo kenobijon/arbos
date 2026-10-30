@@ -235,6 +235,10 @@ pub async fn get(
     if !can_see(scope.as_deref(), &principal, &s) {
         return Err((StatusCode::FORBIDDEN, "not visible to this box".into()));
     }
+    if !owns_skill(&state, &principal, &s) {
+        // As `delete` does: another user's skill looks like no skill at all (#1953).
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
+    }
     Ok(Json(skill_json(&s)).into_response())
 }
 
@@ -315,6 +319,12 @@ pub async fn update(
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
     if !can_edit(scope.as_deref(), &principal, &existing) {
         return Err((StatusCode::FORBIDDEN, "not this box's skill".into()));
+    }
+    // `can_edit` constrains boxes only — it returns `true` for every device principal — so this
+    // is the check that stops one user editing another's skill, the same one `delete` makes
+    // (#1953). A skill with no origin project has no owner to check against and stays editable.
+    if !owns_skill(&state, &principal, &existing) {
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
     }
     let next = b.apply(existing.clone());
     if next.name.is_empty() {
@@ -425,6 +435,87 @@ mod tests {
         let own = delete(State(state.clone()), alice_dev, Path(owned.clone())).await;
         assert_eq!(status(own), StatusCode::NO_CONTENT);
         assert!(state.db.skill(&owned).unwrap().is_none());
+    }
+
+    /// #1953, read and write by id: `can_see` and `can_edit` both return `true` for every
+    /// device principal, so one user could fetch and edit another user's skill. Both now answer
+    /// like `delete` does.
+    ///
+    /// `GET /skills/{id}` is **not** where another user's skill content leaks — `GET /skills`
+    /// hands every skill's full `body` and `markdown` to any device token, and that is the list
+    /// the apps actually read (no client calls this route at all). Scoping the list is a product
+    /// decision about whether a relay has a shared skill library; this only makes the by-id
+    /// routes agree with `delete`.
+    #[tokio::test]
+    async fn get_and_update_refuse_a_skill_of_another_users_project() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let project = project_of(&state, &alice, "Comms");
+        let owned = skill_of(&state, Some(&project), "deploy-the-relay");
+        let row = state.db.skill(&owned).unwrap().unwrap();
+
+        assert!(
+            can_see(None, &bob_dev, &row) && can_edit(None, &bob_dev, &row),
+            "neither gate constrains a device, which is why both routes needed this check"
+        );
+
+        let read = get(
+            State(state.clone()),
+            bob_dev.clone(),
+            HeaderMap::new(),
+            Path(owned.clone()),
+        )
+        .await;
+        assert_eq!(status(read), StatusCode::NOT_FOUND);
+
+        let edited = update(
+            State(state.clone()),
+            bob_dev,
+            HeaderMap::new(),
+            Path(owned.clone()),
+            Json(SkillBody {
+                name: Some("renamed by a stranger".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(edited), StatusCode::NOT_FOUND);
+        assert_eq!(
+            state.db.skill(&owned).unwrap().unwrap().name,
+            "deploy-the-relay",
+            "another user's skill is unchanged"
+        );
+
+        // The owner still reads and edits it.
+        assert_eq!(
+            status(
+                get(
+                    State(state.clone()),
+                    alice_dev.clone(),
+                    HeaderMap::new(),
+                    Path(owned.clone())
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        let own = update(
+            State(state.clone()),
+            alice_dev,
+            HeaderMap::new(),
+            Path(owned.clone()),
+            Json(SkillBody {
+                name: Some("Deploy the relay".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(own), StatusCode::OK);
+        assert_eq!(
+            state.db.skill(&owned).unwrap().unwrap().name,
+            "Deploy the relay"
+        );
     }
 
     /// The honest limit of a fix with no schema change: `skills` has no owner column, so a

@@ -2738,6 +2738,25 @@ impl Db {
         })
     }
 
+    /// The helpers belonging to one user. A local device is a paired device, so its owner is
+    /// `devices.user_id`; a `local_devices` row whose device id is not in `devices` has no owner
+    /// and belongs to nobody (#1952). [`Self::local_devices`] stays for the admin token.
+    pub fn local_devices_of_user(&self, user_id: &str) -> Result<Vec<LocalDevice>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM local_devices l JOIN devices d ON d.id = l.device_id
+                 WHERE d.user_id = ?1 ORDER BY l.first_seen",
+                Self::LOCAL_COLS
+                    .split(", ")
+                    .map(|col| format!("l.{col}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))?;
+            let rows = st.query_map(params![user_id], Self::row_to_local)?;
+            rows.collect()
+        })
+    }
+
     pub fn local_device(&self, device_id: &str) -> Result<Option<LocalDevice>> {
         self.with(|c| {
             c.query_row(

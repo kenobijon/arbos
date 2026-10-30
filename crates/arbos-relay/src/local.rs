@@ -215,9 +215,15 @@ pub async fn exec(
     Ok(Json(serde_json::to_value(result).map_err(internal)?).into_response())
 }
 
-/// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices` tool).
-pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
-    let devices = state.db.local_devices().map_err(internal)?;
+/// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices`
+/// tool). Each caller sees their own helpers only: a local device is a paired device, so its
+/// owner is `devices.user_id`, and a box asks on behalf of the user it serves. The admin token has
+/// no user and keeps the whole list (#1952).
+pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let devices = match principal.user_id() {
+        Some(caller) => state.db.local_devices_of_user(caller).map_err(internal)?,
+        None => state.db.local_devices().map_err(internal)?,
+    };
     let online = state.local_conns.lock().await;
     let items: Vec<LocalDeviceDto> = devices
         .into_iter()
@@ -367,6 +373,56 @@ mod tests {
             .unwrap()
             .map(|(_, revoked)| revoked)
             .expect("device row")
+    }
+
+    /// #1952: `list` ignored its principal entirely and returned every user's helpers — each
+    /// one's hostname, operating system and home directory path — to any device token. Each
+    /// caller now sees their own; a box sees the helpers of the user it serves, which is what
+    /// the `local_devices` tool is for; the admin token keeps the whole list.
+    #[tokio::test]
+    async fn list_shows_each_caller_only_their_own_helpers() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let hers = device_of(&state, &alice, true);
+        let his = device_of(&state, &bob, true);
+
+        let ids = |r: ApiResult| -> Vec<String> {
+            let body = r.expect("ok").into_body();
+            let bytes =
+                futures::executor::block_on(axum::body::to_bytes(body, usize::MAX)).expect("body");
+            serde_json::from_slice::<LocalDevicesDto>(&bytes)
+                .expect("dto")
+                .items
+                .into_iter()
+                .map(|d| d.device_id)
+                .collect()
+        };
+
+        assert_eq!(
+            ids(list(State(state.clone()), alice_dev).await),
+            vec![hers.clone()],
+            "Alice sees her own helper and not Bob's"
+        );
+        assert_eq!(
+            ids(list(State(state.clone()), bob_dev).await),
+            vec![his.clone()]
+        );
+
+        // Alice's box asks on her behalf and gets the same answer.
+        assert_eq!(
+            ids(list(
+                State(state.clone()),
+                Principal::Box {
+                    user_id: alice.clone()
+                }
+            )
+            .await),
+            vec![hers.clone()]
+        );
+
+        let all = ids(list(State(state.clone()), Principal::Admin).await);
+        assert_eq!(all.len(), 2, "the admin token still sees both: {all:?}");
     }
 
     /// #1952: `patch` refused boxes and nothing else, so any signed-in device could turn
