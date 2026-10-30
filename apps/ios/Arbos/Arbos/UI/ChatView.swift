@@ -170,10 +170,6 @@ struct ChatSession: View {
     /// Newest rows dropped below the viewport while reading history; 0 when the
     /// window is the tail of the transcript.
     @State private var windowSkipEnd = 0
-    /// When `settleOnRevealed` repeats its `scrollTo`: just after the 0.35 s hop lands,
-    /// and once more. Short on purpose — a correction must not reach the reader's own
-    /// scroll, and `settleToBottom` corrects the tail the same way.
-    static let revealSettleDelays: [Double] = [0.4, 0.7]
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -864,16 +860,21 @@ struct ChatSession: View {
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
+                        // Inside a search result the row owns the tap: the reveal is what the
+                        // reader asked for, so the chip and the spoiler stand down while a
+                        // keyword filters the list (`ChatSearchClose.rowOwnsInnerTap`). A link
+                        // out to the web below is deliberately left alone.
+                        let rowOwnsIt = ChatSearchClose.rowOwnsInnerTap(resultRow: searchHitsActive)
                         // A tap on a hidden `||spoiler||` (`arbos://spoiler/<key>`) shows it for
                         // this viewer; nothing leaves the device.
                         if let key = SpoilerState.key(from: url) {
-                            SpoilerState.shared.toggle(key)
+                            if !rowOwnsIt { SpoilerState.shared.toggle(key) }
                             return .handled
                         }
                         guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
                         // A chip is a profile target like the sender name beside it: open,
                         // dismiss on the same subject, swap for someone else (`ProfileToggle`).
-                        model.toggleProfile(target)
+                        if !rowOwnsIt { model.toggleProfile(target) }
                         return .handled
                     })
             }
@@ -2357,34 +2358,18 @@ struct ChatSession: View {
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
-        // Before the hops, so they can tell this reveal from the next one.
-        highlightedMessage = messageId
         if includeInWindow(messageId: messageId) {
             // The original was outside the window: let the grown VStack lay out first.
-            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId) }
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+            }
         } else {
-            settleOnRevealed(target.id, messageId: messageId)
+            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
         }
+        highlightedMessage = messageId
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
-        }
-    }
-
-    /// One animated hop to the revealed row, then two corrections once the rows have real
-    /// heights. The rows between the top of the window and the target are lazy, so the
-    /// first `scrollTo` resolves `.center` against estimated heights; the taller real ones
-    /// then push the target out of the viewport. Measured on a 420-row fixture group
-    /// (#2404): a tap on a search result left the transcript about 30 messages short of the
-    /// message it was given, with that message not even realized. The repeats stand down as
-    /// soon as another reveal claims the highlight.
-    private func settleOnRevealed(_ rowId: String, messageId: Id) {
-        withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(rowId, anchor: .center) }
-        for delay in Self.revealSettleDelays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard highlightedMessage == messageId else { return }
-                scroller?.scrollTo(rowId, anchor: .center)
-            }
         }
     }
 
@@ -3756,7 +3741,8 @@ extension ChatSession {
                     isMessage: reply,
                     mentions: mentions)
                 .equatable()
-                // Search result rows take a tap (simultaneous, so links and chips still work).
+                // Search result rows take a tap (simultaneous, so a link still reaches the
+                // system; `searchHit` above stands the inner routes down for the same rows).
                 .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
                     openSearchResult(row.messageId)
                 })
@@ -4150,7 +4136,10 @@ private struct ComposerField: View {
 
 /// A tap on a Search-in-chat result row ([feedback iphone-search-close-2026-10-28]). Only
 /// mounted while a keyword filters the list, so the long-chat transcript carries no extra
-/// recognizer at rest; simultaneous, so a link or mention chip inside the bubble still wins.
+/// recognizer at rest; simultaneous, so a link inside the bubble still reaches the system.
+/// The inner routes that would cover the message rather than leave the app stand down for
+/// as long as this is mounted (`ChatSearchClose.rowOwnsInnerTap`) — the gesture itself is
+/// unchanged, and with no keyword every one of them behaves as it always has.
 private struct SearchResultTap: ViewModifier {
     let active: Bool
     let action: () -> Void

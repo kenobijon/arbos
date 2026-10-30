@@ -14,13 +14,15 @@ import XCTest
 /// nothing about what anybody can see. What is frontmost has to be established first; only
 /// then does a frame mean anything.
 ///
-/// The two cases below are one experiment. `SearchResultTap` is a `simultaneousGesture`, by
-/// design, so that a link or a mention chip inside a bubble still wins — but the sender's
-/// avatar and the name inside the bubble are `Button`s too (`sender-avatar`, `bubble-name`,
-/// both calling `toggleProfile`). If that is why a profile page appears, then a result tap
-/// clear of both buttons must leave the reader in the chat, and a result tap on the avatar
-/// must not. Both cases assert the same thing, because staying in the chat is correct for
-/// both; which one fails says where the touch is going.
+/// The first three cases began as one experiment and are now the guard. `SearchResultTap` is a
+/// `simultaneousGesture`, by design, so that a link inside a bubble still reaches the system —
+/// but the sender's avatar and the name inside the bubble are `Button`s too (`sender-avatar`,
+/// `bubble-name`, both calling `toggleProfile`), and they fired alongside the row. Run split,
+/// a tap clear of both buttons passed and a tap on the avatar failed, which is what named the
+/// cause; the page that opened was an agent's, so nothing about it was person-specific. All
+/// three assert the same thing, because staying in the chat is correct wherever inside a
+/// result the touch lands (`ChatSearchClose.rowOwnsInnerTap`). The fourth is the other half of
+/// that rule: with nothing filtering, the same avatar must still open the page.
 final class ChatSearchResultJumpUITests: XCTestCase {
     private let appear: TimeInterval = 150
     private let settle: TimeInterval = 20
@@ -33,7 +35,7 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func openLongLaunchWeekSearch() -> XCUIApplication {
+    private func launchLongLaunchWeek() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = [
             "ARBOS_FIXTURE": "1",
@@ -43,6 +45,12 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         app.launch()
         let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: appear), "the chat header's search disc is on screen")
+        return app
+    }
+
+    private func openLongLaunchWeekSearch() -> XCUIApplication {
+        let app = launchLongLaunchWeek()
+        let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
         // Let the push settle (a tap during the slide lands on the home list on a loaded Mac).
         let field = app.textFields["chat-search-field"]
         for _ in 0..<4 where !field.exists {
@@ -102,10 +110,20 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         return []
     }
 
-    /// Whether a person's profile pane is covering the chat. Existence is the test, not
-    /// hittability: the pane is what sits in front, so its own elements are the frontmost ones.
+    /// Whether a profile pane is covering the chat. Existence is the test, not hittability:
+    /// the pane is what sits in front, so its own elements are the frontmost ones.
+    ///
+    /// A diagnosis, not the verdict. `profile-*` comes from a person pane's hero pill
+    /// (`PanePillButton`), and an **agent**'s page has none of them — its own pills live in a
+    /// section far down Details and overwrite the identifier. So this returning false does
+    /// not mean the chat is in front, which is exactly how the measured run behaved: the
+    /// avatar case failed on `headerHittable` with this marker still false, on an agent's
+    /// page. Whether the chat is frontmost is `headerHittable`'s job; this only names the
+    /// thing in front when it can.
     private func profilePaneIsUp(_ app: XCUIApplication) -> Bool {
-        app.descendants(matching: .any)["profile-message"].firstMatch.exists
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "profile-"))
+            .firstMatch.exists
             || app.staticTexts["Block user"].exists
     }
 
@@ -174,26 +192,45 @@ final class ChatSearchResultJumpUITests: XCTestCase {
                       + "outside \(Int(middleHalf.minY))…\(Int(middleHalf.maxY)) — \(o.detail)")
     }
 
+    /// Type the keyword and hand back a result row that is wholly on screen, has stopped
+    /// moving, and has `child` realized inside it to aim at.
+    private func settledResult(_ app: XCUIApplication, screen: CGRect,
+                               showing child: String) -> (id: String, frame: CGRect)? {
+        let field = app.textFields["chat-search-field"]
+        field.tap()
+        field.typeText(Self.keyword)
+        sleep(2)
+        let results = bubbles(app, screen: screen)
+        guard let chosen = settledResults(app, screen: screen)
+            .first(where: { inRow(app, $0.id, child).exists }) else {
+            XCTFail("no result row is wholly on screen, still, and showing \(child) "
+                    + "(results: \(describe(results)))")
+            return nil
+        }
+        return chosen
+    }
+
+    /// Tap, wait for the bar to go, then wait past the reveal's animation so everything after
+    /// this reads where the transcript came to rest rather than where it was passing through.
+    private func tapAndSettle(_ app: XCUIApplication, at point: CGPoint) {
+        tap(app, at: point)
+        let field = app.textFields["chat-search-field"]
+        let deadline = Date().addingTimeInterval(settle)
+        while field.exists, Date() < deadline { usleep(150_000) }
+        sleep(3)
+    }
+
     /// What a reader does: type a keyword and tap a result at once, with the keyboard still up.
     /// The touch lands in the bubble's bottom padding — inside the row, clear of the sender's
     /// avatar and of the name, and clear of the text, so no `Button` inside the bubble is under
     /// it. The bar goes, the reader stays in the chat, and the transcript comes to rest on the
-    /// message that was tapped.
+    /// message that was tapped. This is the case that passed before the fix: nothing under the
+    /// touch but the row, so nothing fired alongside the reveal.
     func testAResultTapClearOfTheAvatarAndNameRevealsTheMessageInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
-        let field = app.textFields["chat-search-field"]
-
-        field.tap()
-        field.typeText(Self.keyword)
-        sleep(2)
+        guard let chosen = settledResult(app, screen: screen, showing: "bubble-name") else { return }
         XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
-        let results = bubbles(app, screen: screen)
-        let settled = settledResults(app, screen: screen)
-        guard let chosen = settled.first(where: { inRow(app, $0.id, "bubble-name").exists }) else {
-            return XCTFail("no result row is wholly on screen, still, and showing a sender name "
-                           + "(results: \(describe(results)))")
-        }
         let name = inRow(app, chosen.id, "bubble-name").frame
         let avatar = inRow(app, chosen.id, "sender-avatar")
         // `Theme.bubbleVPad` is 11, so the bottom few points of the bubble are its own padding:
@@ -207,45 +244,71 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         }
         shot(app, "1-results-keyboard-up")
 
-        tap(app, at: point)
-        let deadline = Date().addingTimeInterval(settle)
-        while field.exists, Date() < deadline { usleep(150_000) }
-        // Past the reveal's own settle hops, so the rest of this reads where it came to rest.
-        sleep(3)
+        tapAndSettle(app, at: point)
         shot(app, "2-after-a-tap-clear-of-both-buttons")
 
         assertLandedInChat(outcome(app, tapped: chosen.id, point: point, screen: screen))
     }
 
-    /// The same tap, on the sender's avatar inside the result row. Staying in the chat is
-    /// correct here too: the row owns this gesture while a keyword filters the list, and a
-    /// reader aiming at a result has not asked to leave the conversation. If this is the case
-    /// that fails while the one above passes, the profile page comes from the `Button`s inside
-    /// the bubble firing alongside the row's `simultaneousGesture`.
+    /// The same tap, on the sender's avatar inside the result row — the case that failed, and
+    /// the one the fix is for. Staying in the chat is correct here too: while a keyword filters
+    /// the list the row owns the tap, and a reader aiming at a result has not asked to leave
+    /// the conversation. What it used to do was reveal the message *and* push the sender's page
+    /// over it, because the avatar is a `Button` firing alongside the row's `simultaneousGesture`.
     func testAResultTapOnTheSenderAvatarAlsoStaysInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
-        let field = app.textFields["chat-search-field"]
-
-        field.tap()
-        field.typeText(Self.keyword)
-        sleep(2)
-        let results = bubbles(app, screen: screen)
-        let settled = settledResults(app, screen: screen)
-        guard let chosen = settled.first(where: { inRow(app, $0.id, "sender-avatar").exists }) else {
-            return XCTFail("no result row is wholly on screen, still, and showing a sender avatar "
-                           + "(results: \(describe(results)))")
-        }
+        guard let chosen = settledResult(app, screen: screen, showing: "sender-avatar") else { return }
         let avatar = inRow(app, chosen.id, "sender-avatar").frame
         let point = CGPoint(x: avatar.midX, y: avatar.midY)
         shot(app, "1-results-keyboard-up")
 
-        tap(app, at: point)
-        let deadline = Date().addingTimeInterval(settle)
-        while field.exists, Date() < deadline { usleep(150_000) }
-        sleep(3)
+        tapAndSettle(app, at: point)
         shot(app, "2-after-a-tap-on-the-sender-avatar")
 
         assertLandedInChat(outcome(app, tapped: chosen.id, point: point, screen: screen))
+    }
+
+    /// And on the name inside the bubble, the other `Button` on the same profile target. It is
+    /// its own case because it is the one the tester reached by accident on a short message,
+    /// where the name takes up most of the bubble.
+    func testAResultTapOnTheNameInTheBubbleAlsoStaysInTheChat() {
+        let app = openLongLaunchWeekSearch()
+        let screen = app.windows.firstMatch.frame
+        guard let chosen = settledResult(app, screen: screen, showing: "bubble-name") else { return }
+        let name = inRow(app, chosen.id, "bubble-name").frame
+        let point = CGPoint(x: name.midX, y: name.midY)
+        shot(app, "1-results-keyboard-up")
+
+        tapAndSettle(app, at: point)
+        shot(app, "2-after-a-tap-on-the-name-in-the-bubble")
+
+        assertLandedInChat(outcome(app, tapped: chosen.id, point: point, screen: screen))
+    }
+
+    /// The suppression is scoped to the filter, and this says so from the outside: with no
+    /// keyword, the same avatar in the same chat still opens the sender's page. A reader who is
+    /// only reading must not notice this fix at all.
+    func testWithNoFilterTheSameAvatarStillOpensTheSendersPage() {
+        let app = launchLongLaunchWeek()
+        let screen = app.windows.firstMatch.frame
+        let resting = bubbles(app, screen: screen)
+        guard let chosen = settledResults(app, screen: screen)
+            .first(where: { inRow(app, $0.id, "sender-avatar").exists }) else {
+            return XCTFail("no bubble is wholly on screen, still, and showing a sender avatar "
+                           + "(rows: \(describe(resting)))")
+        }
+        let avatar = inRow(app, chosen.id, "sender-avatar").frame
+        shot(app, "1-chat-at-rest-nothing-filtering")
+
+        tap(app, at: CGPoint(x: avatar.midX, y: avatar.midY))
+        sleep(3)
+        shot(app, "2-after-a-tap-on-the-avatar-with-nothing-filtering")
+
+        let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
+        XCTAssertFalse(header.isHittable,
+                       "with nothing filtering, a tap on the avatar opens the sender's page over "
+                       + "the chat as it always has — profile pane marker seen: "
+                       + "\(profilePaneIsUp(app)); tapped \(chosen.id) avatar at \(avatar)")
     }
 }
