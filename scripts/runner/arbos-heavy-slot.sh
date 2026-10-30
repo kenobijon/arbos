@@ -16,12 +16,19 @@
 # Call it from a rig in this shape, not as a bare `slot=$(… acquire …)`. The bare form makes the acquire a child
 # that outlives a killed rig (30 Oct: an orphaned pin1547-ios waiter sat in the queue 31 min for a dead owner):
 #
+#   flag=""      # a plain string, not an array (the gate Mac's /bin/bash is 3.2)
+#   usage=$(/usr/local/bin/arbos-heavy-slot.sh 2>&1 || true)
+#   case "$usage" in *--wait-max*) flag="--wait-max 30" ;; esac
 #   out=$(mktemp)
-#   /usr/local/bin/arbos-heavy-slot.sh acquire <rig> --pid $$ >"$out" & acq=$!
+#   /usr/local/bin/arbos-heavy-slot.sh acquire <rig> --pid $$ $flag >"$out" & acq=$!
 #   trap 'kill $acq 2>/dev/null; rm -f "$out"; exit 143' INT TERM
-#   wait $acq; rc=$?; trap - INT TERM
+#   rc=0; wait $acq || rc=$?; trap - INT TERM     # `|| rc=$?`, so `set -e` does not end the rig before the cleanup
 #   slot=$(cat "$out"); rm -f "$out"
 #   [ "$rc" -eq 0 ] || exit "$rc"     # 75: refused or not granted. Stop; do not run the heavy step anyway.
+#
+# Probe for a flag by capturing the usage text, as above. `… 2>&1 | grep -q -- --wait-max` is always false
+# under `set -o pipefail`: the usage path exits 2 and the pipeline takes that status, so the caller quietly
+# takes the slow path on every version.
 #
 # The guard is not the safety net: kill -9 runs no trap. The acquire itself gives up within one poll (10 s,
 # 2 s under --wait-max) of its --pid owner dying, whatever the signal, so a bare-form orphan is short-lived; the
