@@ -2077,6 +2077,7 @@ struct ChatSession: View {
             }
             .defaultScrollAnchor(.bottom)
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
+            .modifier(TranscriptBottomInsetProbe())
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
@@ -3896,6 +3897,37 @@ private struct ChatBarIndicatorMargin: ViewModifier {
 
     func body(content: Content) -> some View {
         content.contentMargins(.bottom, bar.value, for: .scrollIndicators)
+    }
+}
+
+/// UI-test hook, DEBUG builds only: the transcript scroll view's bottom content inset, as the
+/// value of an invisible element `transcript-bottom-inset`. The chat bar must never move it
+/// (`ChatBarHeight`). The failure that rule prevents — a LazyVStack dropping every visible row
+/// when that inset grows — shows on devices and not in the simulator, so tests assert the inset.
+private struct TranscriptBottomInsetProbe: ViewModifier {
+    #if DEBUG
+    @State private var inset: CGFloat = -1
+    #endif
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        if #available(iOS 18, *) {
+            content
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentInsets.bottom } action: { _, new in inset = new }
+                .overlay(alignment: .topLeading) {
+                    Color.clear.frame(width: 1, height: 1)
+                        .allowsHitTesting(false)
+                        .accessibilityElement()
+                        .accessibilityLabel("Transcript bottom inset")
+                        .accessibilityIdentifier("transcript-bottom-inset")
+                        .accessibilityValue(String(Int(inset.rounded())))
+                }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }
 
