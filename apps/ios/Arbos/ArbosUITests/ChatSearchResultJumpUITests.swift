@@ -13,6 +13,14 @@ import XCTest
 /// plausible frames, from behind a pushed navigation destination, so a coordinate read says
 /// nothing about what anybody can see. What is frontmost has to be established first; only
 /// then does a frame mean anything.
+///
+/// The two cases below are one experiment. `SearchResultTap` is a `simultaneousGesture`, by
+/// design, so that a link or a mention chip inside a bubble still wins — but the sender's
+/// avatar and the name inside the bubble are `Button`s too (`sender-avatar`, `bubble-name`,
+/// both calling `toggleProfile`). If that is why a profile page appears, then a result tap
+/// clear of both buttons must leave the reader in the chat, and a result tap on the avatar
+/// must not. Both cases assert the same thing, because staying in the chat is correct for
+/// both; which one fails says where the touch is going.
 final class ChatSearchResultJumpUITests: XCTestCase {
     private let appear: TimeInterval = 150
     private let settle: TimeInterval = 20
@@ -73,25 +81,25 @@ final class ChatSearchResultJumpUITests: XCTestCase {
             .joined(separator: ", ")
     }
 
-    /// A result that is **wholly** on screen and has held still across two reads.
+    /// Results that are **wholly** on screen and have held the same frame across two reads.
     ///
     /// Both halves are load-bearing. A row that merely overlaps the screen can have its centre
     /// above the top edge, and `tap()` then has to resolve the touch somewhere other than the
     /// point it was given. And the filtered list is still settling for a moment after the last
     /// keystroke, so a frame read even a few hundred milliseconds early describes where the row
     /// *was*. Either one puts the touch on a different row than the test believes it tapped.
-    private func settledResult(_ app: XCUIApplication, screen: CGRect) -> (id: String, frame: CGRect)? {
+    private func settledResults(_ app: XCUIApplication, screen: CGRect) -> [(id: String, frame: CGRect)] {
         var previous: [String: CGRect] = [:]
         for _ in 0..<12 {
             let now = bubbles(app, screen: screen)
-            let whole = now.filter { screen.contains($0.frame) && $0.frame.height > 0 }
-            if let held = whole.first(where: { previous[$0.id] == $0.frame }) {
-                return (id: held.id, frame: held.frame)
-            }
+            let held = now
+                .filter { screen.contains($0.frame) && $0.frame.height > 0 && previous[$0.id] == $0.frame }
+                .map { (id: $0.id, frame: $0.frame) }
+            if !held.isEmpty { return held }
             previous = Dictionary(now.map { ($0.id, $0.frame) }, uniquingKeysWith: { first, _ in first })
             usleep(400_000)
         }
-        return nil
+        return []
     }
 
     /// Whether a person's profile pane is covering the chat. Existence is the test, not
@@ -101,59 +109,143 @@ final class ChatSearchResultJumpUITests: XCTestCase {
             || app.staticTexts["Block user"].exists
     }
 
+    private func row(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        app.descendants(matching: .any)[id]
+    }
+
+    private func inRow(_ app: XCUIApplication, _ id: String, _ child: String) -> XCUIElement {
+        row(app, id).descendants(matching: .any)[child].firstMatch
+    }
+
+    private func tap(_ app: XCUIApplication, at point: CGPoint) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            .withOffset(CGVector(dx: point.x, dy: point.y))
+            .tap()
+    }
+
+    /// Everything the assertions need, read once so they all describe the same moment, with
+    /// `detail` carrying the geometry into every failure message.
+    private struct TapOutcome {
+        let profileUp: Bool
+        let headerHittable: Bool
+        let barOpen: Bool
+        let revealedExists: Bool
+        let revealedFrame: CGRect
+        let screen: CGRect
+        let detail: String
+    }
+
+    private func outcome(_ app: XCUIApplication, tapped: String, point: CGPoint,
+                         screen: CGRect) -> TapOutcome {
+        let revealed = row(app, tapped)
+        let exists = revealed.exists
+        let after = bubbles(app, screen: screen).filter { $0.onScreen }
+        return TapOutcome(
+            profileUp: profilePaneIsUp(app),
+            headerHittable: app.descendants(matching: .any)["chat-search-button"].firstMatch.isHittable,
+            barOpen: app.textFields["chat-search-field"].exists,
+            revealedExists: exists,
+            revealedFrame: exists ? revealed.frame : .null,
+            screen: screen,
+            detail: "tapped \(tapped) at \(point); screen \(screen); "
+                + "message realized: \(exists)\(exists ? " at \(revealed.frame)" : ""); "
+                + "transcript holding [\(describe(after))]")
+    }
+
+    /// Everything a result tap owes the reader, once it is established that the reader is still
+    /// in the chat to be owed it.
+    private func assertLandedInChat(_ o: TapOutcome) {
+        XCTAssertFalse(o.profileUp,
+                       "the tap leaves the reader in the chat, but a profile pane is in front of "
+                       + "it — see the screenshot — \(o.detail)")
+        XCTAssertTrue(o.headerHittable,
+                      "the chat header is reachable, so the chat is frontmost — \(o.detail)")
+        XCTAssertFalse(o.barOpen, "a result tap closes the bar — \(o.detail)")
+        XCTAssertTrue(o.revealedExists,
+                      "the tapped message is realized in the transcript — \(o.detail)")
+        XCTAssertTrue(o.screen.contains(o.revealedFrame),
+                      "the tapped message is wholly on screen at \(o.revealedFrame) — \(o.detail)")
+        // The middle half rules out a landing jammed under the composer or up behind the header
+        // without naming either one's height. The keyword's hits are mid-history, so nothing
+        // here is clamped against an end of the transcript.
+        let middleHalf = o.screen.insetBy(dx: 0, dy: o.screen.height / 4)
+        XCTAssertTrue(middleHalf.contains(CGPoint(x: o.revealedFrame.midX, y: o.revealedFrame.midY)),
+                      "…and centred, not against an edge: middle \(o.revealedFrame.midY) is "
+                      + "outside \(Int(middleHalf.minY))…\(Int(middleHalf.maxY)) — \(o.detail)")
+    }
+
     /// What a reader does: type a keyword and tap a result at once, with the keyboard still up.
-    /// The bar goes, the filter with it, the reader stays in the chat, and the transcript comes
-    /// to rest on the message that was tapped.
-    func testTappingAResultKeepsTheReaderInTheChatOnThatMessage() {
+    /// The touch lands in the bubble's bottom padding — inside the row, clear of the sender's
+    /// avatar and of the name, and clear of the text, so no `Button` inside the bubble is under
+    /// it. The bar goes, the reader stays in the chat, and the transcript comes to rest on the
+    /// message that was tapped.
+    func testAResultTapClearOfTheAvatarAndNameRevealsTheMessageInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
         let field = app.textFields["chat-search-field"]
-        let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
 
         field.tap()
         field.typeText(Self.keyword)
         sleep(2)
         XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
         let results = bubbles(app, screen: screen)
-        guard let chosen = settledResult(app, screen: screen) else {
-            return XCTFail("no result row is wholly on screen and still (results: \(describe(results)))")
+        let settled = settledResults(app, screen: screen)
+        guard let chosen = settled.first(where: { inRow(app, $0.id, "bubble-name").exists }) else {
+            return XCTFail("no result row is wholly on screen, still, and showing a sender name "
+                           + "(results: \(describe(results)))")
+        }
+        let name = inRow(app, chosen.id, "bubble-name").frame
+        let avatar = inRow(app, chosen.id, "sender-avatar")
+        // `Theme.bubbleVPad` is 11, so the bottom few points of the bubble are its own padding:
+        // inside the row's hit area and below the last line of text. The name column's midX
+        // keeps it inside the bubble horizontally, away from the avatar lane.
+        let point = CGPoint(x: name.midX, y: chosen.frame.maxY - 5)
+        XCTAssertFalse(name.contains(point), "the touch is clear of the name button at \(name)")
+        if avatar.exists {
+            XCTAssertFalse(avatar.frame.contains(point),
+                           "the touch is clear of the avatar button at \(avatar.frame)")
         }
         shot(app, "1-results-keyboard-up")
 
-        app.descendants(matching: .any)[chosen.id].tap()
-
+        tap(app, at: point)
         let deadline = Date().addingTimeInterval(settle)
         while field.exists, Date() < deadline { usleep(150_000) }
         // Past the reveal's own settle hops, so the rest of this reads where it came to rest.
         sleep(3)
-        shot(app, "2-after-the-result-tap")
+        shot(app, "2-after-a-tap-clear-of-both-buttons")
 
-        let revealed = app.descendants(matching: .any)[chosen.id]
-        let after = bubbles(app, screen: screen)
-        let where_ = "tapped \(chosen.id) at \(chosen.frame); screen \(screen); "
-            + "transcript holding [\(describe(after.filter(\.onScreen)))]"
+        assertLandedInChat(outcome(app, tapped: chosen.id, point: point, screen: screen))
+    }
 
-        // 1. The chat is still the screen. Until this holds, every frame below is a frame from
-        //    behind whatever is in front, and the attached screenshot says who.
-        XCTAssertFalse(profilePaneIsUp(app),
-                       "the tap leaves the reader in the chat, but a profile pane is in front "
-                       + "of it — see the 2-after-the-result-tap screenshot — \(where_)")
-        XCTAssertTrue(header.isHittable,
-                      "the chat header is reachable, so the chat is frontmost — \(where_)")
+    /// The same tap, on the sender's avatar inside the result row. Staying in the chat is
+    /// correct here too: the row owns this gesture while a keyword filters the list, and a
+    /// reader aiming at a result has not asked to leave the conversation. If this is the case
+    /// that fails while the one above passes, the profile page comes from the `Button`s inside
+    /// the bubble firing alongside the row's `simultaneousGesture`.
+    func testAResultTapOnTheSenderAvatarAlsoStaysInTheChat() {
+        let app = openLongLaunchWeekSearch()
+        let screen = app.windows.firstMatch.frame
+        let field = app.textFields["chat-search-field"]
 
-        // 2. The bar and its filter are gone.
-        XCTAssertFalse(field.exists, "a result tap closes the bar — \(where_)")
+        field.tap()
+        field.typeText(Self.keyword)
+        sleep(2)
+        let results = bubbles(app, screen: screen)
+        let settled = settledResults(app, screen: screen)
+        guard let chosen = settled.first(where: { inRow(app, $0.id, "sender-avatar").exists }) else {
+            return XCTFail("no result row is wholly on screen, still, and showing a sender avatar "
+                           + "(results: \(describe(results)))")
+        }
+        let avatar = inRow(app, chosen.id, "sender-avatar").frame
+        let point = CGPoint(x: avatar.midX, y: avatar.midY)
+        shot(app, "1-results-keyboard-up")
 
-        // 3. The message that was tapped is built, on screen, and near the middle. The middle
-        //    half rules out a landing jammed under the composer or up behind the header without
-        //    naming either one's height; the keyword's hits are mid-history, so nothing here is
-        //    clamped against an end of the transcript.
-        XCTAssertTrue(revealed.exists, "the tapped message is realized in the transcript — \(where_)")
-        XCTAssertTrue(screen.contains(revealed.frame),
-                      "the tapped message is wholly on screen at \(revealed.frame) — \(where_)")
-        let middleHalf = screen.insetBy(dx: 0, dy: screen.height / 4)
-        XCTAssertTrue(middleHalf.contains(CGPoint(x: revealed.frame.midX, y: revealed.frame.midY)),
-                      "…and centred, not against an edge: middle \(revealed.frame.midY) is outside "
-                      + "\(Int(middleHalf.minY))…\(Int(middleHalf.maxY)) — \(where_)")
+        tap(app, at: point)
+        let deadline = Date().addingTimeInterval(settle)
+        while field.exists, Date() < deadline { usleep(150_000) }
+        sleep(3)
+        shot(app, "2-after-a-tap-on-the-sender-avatar")
+
+        assertLandedInChat(outcome(app, tapped: chosen.id, point: point, screen: screen))
     }
 }
