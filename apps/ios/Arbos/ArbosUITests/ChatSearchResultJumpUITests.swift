@@ -105,6 +105,13 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         XCTAssertTrue(revealed.exists, "the tapped message is realized in the transcript — \(where_)")
         XCTAssertTrue(screen.contains(revealed.frame),
                       "the tapped message is wholly on screen at \(revealed.frame) — \(where_)")
-        XCTAssertTrue(revealed.isHittable, "…and visible, not behind the chrome — \(where_)")
+        // The reveal centres the row, so its middle belongs in the middle half of the screen:
+        // that rules out a landing jammed under the composer or up behind the header without
+        // naming either one's height. The keyword's hits are mid-history, so nothing here is
+        // clamped against an end of the transcript.
+        let middleHalf = screen.insetBy(dx: 0, dy: screen.height / 4)
+        XCTAssertTrue(middleHalf.contains(CGPoint(x: revealed.frame.midX, y: revealed.frame.midY)),
+                      "…and centred, not against an edge: middle \(revealed.frame.midY) is outside "
+                      + "\(Int(middleHalf.minY))…\(Int(middleHalf.maxY)) — \(where_)")
     }
 }
