@@ -136,6 +136,9 @@ struct ChatSession: View {
     /// field, not this screen. Read it as `composerDraft.text` for actions; the
     /// field observes it for display.
     @State private var composerDraft = ComposerDraft()
+    /// The chat bar's height, observed only by the transcript's tail and the layers over the
+    /// bar's top edge, so the bar growing or shrinking does not re-render this screen.
+    @State private var chatBarHeight = ChatBarHeight()
     /// `AppModel.addressesEveryone(text)` for the current draft, updated only when it flips.
     @State private var draftAddressesEveryone = false
     @State private var rows: [Row] = []
@@ -946,31 +949,44 @@ struct ChatSession: View {
         // The fade the chat bar floats on ([feedback iphone-composer-see-through-2026-10-28]):
         // rows scrolling under the bar dim from `Theme.composerFade` above it toward the
         // bottom edge and stay readable through and between the glass pills — no band. The
-        // canvas ends at the bar's top edge (the bar is a safe-area inset), so the layer sits
-        // right on it, moves with the keyboard, is over the transcript and under the pill and
-        // the chevron below — not in the bar's layer.
-        .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.chat) }
+        // bar's measured height is added to the layer's bottom inset, so it starts at the
+        // bar's top edge, moves with the keyboard, is over the transcript and under the pill
+        // and the chevron below — not in the bar's layer.
+        .overlay(alignment: .bottom) {
+            ChatBarHeightReader(bar: chatBarHeight) { bar in
+                BottomBarFadeView(spec: BottomBarFade.chat).safeAreaPadding(.bottom, bar)
+            }
+        }
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
-                newMessagesPill
-                    .padding(.bottom, 10)
-                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                ChatBarHeightReader(bar: chatBarHeight) { bar in
+                    newMessagesPill.padding(.bottom, bar + 10)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
         // Trailing-only overlay so the hit target is just the disc (not a full-width
         // bar). UIKit tap inside the disc still works while the transcript decelerates.
         .overlay(alignment: .bottomTrailing) {
             if newBelowCount == 0, awayFromBottom {
-                scrollToBottomButton
-                    .padding(.trailing, composerSideInset)
-                    .padding(.bottom, 10)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                ChatBarHeightReader(bar: chatBarHeight) { bar in
+                    scrollToBottomButton
+                        .padding(.trailing, composerSideInset)
+                        .padding(.bottom, bar + 10)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         .environment(\.composerInset, composerSideInset)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // The bar floats over the transcript instead of being a bottom safe-area inset: every
+        // change of its height (the chat opening, the status row, a reply or edit banner,
+        // attachment chips, a growing field, the error note) would otherwise resize the
+        // transcript's inset, and a LazyVStack can drop every visible row when that inset
+        // grows — the chat stays blank until the next scroll. The height reaches the rows only
+        // as the transcript's tail spacer (`ChatBarHeight`).
+        .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
                 // The composer's note (Jacob 2026-10-26): the last send / attachment / recording
                 // failure in this chat, directly above the composer at its width; Try again
@@ -1015,6 +1031,7 @@ struct ChatSession: View {
             .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
             .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chatBarHeight.update($0) }
             // No background of its own: the bar floats on `BottomBarFadeView` in the canvas.
             // A drag that starts here selects text or slides the mic — never "back".
             .backSwipeComposerBar()
@@ -1955,9 +1972,10 @@ struct ChatSession: View {
                 // reading history) was laid out on every change of the row set — a 1.6–2.7 s
                 // frame at open, a 0.3–0.45 s stall per 30-row grow step, 1 s on jump-to-bottom
                 // (iphone-scroll-perf, Time Profiler: 7.7 of 10.3 busy main-thread seconds in
-                // AttributeGraph layout). An older iOS let a LazyVStack drop its visible rows
-                // when the composer's safe-area inset grew; the rig's keyboard / typing pass
-                // on iOS 27 is what guards that now.
+                // AttributeGraph layout). A LazyVStack can drop every visible row when the
+                // scroll view's bottom inset grows (seen on device, not in the simulator), so
+                // the chat bar is not an inset: it floats over this list and its height is
+                // the tail spacer (`ChatBarHeight`).
                 LazyVStack(alignment: .leading, spacing: 0) {
                     // iOS 17 window growth: report this top edge's position in the scroll space.
                     Color.clear.frame(height: 0)
@@ -2027,10 +2045,10 @@ struct ChatSession: View {
                     transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
-                    // Clears the `Theme.composerFade` above the chat bar, so the last
-                    // row at rest is never under the fade; the status row rises into it
-                    // (`Theme.presenceLift`).
-                    Color.clear.frame(height: Theme.transcriptTail).id("bottom")
+                    // Clears the chat bar and the `Theme.composerFade` above it, so the
+                    // last row at rest is never under the fade; the status row rises into
+                    // it (`Theme.presenceLift`).
+                    TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
                 // The transcript's horizontal swipes (left: time peek, right: back) live on the
@@ -2058,6 +2076,7 @@ struct ChatSession: View {
                 .contentShape(Rectangle())
             }
             .defaultScrollAnchor(.bottom)
+            .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
@@ -3840,6 +3859,43 @@ private struct NoBottomScrollEdgeEffect: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// The chat bar's measured height (`sessionCanvas`). Held by the screen as plain state and
+/// observed only by the views below, so a change re-renders them and not the transcript.
+@MainActor
+final class ChatBarHeight: ObservableObject {
+    /// Seeded with the plain composer bar, so the first layout already clears it.
+    @Published private(set) var value: CGFloat = Theme.chatBarTopPad + Theme.composerHeight + Theme.composerBottom
+
+    func update(_ height: CGFloat) {
+        if abs(height - value) > 0.5 { value = height }
+    }
+}
+
+private struct ChatBarHeightReader<Content: View>: View {
+    @ObservedObject var bar: ChatBarHeight
+    @ViewBuilder var content: (CGFloat) -> Content
+
+    var body: some View { content(bar.value) }
+}
+
+/// The transcript's last child: the bar plus the fade above it.
+private struct TranscriptTail: View {
+    @ObservedObject var bar: ChatBarHeight
+
+    var body: some View {
+        Color.clear.frame(height: Theme.transcriptTail + bar.value)
+    }
+}
+
+/// Keeps the scroll indicator above the bar now that the bar is not a safe-area inset.
+private struct ChatBarIndicatorMargin: ViewModifier {
+    @ObservedObject var bar: ChatBarHeight
+
+    func body(content: Content) -> some View {
+        content.contentMargins(.bottom, bar.value, for: .scrollIndicators)
     }
 }
 
