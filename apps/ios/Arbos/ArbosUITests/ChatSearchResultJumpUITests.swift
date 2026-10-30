@@ -59,6 +59,58 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         return swipes
     }
 
+    /// The topmost result row that is on screen, the one a reader taps without scrolling.
+    /// While a keyword filters the list every `bubble:long-…` in the tree is a hit.
+    private func topVisibleHit(_ app: XCUIApplication) -> XCUIElement? {
+        let hits = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:long-"))
+        for i in 0..<hits.count {
+            let e = hits.element(boundBy: i)
+            if e.exists, e.isHittable { return e }
+        }
+        return nil
+    }
+
+    /// What a reader actually does: type a keyword and tap a result at once, with the
+    /// keyboard still up. Closing the bar drops the keyboard, so the transcript's bottom
+    /// inset shrinks by the keyboard's height while the reveal is scrolling.
+    func testTappingAResultWithTheKeyboardUpLandsOnThatMessage() {
+        let app = openLongLaunchWeekSearch()
+        let field = app.textFields["chat-search-field"]
+        field.tap()
+        field.typeText(Self.keyword)
+        XCTAssertTrue(app.descendants(matching: .any)[Self.oldHitId].waitForExistence(timeout: settle),
+                      "the filter is on: the oldest hit joined the result list")
+        XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
+
+        guard let hit = topVisibleHit(app) else {
+            return XCTFail("no result row is on screen to tap")
+        }
+        let id = hit.identifier
+        let screen = app.windows.firstMatch.frame
+        let before = hit.frame
+        shot(app, "1-hit-on-screen-keyboard-up")
+
+        hit.tap()
+
+        let deadline = Date().addingTimeInterval(settle)
+        while field.exists, Date() < deadline { usleep(150_000) }
+        XCTAssertFalse(field.exists, "a result tap closes the bar")
+
+        let revealed = app.descendants(matching: .any)[id]
+        _ = revealed.waitForExistence(timeout: settle)
+        sleep(2)
+        shot(app, "2-after-the-tap-keyboard-up")
+
+        let after = revealed.exists ? revealed.frame : .null
+        XCTAssertTrue(revealed.exists,
+                      "\(id) is still in the transcript after the reveal (screen \(screen), was at \(before))")
+        XCTAssertTrue(screen.contains(after),
+                      "\(id) is wholly on screen after the reveal — it landed at \(after), screen \(screen) "
+                      + "(it was at \(before) in the results)")
+        XCTAssertTrue(revealed.isHittable, "…and visible (landed at \(after), screen \(screen))")
+    }
+
     func testTappingAnOldResultLandsTheTranscriptOnThatMessage() {
         let app = openLongLaunchWeekSearch()
         let field = app.textFields["chat-search-field"]
