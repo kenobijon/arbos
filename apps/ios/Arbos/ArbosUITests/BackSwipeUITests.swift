@@ -49,6 +49,22 @@ final class BackSwipeUITests: XCTestCase {
         return visible.last!
     }
 
+    /// The lowest fully visible bubble with room to swipe `distance` right from 44 pt inside its
+    /// leading edge without the finger leaving the screen, and that start point. A short own
+    /// bubble sits against the trailing edge: from its centre the finger hits the screen edge
+    /// before the swipe is long enough to pop (`BackSwipe.fullScreenPops`, > 70 pt).
+    private func bubbleWithRoomToSwipeRight(_ app: XCUIApplication, distance: CGFloat,
+                                            file: StaticString = #filePath, line: UInt = #line) -> XCUICoordinate {
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles", file: file, line: line)
+        let window = app.windows.firstMatch.frame
+        let roomy = bubbles.allElementsBoundByIndex.filter {
+            $0.isHittable && $0.frame.maxY < window.maxY - 120 && $0.frame.minY > 120 && $0.frame.minX + 44 + distance < window.maxX - 8
+        }
+        XCTAssertFalse(roomy.isEmpty, "a bubble has room for a \(Int(distance)) pt swipe", file: file, line: line)
+        return roomy.last!.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 44, dy: 0))
+    }
+
     /// Tap the composer so the keyboard is up (what every sent message leaves behind).
     private func raiseKeyboard(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let field = app.descendants(matching: .any)["composer-field"]
@@ -222,8 +238,7 @@ final class BackSwipeUITests: XCTestCase {
         let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
         let back = chatBack(app, "fx-comms-main")
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
-        let bubble = lastBubble(app)
-        let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let start = bubbleWithRoomToSwipeRight(app, distance: 180)
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 180, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
         assertGone(back)
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
@@ -265,8 +280,11 @@ final class BackSwipeUITests: XCTestCase {
         let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
         XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
         let window = app.windows.firstMatch.frame
-        // A bubble in the lower half of the transcript, clear of the composer.
-        let onBubble = bubbles.allElementsBoundByIndex.last { $0.frame.minY > window.midY && $0.frame.maxY < window.maxY - 200 }
+        // A bubble whose middle is mid-screen: room for the 200 pt drag up, clear of the composer.
+        // Not "wholly in the lower half": tall rows rarely fit there, and layout changes move them.
+        let onBubble = bubbles.allElementsBoundByIndex.last {
+            $0.isHittable && $0.frame.midY > window.height * 0.3 && $0.frame.midY < window.height * 0.7
+        }
         XCTAssertNotNil(onBubble, "a bubble is on screen")
         let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)), withVelocity: .slow, thenHoldForDuration: 0.1)
