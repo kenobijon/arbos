@@ -687,7 +687,9 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
     let attachments = row.as_ref().map(|row| attachments_of(row, chat));
     // The announce body is a push preview: the sending client cuts it to a fixed length
     // (iPhone 140 chars, Mac 600) for the alert, so it is not the message. The row is.
-    let text = row.as_ref().map_or_else(|| ev.text.clone(), |row| row.text());
+    let text = row
+        .as_ref()
+        .map_or_else(|| ev.text.clone(), |row| row.text());
     if attachments.is_none() {
         tracing::warn!(
             chat = %chat.chat_id,
