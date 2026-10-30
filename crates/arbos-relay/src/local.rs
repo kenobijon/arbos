@@ -245,6 +245,26 @@ pub struct PatchBody {
     pub allow_reads: Option<bool>,
 }
 
+/// Does this principal own the helper on `device_id`? A local device is a paired device, so its
+/// owner is `devices.user_id`. Another user's device — and an unknown one — answer 404 rather
+/// than 403, as `api::revoke_device` does, so neither route is an enumeration oracle (#1952).
+/// The admin token has no user and stays unscoped.
+fn owns_device(
+    state: &AppState,
+    principal: &Principal,
+    device_id: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let Some(caller) = principal.user_id() else {
+        return Ok(true);
+    };
+    let owner = state.db.device_user(device_id).map_err(internal)?;
+    Ok(owner.as_deref() == Some(caller))
+}
+
+fn no_such_device() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such local device".to_owned())
+}
+
 /// `PATCH /local/devices/{id}` (device token): the per-device "allow reads without asking" toggle.
 pub async fn patch(
     State(state): State<AppState>,
@@ -257,6 +277,9 @@ pub async fn patch(
             StatusCode::FORBIDDEN,
             "box tokens cannot change device settings".into(),
         ));
+    }
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
     }
     if let Some(allow) = b.allow_reads {
         let ok = state
@@ -287,6 +310,11 @@ pub async fn delete(
             "box tokens cannot remove devices".into(),
         ));
     }
+    // The revocation below reaches any paired device id, helper row or not, so the ownership
+    // check has to come first — #1950's check belongs on this route as well.
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
     let ok = state.db.local_device_delete(&device_id).map_err(internal)?;
     let _ = state.db.revoke_device(&device_id);
     if let Some(conn) = state.local_conns.lock().await.remove(&device_id) {
@@ -298,4 +326,109 @@ pub async fn delete(
         StatusCode::NOT_FOUND
     }
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn status(r: ApiResult) -> StatusCode {
+        match r {
+            Ok(resp) => resp.status(),
+            Err((s, _)) => s,
+        }
+    }
+
+    /// One paired device of `user`, optionally running the arbos-local helper.
+    fn device_of(state: &AppState, user: &str, helper: bool) -> String {
+        let id = ulid();
+        state
+            .db
+            .insert_device(&id, "mac", &ulid(), user, "github")
+            .expect("device");
+        if helper {
+            state
+                .db
+                .local_device_hello(&id, "a-mac", "macos", "/Users/a")
+                .expect("hello");
+        }
+        id
+    }
+
+    fn revoked(state: &AppState, device: &str) -> bool {
+        state
+            .db
+            .device_status(device)
+            .unwrap()
+            .map(|(_, revoked)| revoked)
+            .expect("device row")
+    }
+
+    /// #1952: `patch` refused boxes and nothing else, so any signed-in device could turn
+    /// `allow_reads` on for another user's helper — consent to read that person's files
+    /// without asking, given to a stranger.
+    #[tokio::test]
+    async fn patch_refuses_another_users_local_device() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let helper = device_of(&state, &alice, true);
+        let body = || {
+            Json(PatchBody {
+                allow_reads: Some(true),
+            })
+        };
+
+        let foreign = patch(State(state.clone()), bob_dev, Path(helper.clone()), body()).await;
+        assert_eq!(status(foreign), StatusCode::NOT_FOUND);
+        assert!(
+            !state.db.local_device(&helper).unwrap().unwrap().allow_reads,
+            "the toggle stays off for a stranger"
+        );
+
+        let own = patch(
+            State(state.clone()),
+            alice_dev,
+            Path(helper.clone()),
+            body(),
+        )
+        .await;
+        assert_eq!(status(own), StatusCode::OK);
+        assert!(state.db.local_device(&helper).unwrap().unwrap().allow_reads);
+    }
+
+    /// #1952: `delete` refused boxes and nothing else. It also called `revoke_device`
+    /// unconditionally on a plain paired-device id, so it reached #1950's "revoke anyone's
+    /// sessions" through a second route — even for an id with no helper row at all.
+    #[tokio::test]
+    async fn delete_refuses_another_users_local_device_and_keeps_its_sessions() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let helper = device_of(&state, &alice, true);
+        let plain = device_of(&state, &alice, false);
+
+        let foreign = delete(State(state.clone()), bob_dev.clone(), Path(helper.clone())).await;
+        assert_eq!(status(foreign), StatusCode::NOT_FOUND);
+        assert!(state.db.local_device(&helper).unwrap().is_some());
+        assert!(
+            !revoked(&state, &helper),
+            "Alice keeps her helper's sessions"
+        );
+
+        // A device with no helper row is not a way to revoke that device either (#1950).
+        let no_row = delete(State(state.clone()), bob_dev, Path(plain.clone())).await;
+        assert_eq!(status(no_row), StatusCode::NOT_FOUND);
+        assert!(!revoked(&state, &plain), "Alice keeps her other sessions");
+
+        let own = delete(State(state.clone()), alice_dev, Path(helper.clone())).await;
+        assert_eq!(status(own), StatusCode::NO_CONTENT);
+        assert!(state.db.local_device(&helper).unwrap().is_none());
+        assert!(revoked(&state, &helper), "her own removal still revokes it");
+    }
 }
