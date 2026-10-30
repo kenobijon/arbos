@@ -21,6 +21,7 @@ SLOTS_DIR="${ARBOS_HEAVY_SLOTS_DIR:-/Users/Shared/arbos-run/heavy-slots}"
 MAX_SLOTS="${ARBOS_HEAVY_MAX_SLOTS:-1}"
 PRIORITY_EXTRA="${ARBOS_HEAVY_PRIORITY_EXTRA:-1}"
 WAIT_MAX_S="${ARBOS_HEAVY_WAIT_MAX_S:-2700}"
+UNCAPPED_LOAD_MAX="${ARBOS_HEAVY_UNCAPPED_LOAD_MAX:-48}"  # rigs do not go uncapped while the 1-min load is above this (8 cores × 6)
 # Gate halves (names gate-*, the loop's merge path) must not starve behind rigs (2026-10-27 02:58: the pool
 # batch's iOS half waited behind rigs mp-ios and clearread, then a rig held the only slot for over an hour).
 # Two rules: (1) while a gate half is queued, non-gate acquirers wait (GATE_QUEUE marks the queue; a gate
@@ -241,7 +242,8 @@ acquire() {
     fair=0; fair_after=$RIG_FAIR_AFTER_GATES
     if ! is_gate_name "$name" && ! is_exempt_name "$name"; then
       (( $(rigs_waiting) >= RIG_CROWD_N )) && fair_after=1
-      (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= fair_after )) && fair=1
+      # An empty counter file made `(( >= fair_after ))` a syntax error (chart rig, 05:3x Oct 28): read it into a variable.
+      local grants; grants=$(cat "$GATE_GRANTS" 2>/dev/null); grants=${grants//[^0-9]/}; (( ${grants:-0} >= fair_after )) && fair=1
     fi
     # Grant order: a due release first (it preempts gate halves and rigs); then gate halves; rigs when no gate half
     # waits or on their fair turn. A release not yet due still yields to a queued gate half, as before.
@@ -266,9 +268,9 @@ acquire() {
           (( waited_note )) && echo "$(ts) heavy-slot: $name got a slot after $(( $(date +%s) - t0 )) s" >&2
           [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
           if is_gate_name "$name"; then
-            echo $(( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) + 1 )) > "$GATE_GRANTS" 2>/dev/null || true
+            { local g; g=$(cat "$GATE_GRANTS" 2>/dev/null); g=${g//[^0-9]/}; echo $(( ${g:-0} + 1 )) > "$GATE_GRANTS"; chmod 666 "$GATE_GRANTS"; } 2>/dev/null || true
           elif ! is_exempt_name "$name"; then
-            echo 0 > "$GATE_GRANTS" 2>/dev/null || true
+            { echo 0 > "$GATE_GRANTS"; chmod 666 "$GATE_GRANTS"; } 2>/dev/null || true  # world-writable: rigs run as ec2-user and arbosgui
             if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s, after $fair_after gate grant(s), $(rigs_waiting) rig(s) waiting) ahead of a queued gate half" >&2; fi
             if is_p0_rig "$name"; then echo "$P0_RIG_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name is a P0 rig — first in the rig queue, lease ${P0_RIG_LEASE_S}s" >&2; fi
           fi
@@ -278,18 +280,28 @@ acquire() {
     fi
     # A P0 rig is not requeued either: the requeue copy only puts the same series at the back of the runner
     # (and the author's script runs on uncapped when the acquire exits 75 — cmd-outside-agents-02, 04:07).
-    if [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
-      local again orig; orig="${runner_cmd%.running}"; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${orig%.sh}").sh"
-      if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
-        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
-        logger -t arbos-heavy-slot "rig $name gave up its slot wait after ${RIG_RUNNER_WAIT_MAX_S}s; requeued $(basename "$again")" 2>/dev/null || true
-      else
-        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up (could not requeue $runner_cmd)" >&2
-      fi
-      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
-      echo none; return 75
+    # No uncapped fallthrough while the box is already overloaded (19:45 Oct 28: three rigs fell through on top
+    # of a release build and a gate half, 3 booted sims, load 975 on 8 cores): a waiter past its budget keeps
+    # waiting while the 1-min load is above UNCAPPED_LOAD_MAX; gate halves and releases are not rigs and keep
+    # their own fallthrough (they are what the rigs would starve).
+    local load1; load1=$(sysctl -n vm.loadavg 2>/dev/null | awk "{print int(\$2)}"); load1=${load1:-0}
+    local overloaded=0; (( load1 > UNCAPPED_LOAD_MAX )) && ! is_exempt_name "$name" && overloaded=1
+    if (( overloaded )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )) && (( ($(date +%s) - t0) % 600 < 15 )); then
+      echo "$(ts) heavy-slot: $name past its wait budget but load is $load1 (> $UNCAPPED_LOAD_MAX); not going uncapped, still waiting" >&2
     fi
-    if (( $(date +%s) - t0 >= WAIT_MAX_S )); then
+    if (( ! overloaded )) && [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
+      # No requeue copies any more (17:2x Oct 28): a rig script that ignores exit 75 kept running while its copy
+      # waited, requeued itself again, and so on — 32 cmd-zz~requeued-*-pd-before copies and duplicate runs took
+      # the Mac to load 558. Under the shared runner a rig that waited RIG_RUNNER_WAIT_MAX_S proceeds with a real
+      # uncapped slot instead (same as WAIT_MAX_S), so the work runs once and stays visible to the reclaim rules.
+      slot="$SLOTS_DIR/$(date +%s)-$$-uncapped-${name//\//_}.slot"
+      if mkdir "$slot" 2>/dev/null; then echo "$owner" > "$slot/pid"; echo "uncapped-$name" > "$slot/name"; date -u +%s > "$slot/since"; else slot=none; fi
+      echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); proceeding uncapped (slot $(basename "$slot"))" >&2
+      logger -t arbos-heavy-slot "rig $name proceeds uncapped after ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner" 2>/dev/null || true
+      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+      echo "$slot"; return 0
+    fi
+    if (( ! overloaded )) && (( $(date +%s) - t0 >= WAIT_MAX_S )); then
       # A real slot over the cap, so the boot guard and the reclaim rules still see this job.
       slot="$SLOTS_DIR/$(date +%s)-$$-uncapped-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then echo "$owner" > "$slot/pid"; echo "uncapped-$name" > "$slot/name"; date -u +%s > "$slot/since"; else slot=none; fi
