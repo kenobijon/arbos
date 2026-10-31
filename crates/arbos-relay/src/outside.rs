@@ -2985,6 +2985,53 @@ mod tests {
         );
     }
 
+    /// Every app announces a message with `mentions` left out — it resolves them into the row it
+    /// writes and posts the id and the text alone — so the documented `mentions` on
+    /// `message.received` was empty for every message a person ever sent from an app, while a
+    /// refetch of the same row a second later listed them. The relay resolves them on the
+    /// announce now, from the roster it already has.
+    ///
+    /// `@here` is everyone in the chat including its agents (Jacob, 2026-10-24), so the event
+    /// names this agent and it wakes — which is what an agentd agent in the same room already
+    /// does from the row, and the reason that row carries the expansion at all. The wake still
+    /// comes from an explicit mention; no new rule decides it.
+    #[tokio::test]
+    async fn an_app_announce_resolves_the_mentions_it_left_out() {
+        let (state, pid, g, other) = outside_group(7281);
+        let msg_id = ulid();
+        let me = Sender::user(&state, &other);
+        crate::notify::announce_with(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "@here standup in five",
+            None,
+            // What the announce carries today: nothing.
+            &[],
+        )
+        .await;
+
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        let mentions = events[0].1["message"]["mentions"].clone();
+        let owner = state.db.project(&pid).unwrap().unwrap().user_id;
+        let named: Vec<&str> = mentions
+            .as_array()
+            .expect("mentions")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(named.len(), 2, "{mentions}");
+        assert!(named.contains(&format!("user:{owner}").as_str()));
+        assert!(named.contains(&format!("agent:{pid}").as_str()));
+        assert!(
+            !named.contains(&format!("user:{other}").as_str()),
+            "the writer is not mentioned by their own @here"
+        );
+        assert_eq!(events[0].1["wake"], true, "an explicit collective mention");
+    }
+
     /// The other half of #2413: a group message that tags nobody must still not wake the agent.
     /// Deciding from the row must not turn the wake rule into "always".
     #[tokio::test]
