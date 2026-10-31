@@ -49,20 +49,48 @@ final class BackSwipeUITests: XCTestCase {
         return visible.last!
     }
 
+    /// Wait until the transcript has stopped moving. A chat opens by scrolling to its newest
+    /// message, and the first bubble exists before that scroll ends: a frame read mid-scroll
+    /// says where a row was, not where the finger will land.
+    private func settleTranscript(_ app: XCUIApplication, timeout: TimeInterval = 8) {
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        var previous = CGRect.null
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let current = bubbles.firstMatch.frame
+            if !current.isEmpty, current == previous { return }
+            previous = current
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
     /// The lowest fully visible bubble with room to swipe `distance` right from 44 pt inside its
-    /// leading edge without the finger leaving the screen, and that start point. A short own
-    /// bubble sits against the trailing edge: from its centre the finger hits the screen edge
-    /// before the swipe is long enough to pop (`BackSwipe.fullScreenPops`, > 70 pt).
+    /// leading edge without the finger leaving the screen, and that start point.
+    ///
+    /// XCUITest clamps a drag destination to the screen silently: 180 pt asked for from the
+    /// centre of a short own bubble against the trailing edge reaches the app as about 45 pt,
+    /// under the 70 pt `BackSwipe.fullScreenPops` needs, and the test then blames the app
+    /// ("the chat did not go back") for a gesture it never delivered.
     private func bubbleWithRoomToSwipeRight(_ app: XCUIApplication, distance: CGFloat,
                                             file: StaticString = #filePath, line: UInt = #line) -> XCUICoordinate {
         let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
         XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles", file: file, line: line)
+        settleTranscript(app)
         let window = app.windows.firstMatch.frame
+        let inset: CGFloat = 44
+        let rightLimit = window.maxX - 8
+        // The start is clear of the 24 pt edge zone (the system pop's) and the end of the screen's edge.
         let roomy = bubbles.allElementsBoundByIndex.filter {
-            $0.isHittable && $0.frame.maxY < window.maxY - 120 && $0.frame.minY > 120 && $0.frame.minX + 44 + distance < window.maxX - 8
+            $0.isHittable && $0.frame.maxY < window.maxY - 120 && $0.frame.minY > 120
+                && $0.frame.minX + inset > 32 && $0.frame.minX + inset + distance < rightLimit
         }
-        XCTAssertFalse(roomy.isEmpty, "a bubble has room for a \(Int(distance)) pt swipe", file: file, line: line)
-        return roomy.last!.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 44, dy: 0))
+        XCTAssertFalse(roomy.isEmpty, "a bubble has room for a \(Int(distance)) pt swipe in a \(Int(window.width)) pt screen",
+                       file: file, line: line)
+        let bubble = roomy.last!
+        XCTAssertLessThan(bubble.frame.minX + inset + distance, rightLimit,
+                          "the \(Int(distance)) pt drag would be clamped at the screen edge and never reach the app",
+                          file: file, line: line)
+        return bubble.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: inset, dy: 0))
     }
 
     /// Tap the composer so the keyboard is up (what every sent message leaves behind).
@@ -279,13 +307,16 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
         let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
         XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
+        settleTranscript(app)
         let window = app.windows.firstMatch.frame
         // A bubble whose middle is mid-screen: room for the 200 pt drag up, clear of the composer.
         // Not "wholly in the lower half": tall rows rarely fit there, and layout changes move them.
         let onBubble = bubbles.allElementsBoundByIndex.last {
             $0.isHittable && $0.frame.midY > window.height * 0.3 && $0.frame.midY < window.height * 0.7
         }
-        XCTAssertNotNil(onBubble, "a bubble is on screen")
+        XCTAssertNotNil(onBubble, "a bubble sits in the middle of the screen to drag on")
+        // A drag clamped at the top edge would be shorter than asked, and this test would pass on less of a drag.
+        XCTAssertGreaterThan(onBubble!.frame.midY - 200, window.minY + 8, "the 200 pt drag up stays on screen")
         let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)), withVelocity: .slow, thenHoldForDuration: 0.1)
         sleep(1)
