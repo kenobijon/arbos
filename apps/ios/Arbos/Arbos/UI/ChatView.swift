@@ -179,19 +179,25 @@ struct ChatSession: View {
     /// Three over 0.45 s: long enough for the lazy rows around the landing to be measured,
     /// short enough to be over before the reader could have started scrolling themselves.
     ///
-    /// The count was four and was cut on measurement. Across all sixteen laddered reveals
-    /// recorded for #2404 — three runtimes' worth of runs, including a ten-iteration
-    /// repetition that varied nothing but timing — the first correction moved the scroll in
-    /// twelve, the second in one, and the third and fourth in none. Read the trace with
-    /// care when checking this: the `settle` line is printed *before* its own `scrollTo`, so
-    /// the offset logged at `step=N` is what correction N achieved, not N+1.
+    /// The count was four and was cut on measurement. Across all twenty-six laddered
+    /// reveals recorded for #2404 — several runtimes, including two ten-iteration
+    /// repetitions that varied nothing but timing — the first correction moved the scroll
+    /// in eighteen, the second in three, and the third in none. The fourth never moved it
+    /// in the ten reveals where it could be measured, which is what it was cut on. Read
+    /// the trace with care when checking this: the `settle` line is printed *before* its
+    /// own `scrollTo`, so the offset logged at `step=N` is what correction N achieved, not
+    /// N+1.
     ///
     /// The rule the count follows: **keep the deepest pass ever measured to do work, plus
     /// one of margin.** The deepest real correction is the second, so the count is three.
     /// The margin is there because the costs are not symmetrical — a pass that never fires
     /// costs one no-op `scrollTo` against a layout that already agrees, while one pass too
-    /// few costs exactly the bug this corrects. Every one of the sixteen was a simulator on
-    /// one Mac; real devices, slower main threads and deeper transcripts are unmeasured.
+    /// few costs exactly the bug this corrects. Every one of the twenty-six was a simulator
+    /// on one Mac; real devices, slower main threads and deeper transcripts are unmeasured.
+    ///
+    /// The second pass is not a rarity kept out of caution. It did nothing in the first
+    /// sixteen reveals but one, and then moved the landing in two of the ten taken after
+    /// the count was cut — 7131 to 7368 and 7131 to 7591, both onto a correct landing.
     ///
     /// Cut this to two when measurements on hardware justify it, rather than re-deriving
     /// the argument.

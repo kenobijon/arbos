@@ -36,10 +36,14 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     private static let longRows = 420
     private static let keyword = "embargo"
     /// Clear space the aim point must have above it, below the search chrome, before this
-    /// will tap there. Both mis-taps measured in this lane aimed within a few points of
-    /// y 175 while all nine good taps aimed at y 181.7 or lower down the screen, and the
-    /// band's top edge is the one feature near that boundary. The frames do not prove the
-    /// chrome caused it — see `landing` — so this is cheap insurance, not the diagnosis.
+    /// will tap there.
+    ///
+    /// The band's top edge measures y167 on this fixture, and the chrome does not move with
+    /// the list, so every aim this suite has recorded can be scored against it. The one
+    /// mis-tap that was traced in full aimed at y174 — **7 points** of clearance, less than
+    /// half of any tap that worked. The nine good taps in that same run had 15 points at
+    /// worst and 122 at best. That is the whole of the evidence for this number, and 24 is
+    /// chosen to sit above the worst good tap rather than just above the bad one.
     private static let aimBandMargin: CGFloat = 24
 
     override func setUpWithError() throws {
@@ -221,17 +225,22 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// row that was really tapped, correctly and centred, while the assertion is still
     /// about the other one. That reads as the fix missing by tens of rows.
     ///
-    /// **The touch goes through the element, not through a screen coordinate.** The frames
-    /// of the one mis-tap measured here do not support the obvious explanations. The aimed
-    /// row was reported at y84…179 and the row that took the touch at y187…479 — an eight
-    /// point gap, with the aim at y174 sitting five points inside the target and thirteen
-    /// clear of the neighbour. The frame did not move between choosing and tapping, and a
-    /// passing iteration had almost the same geometry. So the reported frame was not where
-    /// the touch was routed, by at least thirteen points, and no arithmetic over frames
+    /// **The touch goes through the element, not through a screen coordinate.** Frames
+    /// alone did not explain the one mis-tap traced in full. The aimed row was reported at
+    /// y84…179 and the row that took the touch at y187…479 — an eight point gap, with the
+    /// aim at y174 sitting five points inside the target and thirteen clear of the
+    /// neighbour. The frame did not move between choosing and tapping, and a passing
+    /// iteration had almost the same geometry. So the reported frame was not where the
+    /// touch was routed, by at least thirteen points, and no arithmetic over the frames
     /// this test can read would have caught it. Addressing the element instead lets
     /// XCUITest resolve the row at the moment of the touch, which is the one resolution
     /// that cannot be stale. The normalized offset keeps the touch in the bubble's bottom
     /// padding, which is what the avatar and name clearance below is about.
+    ///
+    /// What the frames did show, once the band was logged, is that the mis-tap was also the
+    /// aim closest to the search chrome — see `aimBandMargin`. Both guards went in
+    /// together and the run that cleared ten iterations cannot say which of them mattered,
+    /// so neither is presented as the sole cure.
     ///
     /// The row the app actually revealed is still checked against the row aimed at. That
     /// assertion is the backstop, and it is what turned this from an app bug into a rig
