@@ -208,6 +208,10 @@ struct ChatSession: View {
     /// Outside it they are left alone — a chat scroll samples per frame, and a `print` on each
     /// one changes the thing being measured.
     @State private var traceOffsetsUntil = Date.distantPast
+    /// Rig (#2404): the last scroll offset seen, so a reveal can report where it started from.
+    /// A reference box and not `@State`: this is written on every scroll sample, and a state
+    /// write per sample would invalidate the view on every frame of every scroll.
+    @State private var scrollProbe = ScrollProbe()
     /// While a reveal's scroll animation is running (#2404). A grow prepends rows above the
     /// content; the scroll view's bottom anchor absorbs that for a reader sitting still, but
     /// an animation already in flight is driving towards an offset computed before the rows
@@ -456,7 +460,11 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
-        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) skipEnd=\(windowSkipEnd)")
+        // Where the result list was standing when the reader tapped. A reveal animates from
+        // wherever the scroll view already is, so this is the one number that says which
+        // reveal was asked for, and it is not recoverable afterwards.
+        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) "
+                    + "skipEnd=\(windowSkipEnd) offset=\(Self.offsetText(scrollProbe.last))")
         // The reveal lands inside a second; three covers the close, the relayout and the
         // scroll with room for a slow simulator.
         traceOffsetsUntil = Date().addingTimeInterval(3)
@@ -2175,6 +2183,7 @@ struct ChatSession: View {
                     model.loadOlderChannel(chatId)
                 }
             }, onSample: { old, new in
+                scrollProbe.last = new
                 guard Date() < traceOffsetsUntil else { return }
                 revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new)) "
                             + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
@@ -2429,7 +2438,8 @@ struct ChatSession: View {
                     "id=\(messageId) row=\(target.id) rows=\(rows.count) visible=\(visibleRows.count) "
                     + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
                     + "windowTop=\(windowedRows.first?.id ?? "-") windowBottom=\(windowedRows.last?.id ?? "-") "
-                    + "targetShown=\(windowedRows.contains { $0.id == target.id })")
+                    + "targetShown=\(windowedRows.contains { $0.id == target.id }) "
+                    + "offset=\(Self.offsetText(scrollProbe.last))")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
@@ -3864,6 +3874,12 @@ extension ChatSession {
             return true
         }
     }
+}
+
+/// Rig (#2404): the last scroll offset, held by reference so writing it per sample does not
+/// invalidate the transcript.
+private final class ScrollProbe {
+    var last: CGFloat = .infinity
 }
 
 /// Fires when the scroll view comes near its top (channel older page / grow window).

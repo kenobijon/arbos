@@ -7,16 +7,15 @@ import XCTest
 /// the frontmost check: the chat is in front, the bar has gone, nothing covers the message —
 /// the transcript has simply come to rest somewhere else.
 ///
-/// **The four cases are one experiment over two conditions.** Every case runs the identical
-/// procedure — same keyword, same nudges to bring the row into reach, same tap point in the
-/// bubble's bottom padding clear of every button — and varies two things only: which result
-/// is tapped (`long-408`, which rests short, against `long-412`, which lands, four rows apart
-/// in the same list, so whatever separates them is not the distance from the tail) and
-/// whether the near-top window grow is allowed to run inside the reveal.
+/// **The cases are one experiment and vary how far back through the results the reader
+/// scrolled before tapping.** Everything else is identical: same keyword, same tap point in
+/// the bubble's bottom padding clear of every button, same settle.
 ///
-/// Reading them as a block: if the grow is the mechanism, `long-408` fails with it allowed
-/// and lands with it held, and `long-412` lands either way. Any other pattern says the grow
-/// is not it, which is as much as this rig is for.
+/// That variable replaced an earlier one. The first run tapped two named rows four apart in
+/// the list and both landed, with byte-identical offset trajectories from the same starting
+/// offset of 8676 — because both were reachable without scrolling the list at all. A reveal
+/// animates from wherever the scroll view is standing, so a run that never moves it is one
+/// observation repeated, whatever row it taps.
 ///
 /// Order matters and `continueAfterFailure` is off so it holds: a coordinate read says nothing
 /// until it is established what is frontmost, because XCUITest reports a parent view's
@@ -112,21 +111,17 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
     }
 
-    /// Drag the result list, `older` to bring earlier hits down into view and `!older` to
-    /// pull later ones up out from behind the keyboard. Both target rows are the third and
-    /// second from the end of the hit list, so a one-way nudge would walk away from them.
-    /// With a keyword typed a scroll keeps the bar open (`ChatSearchClose.scrollCloses`), so
-    /// this changes which results are reachable and nothing else about the state under test.
-    private func nudge(_ app: XCUIApplication, band: CGRect, older: Bool) {
+    /// One drag back through the results, toward older hits — the reader scrolling the list.
+    /// The press is slow and short so it drags rather than flicks: a flick's deceleration
+    /// would leave the list somewhere this cannot name. With a keyword typed a scroll keeps
+    /// the bar open (`ChatSearchClose.scrollCloses`), so this moves where the list stands and
+    /// changes nothing else about the state under test.
+    private func nudge(_ app: XCUIApplication, band: CGRect) {
         let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-        let near = origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
-        let far = origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230))
-        if older {
-            near.press(forDuration: 0.1, thenDragTo: far)
-        } else {
-            far.press(forDuration: 0.1, thenDragTo: near)
-        }
-        sleep(2)
+        origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
+            .press(forDuration: 0.1,
+                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230)))
+        usleep(900_000)
     }
 
     private func tap(_ app: XCUIApplication, at point: CGPoint) {
@@ -135,65 +130,59 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             .tap()
     }
 
-    /// Bring `id` into reach and hand back the point to tap: the bubble's bottom padding.
-    /// `Theme.bubbleVPad` is 11, so the bottom few points are the bubble's own padding —
+    /// A still hit whose bottom padding is reachable, and the point to tap in it.
+    ///
+    /// Only the touch point has to be in the band. A tall bubble whose top is behind the
+    /// header is still perfectly tappable near its bottom, and requiring the whole row to be
+    /// reachable threw away `long-412` — a 292-point markdown bubble — eight nudges running.
+    ///
+    /// `Theme.bubbleVPad` is 11, so the bottom few points are the bubble's own padding:
     /// inside the row's hit area, below the last line of text, and clear of the sender's
-    /// avatar and of the name, neither of which must take this touch.
-    private func aim(_ app: XCUIApplication, screen: CGRect, at id: String) -> CGPoint? {
-        for _ in 0..<8 {
-            let band = reachable(app, screen: screen)
-            let bubble = row(app, id)
-            // Which way to drag: toward the row if it is realized but out of the band, and
-            // toward older hits when it is not in the tree at all.
-            var older = true
-            if bubble.exists, bubble.frame.height > 0 {
-                let frame = bubble.frame
-                let before = frame
-                usleep(400_000)
-                guard row(app, id).frame == before else { continue }
-                let name = inRow(app, id, "bubble-name")
-                let x = name.exists ? name.frame.midX : frame.midX
-                let point = CGPoint(x: x, y: frame.maxY - 5)
-                if band.contains(point), band.contains(CGPoint(x: x, y: frame.minY + 5)) {
-                    if name.exists {
-                        XCTAssertFalse(name.frame.contains(point),
-                                       "the touch is clear of the name button at \(name.frame)")
-                    }
-                    let avatar = inRow(app, id, "sender-avatar")
-                    if avatar.exists {
-                        XCTAssertFalse(avatar.frame.contains(point),
-                                       "the touch is clear of the avatar button at \(avatar.frame)")
-                    }
-                    return point
-                }
-                older = frame.minY < band.minY
-            }
-            nudge(app, band: band, older: older)
+    /// avatar and of the name, neither of which must take this touch. This branch is off
+    /// `main`, where nothing suppresses those buttons, so the clearance is asserted.
+    private func aimable(_ app: XCUIApplication, screen: CGRect) -> (id: String, point: CGPoint)? {
+        let band = reachable(app, screen: screen)
+        for (id, frame) in bubbles(app) {
+            let point = CGPoint(x: frame.midX, y: frame.maxY - 5)
+            guard band.contains(point), frame.height > 24 else { continue }
+            usleep(400_000)
+            let e = app.descendants(matching: .any)[id].firstMatch
+            guard e.exists, e.frame == frame else { continue }
+            let short = String(id.dropFirst("bubble:".count))
+            let name = inRow(app, short, "bubble-name")
+            if name.exists, name.frame.contains(point) { continue }
+            let avatar = inRow(app, short, "sender-avatar")
+            if avatar.exists, avatar.frame.contains(point) { continue }
+            return (short, point)
         }
         return nil
     }
 
-    /// Get as far as a touch aimed at `id`, or fail. Everything here is harness, not finding:
-    /// the app launches, the bar opens, the row comes into reach. Kept apart from the landing
-    /// so the symptom arm's expected-failure wrapper cannot swallow a broken rig — it did
-    /// exactly that once, reporting a run whose app died at launch as the symptom reproduced.
-    private func aimed(_ id: String, allowGrow: Bool) -> (app: XCUIApplication, screen: CGRect, point: CGPoint)? {
+    /// Open the bar, drag the result list `scrollUp` times toward older hits, then aim at
+    /// whichever hit is reachable there. Everything here is harness, not finding: kept apart
+    /// from the landing so the symptom arm's expected-failure wrapper cannot swallow a broken
+    /// rig — it did exactly that once, reporting a run whose app died at launch as a
+    /// reproduction.
+    private func aimed(scrollUp: Int, allowGrow: Bool)
+        -> (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)? {
         let app = openSearch(allowGrow: allowGrow)
         let screen = app.windows.firstMatch.frame
-        guard let point = aim(app, screen: screen, at: id) else {
-            XCTFail("could not bring \(id) into reach after eight nudges "
-                    + "(results: \(describe(bubbles(app))))")
-            return nil
+        for _ in 0..<scrollUp { nudge(app, band: reachable(app, screen: screen)) }
+        for _ in 0..<4 {
+            if let hit = aimable(app, screen: screen) { return (app, screen, hit.id, hit.point) }
+            nudge(app, band: reachable(app, screen: screen))
         }
-        return (app, screen, point)
+        XCTFail("no reachable hit after \(scrollUp) drags up the result list "
+                + "(results: \(describe(bubbles(app))))")
+        return nil
     }
 
     /// Tap the aimed point and say where the transcript came to rest. Identical for every
-    /// case but the row id and whether the near-top grow may run inside the reveal.
-    private func landing(_ id: String, allowGrow: Bool,
-                         _ aimed: (app: XCUIApplication, screen: CGRect, point: CGPoint)) {
-        let (app, screen, point) = aimed
-        let arm = "\(id)/\(allowGrow ? "grow-allowed" : "grow-held")"
+    /// case but how far up the result list it has scrolled and whether the near-top grow may
+    /// run inside the reveal.
+    private func landing(_ arm: String,
+                         _ aimed: (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)) {
+        let (app, screen, id, point) = aimed
         shot(app, "1-\(arm)-aimed")
         // The test runner's stdout lands in the result bundle's Staging tree, which survives
         // the import that never finishes. It is the only record of the pre-tap state on a
@@ -224,50 +213,43 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                       "…and centred, not against an edge — \(detail)")
     }
 
-    /// The whole case for an arm that is expected to land.
-    private func run(_ id: String, allowGrow: Bool) {
-        guard let a = aimed(id, allowGrow: allowGrow) else { return }
-        landing(id, allowGrow: allowGrow, a)
-    }
-
-    /// The row that rests short, with the near-top grow left as it is on `main`. Measured
-    /// twice before this test existed, once from behind a profile pane and once with the chat
-    /// frontmost, and both times the transcript came to rest on `long-375`…`long-383` with
-    /// `long-408` never realized.
-    ///
-    /// This case is the reproduction, so it is expected to fail, and the expectation is
-    /// recorded rather than asserted: the symptom is the thing under investigation and a
-    /// lane that has not yet proved it cannot also claim how reliably it fires. The log says
-    /// which way it went either way, and `strict: false` keeps the run's verdict about the
-    /// other three. It goes away with the rig flag once the mechanism is settled.
-    ///
-    /// Only the landing is inside the expectation. Getting the app up and the touch aimed is
-    /// outside it, so a rig that breaks goes red here instead of passing as a reproduction.
-    func testLong408WithTheGrowAllowedIsTheSymptom() {
-        guard let a = aimed("long-408", allowGrow: true) else { return }
+    /// A whole case, with the landing allowed to fail or not. `expectShort` marks an arm the
+    /// symptom is being hunted in: the landing is recorded rather than asserted, because a
+    /// lane that has not yet reproduced a thing cannot also claim how reliably it fires.
+    /// Launching and aiming stay outside the expectation, so a broken rig goes red there.
+    private func run(scrollUp: Int, allowGrow: Bool, expectShort: Bool = false) {
+        let arm = "up\(scrollUp)/\(allowGrow ? "grow-allowed" : "grow-held")"
+        guard let a = aimed(scrollUp: scrollUp, allowGrow: allowGrow) else { return }
+        guard expectShort else { return landing(arm, a) }
         continueAfterFailure = true
-        XCTExpectFailure("the near-top grow inside the reveal is the bug under test (#2404)",
-                         strict: false) {
-            landing("long-408", allowGrow: true, a)
-        }
+        XCTExpectFailure("hunting the short landing (#2404)", strict: false) { landing(arm, a) }
     }
 
-    /// The same row with the window held still for the length of the reveal. The one changed
-    /// condition between this and the case above, so a difference in the landing is the
-    /// grow's doing and nothing else's.
-    func testLong408WithTheGrowHeldRestsOnTheMessage() {
-        run("long-408", allowGrow: false)
+    /// The control: the reader opens the bar and taps a result without scrolling the list.
+    /// The transcript is already at its end, so the reveal animates down from the tail. Both
+    /// landings measured so far were this, and both were correct.
+    func testAResultTappedWithoutScrollingTheListLands() {
+        run(scrollUp: 0, allowGrow: true)
     }
 
-    /// The control row, four further down the same list, with the grow allowed: it lands.
-    /// Whatever separates the two rows, it is not the distance from the tail.
-    func testLong412WithTheGrowAllowedRestsOnTheMessage() {
-        run("long-412", allowGrow: true)
+    /// The reader scrolls back through the results before tapping one — the ordinary way of
+    /// hunting something that is not the most recent mention of it, and what #2404 describes.
+    /// The reveal then starts from wherever the result list was standing, which is the one
+    /// thing the first run could not vary: both of its cases began at the same offset, 8676,
+    /// and produced the same trajectory to the same landing. This arm moves that number.
+    func testAResultTappedAfterScrollingBackThroughTheResults() {
+        run(scrollUp: 14, allowGrow: true, expectShort: true)
     }
 
-    /// The control row with the hold on, so the hold is shown not to break a landing that
-    /// already worked.
-    func testLong412WithTheGrowHeldRestsOnTheMessage() {
-        run("long-412", allowGrow: false)
+    /// The same, again, because a landing that is right once says nothing about one that is
+    /// wrong sometimes. Two attempts is not a rate, but two is more than one.
+    func testAResultTappedAfterScrollingBackThroughTheResultsAgain() {
+        run(scrollUp: 14, allowGrow: true, expectShort: true)
+    }
+
+    /// The same scroll-back with the window held still for the length of the reveal. It is
+    /// only worth reading if an arm above went short.
+    func testAResultTappedAfterScrollingBackWithTheGrowHeld() {
+        run(scrollUp: 14, allowGrow: false, expectShort: true)
     }
 }
