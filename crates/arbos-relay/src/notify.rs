@@ -391,6 +391,31 @@ pub async fn announce(
     announce_with(state, chat, sender, message_id, text, None, &[]).await
 }
 
+/// `declared` plus whoever `text` names, resolved from the chat's roster
+/// ([`crate::people::resolve_mentions`]). A project chat has no people roster, so there is
+/// nothing to resolve against and the caller's list stands.
+fn union_resolved_mentions(
+    state: &AppState,
+    chat: &ChatRef,
+    sender_member: &str,
+    text: &str,
+    declared: &[String],
+) -> Vec<String> {
+    let mut out = declared.to_vec();
+    if chat.project_id.is_some() {
+        return out;
+    }
+    let Ok(cm) = crate::people::load_chat(state, &chat.chat_id) else {
+        return out;
+    };
+    for m in crate::people::resolve_mentions(state, &cm, text, sender_member) {
+        if !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    out
+}
+
 /// [`announce`] with an optional cross-chat reply reference (Reply in DM): the
 /// alert body says what it answers and each recipient's payload carries the
 /// address only when they can open the source chat.
@@ -418,12 +443,20 @@ pub async fn announce_with(
     if let Some(u) = sender.user_id.as_deref() {
         let _ = state.db.mark_chat_read(u, &chat.chat_id);
     }
-    // Outside agents in this chat get the message as an ASP event (#2140).
-    crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
     let member = match sender.kind {
         "agent" => format!("agent:{}", sender.id),
         _ => format!("user:{}", sender.id),
     };
+    // The announce is the writing client's account of its own message, and no app fills
+    // `mentions` in: each resolves them into the row it writes and then posts the message id
+    // and the text alone. The relay has the roster, so it resolves them here rather than
+    // depending on the announce being complete — the same lesson as #2406, where the body
+    // itself was only the client's push preview. The caller's list is kept and added to: a
+    // declared id the prose does not name (a chip, an attachment with nothing but a tag) must
+    // not be dropped.
+    let mentions = &union_resolved_mentions(state, chat, &member, text, mentions);
+    // Outside agents in this chat get the message as an ASP event (#2140).
+    crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
     state.matrix.message(
         state,
         &chat.chat_id,
@@ -2300,6 +2333,47 @@ mod eligibility_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// An app announces a message as `{message_id, text}` and nothing else: it resolves the
+    /// mentions into the row it writes and leaves them out of `…/notify`. So `@here` — everyone
+    /// in the chat, since Jacob's 2026-10-24 decision — reaches a `mentions`-only member only if
+    /// the relay reads it out of the prose. Before that scan knew the word, a message whose
+    /// whole point was to reach the room reached nobody on that level: no push, so no alert and
+    /// no badge, and nothing said about it to the sender. `@agents` is the other collective and
+    /// it names no person.
+    #[tokio::test]
+    async fn here_in_an_app_announce_reaches_a_mentions_only_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+        register(&state, &alice_dev, &alice);
+        let bob_tok = register(&state, &bob_dev, &bob);
+        let mut seen = 0;
+
+        assert_eq!(
+            set_level(&state, &bob_dev, &g, "mentions").await["notifications"],
+            "mentions"
+        );
+        // The announce an app actually sends: the text, and `mentions` left empty.
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "@here standup in five").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![bob_tok.clone()],
+            "@here is everyone in the chat, so it mentions Bob"
+        );
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "@agents take this one").await,
+            StatusCode::OK
+        );
+        assert!(
+            pushed_since(&state, &mut seen).await.is_empty(),
+            "@agents addresses the chat's agents, not Bob"
+        );
     }
 
     #[tokio::test]
