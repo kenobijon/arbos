@@ -96,14 +96,20 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
     }
 
-    /// Drag the result list down a little. With a keyword typed a scroll keeps the bar open
-    /// (`ChatSearchClose.scrollCloses`), so this changes which results are reachable and
-    /// nothing else about the state under test.
-    private func nudge(_ app: XCUIApplication, band: CGRect) {
+    /// Drag the result list, `older` to bring earlier hits down into view and `!older` to
+    /// pull later ones up out from behind the keyboard. Both target rows are the third and
+    /// second from the end of the hit list, so a one-way nudge would walk away from them.
+    /// With a keyword typed a scroll keeps the bar open (`ChatSearchClose.scrollCloses`), so
+    /// this changes which results are reachable and nothing else about the state under test.
+    private func nudge(_ app: XCUIApplication, band: CGRect, older: Bool) {
         let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-        origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
-            .press(forDuration: 0.1,
-                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230)))
+        let near = origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
+        let far = origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230))
+        if older {
+            near.press(forDuration: 0.1, thenDragTo: far)
+        } else {
+            far.press(forDuration: 0.1, thenDragTo: near)
+        }
         sleep(2)
     }
 
@@ -118,9 +124,12 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// inside the row's hit area, below the last line of text, and clear of the sender's
     /// avatar and of the name, neither of which must take this touch.
     private func aim(_ app: XCUIApplication, screen: CGRect, at id: String) -> CGPoint? {
-        for _ in 0..<6 {
+        for _ in 0..<8 {
             let band = reachable(app, screen: screen)
             let bubble = row(app, id)
+            // Which way to drag: toward the row if it is realized but out of the band, and
+            // toward older hits when it is not in the tree at all.
+            var older = true
             if bubble.exists, bubble.frame.height > 0 {
                 let frame = bubble.frame
                 let before = frame
@@ -141,8 +150,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                     }
                     return point
                 }
+                older = frame.minY < band.minY
             }
-            nudge(app, band: band)
+            nudge(app, band: band, older: older)
         }
         return nil
     }
@@ -152,10 +162,14 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         let app = openSearch()
         let screen = app.windows.firstMatch.frame
         guard let point = aim(app, screen: screen, at: id) else {
-            return XCTFail("could not bring \(id) into reach after six nudges "
+            return XCTFail("could not bring \(id) into reach after eight nudges "
                            + "(results: \(describe(bubbles(app))))")
         }
         shot(app, "1-\(id)-aimed")
+        // The test runner's stdout lands in the xcodebuild log, which arrives whatever the
+        // result bundle does. It is the only record of the pre-tap state on a green run, and
+        // the two cases are only comparable if that state matches.
+        print("[rig] \(id) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
 
         tap(app, at: point)
         let field = app.textFields["chat-search-field"]
@@ -168,6 +182,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
         let resting = bubbles(app)
         let detail = "tapped \(id) at \(point); screen \(screen); resting [\(describe(resting))]"
+        print("[rig] \(detail)")
         XCTAssertTrue(header.isHittable, "the chat is frontmost — \(detail)")
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
 
