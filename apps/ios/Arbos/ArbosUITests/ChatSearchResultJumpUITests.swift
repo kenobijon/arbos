@@ -192,22 +192,45 @@ final class ChatSearchResultJumpUITests: XCTestCase {
                       + "outside \(Int(middleHalf.minY))…\(Int(middleHalf.maxY)) — \(o.detail)")
     }
 
-    /// Type the keyword and hand back a result row that is wholly on screen, has stopped
-    /// moving, and has `child` realized inside it to aim at.
-    private func settledResult(_ app: XCUIApplication, screen: CGRect,
-                               showing child: String) -> (id: String, frame: CGRect)? {
+    /// The part of the window a touch actually reaches: below the header and the Search bar,
+    /// above the keyboard. Being inside the window is not the same as being reachable, and the
+    /// difference is not theoretical — the first row this picked for the in-bubble name case
+    /// had the name at y 33, behind the bar, and the tap went to the bar.
+    private func reachable(_ app: XCUIApplication, screen: CGRect) -> CGRect {
+        var top = screen.minY
+        for chrome in [app.descendants(matching: .any)["chat-search-button"].firstMatch,
+                       app.textFields["chat-search-field"]] where chrome.exists {
+            top = max(top, chrome.frame.maxY)
+        }
+        var bottom = screen.maxY
+        if app.keyboards.count > 0 { bottom = min(bottom, app.keyboards.firstMatch.frame.minY) }
+        return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
+    }
+
+    /// Type the keyword, then pick the result row to tap: wholly on screen, holding still, with
+    /// `child` realized inside it, and — the part that matters — with the point `aim` asks for
+    /// actually reachable. Each case says where in the row it is aiming, so the pick and the
+    /// touch cannot disagree.
+    private func settledResult(_ app: XCUIApplication, screen: CGRect, showing child: String,
+                               aim: (_ bubble: CGRect, _ child: CGRect) -> CGPoint)
+        -> (id: String, frame: CGRect, point: CGPoint)? {
         let field = app.textFields["chat-search-field"]
         field.tap()
         field.typeText(Self.keyword)
         sleep(2)
+        let band = reachable(app, screen: screen)
         let results = bubbles(app, screen: screen)
-        guard let chosen = settledResults(app, screen: screen)
-            .first(where: { inRow(app, $0.id, child).exists }) else {
-            XCTFail("no result row is wholly on screen, still, and showing \(child) "
-                    + "(results: \(describe(results)))")
-            return nil
+        for candidate in settledResults(app, screen: screen) {
+            let inner = inRow(app, candidate.id, child)
+            guard inner.exists else { continue }
+            let point = aim(candidate.frame, inner.frame)
+            guard band.contains(point) else { continue }
+            return (id: candidate.id, frame: candidate.frame, point: point)
         }
-        return chosen
+        XCTFail("no result row is wholly on screen, still, showing \(child), with somewhere "
+                + "inside it to tap that is reachable at all (reachable \(band); "
+                + "results: \(describe(results)))")
+        return nil
     }
 
     /// Tap, wait for the bar to go, then wait past the reveal's animation so everything after
@@ -229,14 +252,17 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     func testAResultTapClearOfTheAvatarAndNameRevealsTheMessageInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
-        guard let chosen = settledResult(app, screen: screen, showing: "bubble-name") else { return }
-        XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
-        let name = inRow(app, chosen.id, "bubble-name").frame
-        let avatar = inRow(app, chosen.id, "sender-avatar")
         // `Theme.bubbleVPad` is 11, so the bottom few points of the bubble are its own padding:
         // inside the row's hit area and below the last line of text. The name column's midX
         // keeps it inside the bubble horizontally, away from the avatar lane.
-        let point = CGPoint(x: name.midX, y: chosen.frame.maxY - 5)
+        guard let chosen = settledResult(app, screen: screen, showing: "bubble-name",
+                                         aim: { bubble, name in
+                                             CGPoint(x: name.midX, y: bubble.maxY - 5)
+                                         }) else { return }
+        XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
+        let point = chosen.point
+        let name = inRow(app, chosen.id, "bubble-name").frame
+        let avatar = inRow(app, chosen.id, "sender-avatar")
         XCTAssertFalse(name.contains(point), "the touch is clear of the name button at \(name)")
         if avatar.exists {
             XCTAssertFalse(avatar.frame.contains(point),
@@ -258,9 +284,11 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     func testAResultTapOnTheSenderAvatarAlsoStaysInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
-        guard let chosen = settledResult(app, screen: screen, showing: "sender-avatar") else { return }
-        let avatar = inRow(app, chosen.id, "sender-avatar").frame
-        let point = CGPoint(x: avatar.midX, y: avatar.midY)
+        guard let chosen = settledResult(app, screen: screen, showing: "sender-avatar",
+                                         aim: { _, avatar in
+                                             CGPoint(x: avatar.midX, y: avatar.midY)
+                                         }) else { return }
+        let point = chosen.point
         shot(app, "1-results-keyboard-up")
 
         tapAndSettle(app, at: point)
@@ -275,9 +303,11 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     func testAResultTapOnTheNameInTheBubbleAlsoStaysInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
-        guard let chosen = settledResult(app, screen: screen, showing: "bubble-name") else { return }
-        let name = inRow(app, chosen.id, "bubble-name").frame
-        let point = CGPoint(x: name.midX, y: name.midY)
+        guard let chosen = settledResult(app, screen: screen, showing: "bubble-name",
+                                         aim: { _, name in
+                                             CGPoint(x: name.midX, y: name.midY)
+                                         }) else { return }
+        let point = chosen.point
         shot(app, "1-results-keyboard-up")
 
         tapAndSettle(app, at: point)
@@ -292,16 +322,22 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     func testWithNoFilterTheSameAvatarStillOpensTheSendersPage() {
         let app = launchLongLaunchWeek()
         let screen = app.windows.firstMatch.frame
+        let band = reachable(app, screen: screen)
         let resting = bubbles(app, screen: screen)
-        guard let chosen = settledResults(app, screen: screen)
-            .first(where: { inRow(app, $0.id, "sender-avatar").exists }) else {
-            return XCTFail("no bubble is wholly on screen, still, and showing a sender avatar "
-                           + "(rows: \(describe(resting)))")
+        var picked: (id: String, point: CGPoint)?
+        for candidate in settledResults(app, screen: screen) where picked == nil {
+            let avatar = inRow(app, candidate.id, "sender-avatar")
+            guard avatar.exists else { continue }
+            let point = CGPoint(x: avatar.frame.midX, y: avatar.frame.midY)
+            if band.contains(point) { picked = (id: candidate.id, point: point) }
         }
-        let avatar = inRow(app, chosen.id, "sender-avatar").frame
+        guard let chosen = picked else {
+            return XCTFail("no bubble is wholly on screen, still, with a reachable sender avatar "
+                           + "(reachable \(band); rows: \(describe(resting)))")
+        }
         shot(app, "1-chat-at-rest-nothing-filtering")
 
-        tap(app, at: CGPoint(x: avatar.midX, y: avatar.midY))
+        tap(app, at: chosen.point)
         sleep(3)
         shot(app, "2-after-a-tap-on-the-avatar-with-nothing-filtering")
 
