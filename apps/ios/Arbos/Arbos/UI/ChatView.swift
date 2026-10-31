@@ -344,13 +344,56 @@ struct ChatSession: View {
     }
 
     /// Make sure the row for `messageId` is in the window (quote taps into older history).
-    /// Returns true when the window had to grow (the caller scrolls after the next layout).
+    /// Returns true when the window had to move (the caller scrolls after the next layout).
+    ///
+    /// The window SLIDES onto the target; it does not stretch back to it from the tail
+    /// (#2404). Stretching is what a reveal into older history used to do, and it put every
+    /// row between the tail and the target into the stack at once — 107 of them in the
+    /// measured case — all of them above the viewport and none of them measured. The scroll
+    /// that followed was computed against estimated heights, and as those rows were realized
+    /// their true heights (64 to 284 points here, against one estimate) grew the content
+    /// above the viewport and slid the reader forward off the message, by 18 to 35 rows over
+    /// five measured runs. Sliding leaves nothing unmeasured above the target: the window is
+    /// a normal-sized slice that ends a little after it, the bottom anchor puts the reader
+    /// there, and the scroll left to do is a short one over rows that have heights.
     private func includeInWindow(messageId: Id) -> Bool {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
+        if DebugHooks.revealStretchWindow { return stretchWindowToTail(all: all, ix: ix, messageId: messageId) }
+        // Nothing to do when the stack has already built the row: `scrollTo` can reach it and
+        // the window is the reader's, not this function's, to change.
+        guard !windowedRows.contains(where: { $0.messageId == messageId }) else {
+            revealTrace("include-in-window", "id=\(messageId) already shown; window untouched")
+            return false
+        }
+        // Rows kept below the target. Half a step is a comfortable margin either way: enough
+        // that the end of the window is well clear of the viewport, so `AwayFromBottomReporter`
+        // does not read the landing as "back at the end" and settle the reader to the real
+        // tail; few enough that the scroll from the bottom anchor up to the target crosses
+        // rows the stack has just built.
+        let below = Self.windowStep / 2
+        let skip = max(0, all.count - ix - 1 - below)
+        let count = min(all.count - skip, Self.windowInitial)
+        revealTrace("include-in-window",
+                    "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
+                    + "window=\(windowCount)->\(count) skipEnd=\(windowSkipEnd)->\(skip)")
+        guard count != windowCount || skip != windowSkipEnd else { return false }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = skip
+            windowCount = count
+        }
+        return true
+    }
+
+    /// Rig (`ARBOS_REVEAL_STRETCH_WINDOW=1`, #2404): the reveal windowing as it was before
+    /// the fix — every row between the tail and the target joins the stack at once. Kept so
+    /// one build can measure the symptom beside the fix; it goes away with the rig.
+    private func stretchWindowToTail(all: [Row], ix: Int, messageId: Id) -> Bool {
         let needed = all.count - ix + Self.windowStep / 2
         revealTrace("include-in-window",
-                    "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) needed=\(needed) "
+                    "stretch id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) needed=\(needed) "
                     + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
                     + "grows=\(needed > windowCount || windowSkipEnd > 0)")
         guard needed > windowCount || windowSkipEnd > 0 else { return false }
@@ -2430,22 +2473,12 @@ struct ChatSession: View {
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
         if includeInWindow(messageId: messageId) {
-            // The target was outside the window, so the window just grew by the rows between
-            // here and it — 107 of them in the measured case (#2404). A LazyVStack has not
-            // laid any of those out, so the offset that centres the target can only be
-            // estimated, and an animation commits to that estimate: it runs its curve to a
-            // destination computed before the rows existed and stops there, nothing corrects
-            // it, and the reader lands tens of rows short of the message they asked for
-            // (measured 18, 35 and 35 rows over three runs, with the target never realized).
-            // An unanimated scroll is resolved against the layout instead, so SwiftUI revises
-            // it as the rows are measured. A jump of a hundred-odd rows has no animation worth
-            // keeping; a reveal inside the window still gets one, below.
+            // The window has just moved onto the target, so the rows on screen are not the
+            // rows that were there a moment ago. A jump across a hundred rows of history has
+            // no animation worth keeping, and an animated scroll over a window that changed
+            // in the same frame is a diff of the whole stack per frame (#2404).
             DispatchQueue.main.async {
-                if DebugHooks.revealAnimateGrown {
-                    withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
-                } else {
-                    withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(target.id, anchor: .center) }
-                }
+                withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(target.id, anchor: .center) }
             }
         } else {
             withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
