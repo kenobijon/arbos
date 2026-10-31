@@ -2523,10 +2523,16 @@ struct ChatSession: View {
                     + "offset=\(Self.offsetText(scrollProbe.last)) "
                     // Which lazy stack this reveal is scrolling. A result tap closes the bar
                     // first, and closing changes `transcriptStackIdentity`, so the stack is
-                    // rebuilt in the frame before the reveal runs (#2450). "all" here means
-                    // the rebuild has already happened and the reveal has the new stack;
-                    // "filtered" would mean the reveal is scrolling a stack about to be
-                    // thrown away, which is the one ordering these two fixes must not have.
+                    // rebuilt around the reveal (#2450). "filtered" would mean the reveal is
+                    // scrolling a stack about to be thrown away, which is the one ordering
+                    // these two fixes must not have.
+                    //
+                    // Read it for that and nothing more. The identity flips synchronously
+                    // with the close; the rebuild it triggers does not. So "all" proves the
+                    // reveal is addressing the new stack, not that the new stack has laid
+                    // out, and those are different facts: on iOS 26 a single hop issued in
+                    // this gap rests tens of rows short of the target. Covering the gap is
+                    // what the corrections in `settleOnRevealed` are for.
                     + "stack=\(stackIdentityForTrace)")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
