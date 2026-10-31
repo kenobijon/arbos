@@ -304,6 +304,17 @@ struct ChatSession: View {
         searchHitsActive ? "filtered:\(searchText.trimmingCharacters(in: .whitespaces))" : "all"
     }
 
+    /// `transcriptStackIdentity` with the keyword taken out, for the reveal trace.
+    ///
+    /// The identity has to carry the keyword — that is the whole point of it, a new stack per
+    /// filter. A log line must not. What someone types into a chat search is their content:
+    /// a name, a diagnosis, a fragment of a secret they are looking for. The trace only ever
+    /// needs to know **which of the two stacks** a reveal is scrolling, so the keyword never
+    /// reaches the line and there is nothing to redact later.
+    private var stackIdentityForTrace: String {
+        searchHitsActive ? "filtered" : "all"
+    }
+
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
         var h = Hasher()
         h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
@@ -2514,9 +2525,9 @@ struct ChatSession: View {
                     // first, and closing changes `transcriptStackIdentity`, so the stack is
                     // rebuilt in the frame before the reveal runs (#2450). "all" here means
                     // the rebuild has already happened and the reveal has the new stack;
-                    // "filtered:…" would mean the reveal is scrolling a stack about to be
+                    // "filtered" would mean the reveal is scrolling a stack about to be
                     // thrown away, which is the one ordering these two fixes must not have.
-                    + "stack=\(transcriptStackIdentity)")
+                    + "stack=\(stackIdentityForTrace)")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
@@ -2567,7 +2578,11 @@ struct ChatSession: View {
         for step in 0..<Self.revealSettleSteps {
             DispatchQueue.main.asyncAfter(deadline: .now() + first + Double(step) * Self.revealSettleGap) {
                 guard highlightedMessage == messageId else { return }
-                revealTrace("settle", "id=\(messageId) step=\(step) offset=\(Self.offsetText(scrollProbe.last))")
+                // `stack` again on every correction, not only at the start: the question a
+                // ladder has to answer is whether its later passes are still scrolling the
+                // stack its first pass aimed at, or one that was torn down underneath it.
+                revealTrace("settle", "id=\(messageId) step=\(step) "
+                            + "offset=\(Self.offsetText(scrollProbe.last)) stack=\(stackIdentityForTrace)")
                 withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
             }
         }
