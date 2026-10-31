@@ -212,12 +212,6 @@ struct ChatSession: View {
     /// A reference box and not `@State`: this is written on every scroll sample, and a state
     /// write per sample would invalidate the view on every frame of every scroll.
     @State private var scrollProbe = ScrollProbe()
-    /// While a reveal's scroll animation is running (#2404). A grow prepends rows above the
-    /// content; the scroll view's bottom anchor absorbs that for a reader sitting still, but
-    /// an animation already in flight is driving towards an offset computed before the rows
-    /// arrived, so it finishes that many rows too far back. Nothing may move the content
-    /// under a reveal until it has landed.
-    @State private var revealingUntil = Date.distantPast
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -2168,14 +2162,6 @@ struct ChatSession: View {
                 // inside the top band (lazy rows), and a flick's deceleration there should bring
                 // a few slices in, not run away through the whole history.
                 guard Date().timeIntervalSince(lastGrowAt) > 0.25 else { return }
-                // A reveal is a jump to a row the reader named; the content must hold still
-                // until it lands (#2404). Checked before `lastGrowAt` is stamped, so a
-                // suppressed sample does not spend the reader's next grow.
-                if Date() < revealingUntil, !DebugHooks.revealAllowGrow {
-                    revealTrace("grow-held", "reveal in flight for "
-                                + "\(Int(revealingUntil.timeIntervalSinceNow * 1000))ms more")
-                    return
-                }
                 lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
@@ -2443,13 +2429,23 @@ struct ChatSession: View {
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
-        // …and hold the window still for the length of the scroll, which stick-to-bottom
-        // alone does not do: the 0.35 s animation plus a margin for the frame it lands on.
-        revealingUntil = Date().addingTimeInterval(0.6)
         if includeInWindow(messageId: messageId) {
-            // The original was outside the window: let the grown VStack lay out first.
+            // The target was outside the window, so the window just grew by the rows between
+            // here and it — 107 of them in the measured case (#2404). A LazyVStack has not
+            // laid any of those out, so the offset that centres the target can only be
+            // estimated, and an animation commits to that estimate: it runs its curve to a
+            // destination computed before the rows existed and stops there, nothing corrects
+            // it, and the reader lands tens of rows short of the message they asked for
+            // (measured 18, 35 and 35 rows over three runs, with the target never realized).
+            // An unanimated scroll is resolved against the layout instead, so SwiftUI revises
+            // it as the rows are measured. A jump of a hundred-odd rows has no animation worth
+            // keeping; a reveal inside the window still gets one, below.
             DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+                if DebugHooks.revealAnimateGrown {
+                    withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+                } else {
+                    withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(target.id, anchor: .center) }
+                }
             }
         } else {
             withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }

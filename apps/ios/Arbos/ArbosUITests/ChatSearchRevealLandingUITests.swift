@@ -7,15 +7,17 @@ import XCTest
 /// the frontmost check: the chat is in front, the bar has gone, nothing covers the message —
 /// the transcript has simply come to rest somewhere else.
 ///
-/// **The cases are one experiment and vary how far back through the results the reader
-/// scrolled before tapping.** Everything else is identical: same keyword, same tap point in
-/// the bubble's bottom padding clear of every button, same settle.
+/// **The cases vary one thing: whether the tapped result is inside the row window.** A hit
+/// among the newest is; a hit the reader scrolled back to is not, and reaching it means
+/// growing the window by every row in between — 107 of them here — and scrolling into rows
+/// the LazyVStack has never laid out. Everything else is identical: same keyword, same tap
+/// point in the bubble's bottom padding clear of every button, same settle.
 ///
-/// That variable replaced an earlier one. The first run tapped two named rows four apart in
+/// The first run of this file varied the wrong thing. It tapped two named rows four apart in
 /// the list and both landed, with byte-identical offset trajectories from the same starting
-/// offset of 8676 — because both were reachable without scrolling the list at all. A reveal
-/// animates from wherever the scroll view is standing, so a run that never moves it is one
-/// observation repeated, whatever row it taps.
+/// offset of 8676, because both were reachable without scrolling the list at all and both
+/// were already in the window. It also measured, and ruled out, a near-top window grow firing
+/// inside the reveal: across four launches the trace recorded no grow at all.
 ///
 /// Order matters and `continueAfterFailure` is off so it holds: a coordinate read says nothing
 /// until it is established what is frontmost, because XCUITest reports a parent view's
@@ -30,7 +32,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func openSearch(allowGrow: Bool) -> XCUIApplication {
+    private func openSearch(animated: Bool) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = [
             "ARBOS_FIXTURE": "1",
@@ -39,7 +41,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             // The app prints what moves the transcript; the run's stdout is the evidence.
             "ARBOS_TRACE_REVEAL": "1",
         ]
-        if allowGrow { app.launchEnvironment["ARBOS_REVEAL_ALLOW_GROW"] = "1" }
+        if animated { app.launchEnvironment["ARBOS_REVEAL_ANIMATE_GROWN"] = "1" }
         app.launch()
         let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
         // Poll rather than one long wait, and give up the moment the app is gone. A trap in
@@ -163,9 +165,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// from the landing so the symptom arm's expected-failure wrapper cannot swallow a broken
     /// rig — it did exactly that once, reporting a run whose app died at launch as a
     /// reproduction.
-    private func aimed(scrollUp: Int, allowGrow: Bool)
+    private func aimed(scrollUp: Int, animated: Bool)
         -> (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)? {
-        let app = openSearch(allowGrow: allowGrow)
+        let app = openSearch(animated: animated)
         let screen = app.windows.firstMatch.frame
         for _ in 0..<scrollUp { nudge(app, band: reachable(app, screen: screen)) }
         for _ in 0..<4 {
@@ -217,39 +219,42 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// symptom is being hunted in: the landing is recorded rather than asserted, because a
     /// lane that has not yet reproduced a thing cannot also claim how reliably it fires.
     /// Launching and aiming stay outside the expectation, so a broken rig goes red there.
-    private func run(scrollUp: Int, allowGrow: Bool, expectShort: Bool = false) {
-        let arm = "up\(scrollUp)/\(allowGrow ? "grow-allowed" : "grow-held")"
-        guard let a = aimed(scrollUp: scrollUp, allowGrow: allowGrow) else { return }
+    private func run(scrollUp: Int, animated: Bool, expectShort: Bool = false) {
+        let arm = "up\(scrollUp)/\(animated ? "animated" : "unanimated")"
+        guard let a = aimed(scrollUp: scrollUp, animated: animated) else { return }
         guard expectShort else { return landing(arm, a) }
         continueAfterFailure = true
         XCTExpectFailure("hunting the short landing (#2404)", strict: false) { landing(arm, a) }
     }
 
-    /// The control: the reader opens the bar and taps a result without scrolling the list.
-    /// The transcript is already at its end, so the reveal animates down from the tail. Both
-    /// landings measured so far were this, and both were correct.
-    func testAResultTappedWithoutScrollingTheListLands() {
-        run(scrollUp: 0, allowGrow: true)
+    /// The control: the reader taps a result without scrolling the list. The hit is one of
+    /// the newest, so it is already inside the row window, the reveal takes the branch that
+    /// scrolls to a row the stack has built, and it lands. Measured correct three times.
+    func testAResultAlreadyInTheWindowLands() {
+        run(scrollUp: 0, animated: true)
     }
 
     /// The reader scrolls back through the results before tapping one — the ordinary way of
     /// hunting something that is not the most recent mention of it, and what #2404 describes.
-    /// The reveal then starts from wherever the result list was standing, which is the one
-    /// thing the first run could not vary: both of its cases began at the same offset, 8676,
-    /// and produced the same trajectory to the same landing. This arm moves that number.
-    func testAResultTappedAfterScrollingBackThroughTheResults() {
-        run(scrollUp: 14, allowGrow: true, expectShort: true)
+    /// The hit is then outside the row window, so the reveal has to grow the window first and
+    /// scroll into rows the stack has never laid out.
+    ///
+    /// With the animation this fails: measured three times out of three, resting 18, 35 and
+    /// 35 rows short with the target never realized.
+    func testAResultOutsideTheWindowIsTheSymptomWhenTheScrollIsAnimated() {
+        run(scrollUp: 14, animated: true, expectShort: true)
     }
 
-    /// The same, again, because a landing that is right once says nothing about one that is
-    /// wrong sometimes. Two attempts is not a rate, but two is more than one.
-    func testAResultTappedAfterScrollingBackThroughTheResultsAgain() {
-        run(scrollUp: 14, allowGrow: true, expectShort: true)
+    /// The same reveal, unanimated, which is the fix: SwiftUI resolves the scroll against the
+    /// layout and revises it as the rows are measured, instead of running a curve to an
+    /// offset estimated before they existed.
+    func testAResultOutsideTheWindowLandsWhenTheScrollIsNotAnimated() {
+        run(scrollUp: 14, animated: false)
     }
 
-    /// The same scroll-back with the window held still for the length of the reveal. It is
-    /// only worth reading if an arm above went short.
-    func testAResultTappedAfterScrollingBackWithTheGrowHeld() {
-        run(scrollUp: 14, allowGrow: false, expectShort: true)
+    /// The fix again. One correct landing says nothing about a fault that only shows
+    /// sometimes, and the symptom arm above is the thing that establishes the rate.
+    func testAResultOutsideTheWindowLandsWhenTheScrollIsNotAnimatedAgain() {
+        run(scrollUp: 14, animated: false)
     }
 }
