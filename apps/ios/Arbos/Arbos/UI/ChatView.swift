@@ -263,6 +263,13 @@ struct ChatSession: View {
         showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// What the in-chat filter currently is. A change here replaces the transcript's whole
+    /// row set in one step, which is the event `settleFilteredRows` has to see. Closing the
+    /// bar also empties it, and `closeSearch` owns that direction.
+    private var searchFilterKey: String {
+        showSearch ? searchText.trimmingCharacters(in: .whitespaces) : ""
+    }
+
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
         var h = Hasher()
         h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
@@ -2184,6 +2191,9 @@ struct ChatSession: View {
                     if windowSkipEnd > 0 { settleToBottom(proxy) }
                 }
             }
+            // The keyword replaces the whole row set in one step; the rows that stay have to
+            // be measured again, and iOS 27 does not do it unasked (`settleFilteredRows`).
+            .onChange(of: searchFilterKey) { _, _ in settleFilteredRows(proxy) }
         }
     }
 
@@ -2336,6 +2346,33 @@ struct ChatSession: View {
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    /// A keyword swaps the transcript's whole row set for its hits in one step (438 rows → 1
+    /// in the fixture group). The rows that survive have to be measured again, and iOS 27
+    /// does not do that unasked: it keeps the space it had reserved for the rows that left,
+    /// reports a content height built from it — 608 pt for one 98 pt row — and builds none of
+    /// the survivors. The transcript is then blank while the scroll view still says two pages
+    /// at 100 %, and it stays that way, because nothing built is nothing measured
+    /// ([feedback iphone-search-blank-ios27-2026-10-31]). iOS 26.5 re-measured by itself, so
+    /// this only says out loud what the older system did quietly.
+    ///
+    /// The scroll has to name a **row**. Resolving a row's id is what forces the stack to
+    /// build it; the tail spacer is already where the scroll view believes it is, so a jump
+    /// there is a no-op and cures nothing. The tail jump that follows is for the chat bar's
+    /// clearance, so the newest hit does not come to rest under the composer.
+    ///
+    /// `closeSearch` has done the mirror of this on the way out since
+    /// [feedback iphone-search-close-2026-10-28] — "the view stays parked at the top of
+    /// nothing". This is the same distrust, applied to the direction that never had it.
+    private func settleFilteredRows(_ proxy: ScrollViewProxy) {
+        guard showSearch, let lastRow = windowedRows.last?.id else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { proxy.scrollTo(lastRow, anchor: .bottom) }
+        DispatchQueue.main.async {
+            withTransaction(t) { proxy.scrollTo("bottom", anchor: .bottom) }
+        }
     }
 
     private func m_text(_ row: Row) -> String {
