@@ -3760,6 +3760,11 @@ pub fn at_token(lower: &str, token: &str) -> bool {
     })
 }
 
+/// Does `lower` (already lower-case) name a collective?
+pub fn names_a_collective(lower: &str) -> bool {
+    at_token(lower, COLLECTIVE_HERE) || at_token(lower, COLLECTIVE_AGENTS)
+}
+
 /// Who `text` mentions, as the row's `mentions`: every `@handle` that names a member
 /// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle), then the
 /// collectives expanded into member ids the way the apps expand them — `@here` to everyone but
@@ -3806,8 +3811,7 @@ pub fn resolve_mentions(
     }
     let lower = text.to_lowercase();
     let here = at_token(&lower, COLLECTIVE_HERE);
-    let agents = at_token(&lower, COLLECTIVE_AGENTS);
-    if here || agents {
+    if here || at_token(&lower, COLLECTIVE_AGENTS) {
         for m in &cm.members {
             // A soft-deleted agent is no longer a member to name, as the handle scan above has
             // it: `project()` is `None` for one.

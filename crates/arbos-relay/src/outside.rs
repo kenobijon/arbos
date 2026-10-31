@@ -493,25 +493,41 @@ fn handle_of(p: &Project) -> String {
     people::agent_slug(&p.name)
 }
 
+/// Does this message wake the agent by naming it? An explicit `@handle` in the prose does, and
+/// so does a declared `agent:<id>` the writer resolved — a chip with no handle in the sentence.
+///
+/// A collective (`@here`, `@agents`) does **not**, and that is a deliberate carve-out rather
+/// than an oversight. `@here` names every agent in a chat (Jacob, 2026-10-24) and the event now
+/// carries that expansion, as the row always has, so the array alone would wake every agent in
+/// the room. For an outside agent the `wake` flag is the only signal it gets and it reads as
+/// "answer this" rather than "you have a turn", so a single `@here` in a room with three agents
+/// would produce three answers. Waking them is the right behaviour only once a turn and a
+/// verdict are separate fields, which is an open protocol question; until it is answered the
+/// collective names the agent in the event and leaves the wake where it was. An agent that
+/// wants to act on one can read `mentions` itself.
 fn mentions_agent(text: &str, mentions: &[String], project: &Project) -> bool {
-    let me = format!("agent:{}", project.id);
-    if mentions.iter().any(|m| m == &me) {
-        return true;
-    }
-    let handle = handle_of(project);
-    if handle.is_empty() {
-        return false;
-    }
-    let needle = format!("@{handle}");
     let lower = text.to_ascii_lowercase();
-    lower
-        .match_indices(&needle.to_ascii_lowercase())
-        .any(|(i, _)| {
+    let handle = handle_of(project);
+    let tagged = !handle.is_empty() && {
+        let needle = format!("@{handle}").to_ascii_lowercase();
+        lower.match_indices(&needle).any(|(i, _)| {
             lower[i + needle.len()..]
                 .chars()
                 .next()
                 .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'))
         })
+    };
+    if tagged {
+        return true;
+    }
+    // A collective in the prose is why this agent may be in `mentions` at all, and it is not a
+    // reason to wake; a declared id without one still is.
+    if people::names_a_collective(&lower) {
+        return false;
+    }
+    mentions
+        .iter()
+        .any(|m| m == &format!("agent:{}", project.id))
 }
 
 /// How long an announce waits for its own row to reach the relay's doc. The apps send
@@ -2422,6 +2438,19 @@ mod tests {
         assert!(mentions_agent("", &["agent:p1".into()], &p));
         assert!(!mentions_agent(&format!("@{handle}x no"), &[], &p));
         assert!(!mentions_agent("nothing here", &["user:u9".into()], &p));
+        // A collective names every agent in the chat and wakes none of them on its own; the
+        // agent's own handle in the same sentence still does.
+        assert!(!mentions_agent("@here standup", &["agent:p1".into()], &p));
+        assert!(!mentions_agent(
+            "@agents take this",
+            &["agent:p1".into()],
+            &p
+        ));
+        assert!(mentions_agent(
+            &format!("@here and @{handle}"),
+            &["agent:p1".into()],
+            &p
+        ));
     }
 
     /// A person writes in the group and in the agent's own chat → one `message.received` each,
@@ -2992,9 +3021,10 @@ mod tests {
     /// announce now, from the roster it already has.
     ///
     /// `@here` is everyone in the chat including its agents (Jacob, 2026-10-24), so the event
-    /// names this agent and it wakes — which is what an agentd agent in the same room already
-    /// does from the row, and the reason that row carries the expansion at all. The wake still
-    /// comes from an explicit mention; no new rule decides it.
+    /// names this agent — and deliberately does not wake it. `wake` is the only signal an
+    /// outside agent gets and it reads as "answer this", so one `@here` in a room with three
+    /// agents would be three answers. The array is corrected here; the wake waits for the
+    /// protocol question (a turn and a verdict as separate fields) to be answered.
     #[tokio::test]
     async fn an_app_announce_resolves_the_mentions_it_left_out() {
         let (state, pid, g, other) = outside_group(7281);
@@ -3029,7 +3059,36 @@ mod tests {
             !named.contains(&format!("user:{other}").as_str()),
             "the writer is not mentioned by their own @here"
         );
-        assert_eq!(events[0].1["wake"], true, "an explicit collective mention");
+        assert_eq!(
+            events[0].1["wake"], false,
+            "a collective names the agent and leaves the wake as it is: {}",
+            events[0].1
+        );
+    }
+
+    /// The carve-out above must not swallow a real tag: `@here` alongside the agent's own handle
+    /// wakes it, as the handle alone always has.
+    #[tokio::test]
+    async fn a_tag_still_wakes_when_a_collective_names_everyone() {
+        let (state, pid, g, other) = outside_group(7282);
+        let handle = handle_of(&state.db.project(&pid).unwrap().unwrap());
+        assert!(!handle.is_empty());
+        let msg_id = ulid();
+        let me = Sender::user(&state, &other);
+        crate::notify::announce_with(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &format!("@here and @{handle} please take this one"),
+            None,
+            &[],
+        )
+        .await;
+
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["wake"], true, "{}", events[0].1);
     }
 
     /// The other half of #2413: a group message that tags nobody must still not wake the agent.
