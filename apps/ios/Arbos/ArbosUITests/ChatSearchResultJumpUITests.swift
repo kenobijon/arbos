@@ -30,6 +30,11 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     private static let longRows = 420
     /// The fixture's "embargo" line is `lines[0]`, every eighth synthetic row.
     private static let keyword = "embargo"
+    /// Clear space an aim point must have below the search chrome before this will tap there.
+    /// The same number, for the same reason, as `ChatSearchRevealLandingUITests.aimBandMargin`,
+    /// which measured it; these are two suites with their own copy of `reachable`, not one
+    /// shared helper, so the guard has to be written in both.
+    private static let aimBandMargin: CGFloat = 24
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -254,6 +259,14 @@ final class ChatSearchResultJumpUITests: XCTestCase {
                 guard inner.exists else { continue }
                 let point = aim(candidate.frame, inner.frame)
                 guard band.contains(point) else { continue }
+                // Inside the band is not enough: a point can sit within it and still be close
+                // enough to its top edge that the chrome takes the touch, because
+                // `CGRect.contains` admits the boundary exactly. `ChatSearchRevealLandingUITests`
+                // measured the number on the same fixture — its one traced mis-tap had 7 pt of
+                // clearance where its nine good taps had 15 at worst — and 24 sits above the
+                // worst good tap. Hardening, not a fix for anything currently failing: the two
+                // landing failures on iOS 26.2 aim 97 and 115 pt below the band top.
+                guard point.y - band.minY >= Self.aimBandMargin else { continue }
                 return (id: candidate.id, frame: candidate.frame, point: point)
             }
             if attempt < 2 { nudgeResultsDown(app, band: band) }
@@ -337,10 +350,15 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     /// up is `long-408` — and a reveal of `long-408` comes to rest about thirty rows short of
     /// it, with the message never realized, both times it has been measured. The chat is
     /// frontmost while that happens, so it is not the bug this branch fixes: it is #2404's
-    /// landing, which depends on *which* result is tapped (`long-412`, what the two cases above
-    /// pick, lands correctly) and is its own task. Recorded in
-    /// `internal/ios-search-result-reveal-landing.md`. This case must not pretend to carry it,
-    /// and must not go red for it either.
+    /// landing, and it is its own task. This case must not pretend to carry it, and must not go
+    /// red for it either.
+    ///
+    /// **Do not read this as "only `long-408` lands short".** That was true of every run up to
+    /// and including iOS 27.0 on the merged tree, where `long-412` — what the two cases above
+    /// pick — landed correctly. It is false on iOS 26.2 at `0b77fdbf7`, where `long-412` is the
+    /// row that fails, in both of those cases, about thirty rows into history with the message
+    /// never realized. The cause of that is not established and is not this branch's.
+    /// Recorded in `internal/ios-search-result-reveal-landing.md`.
     func testAResultTapOnTheNameInTheBubbleAlsoStaysInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame

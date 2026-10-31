@@ -108,13 +108,12 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertTrue(src.contains("content.simultaneousGesture(TapGesture().onEnded { action() })"))
     }
 
-    /// A reveal is one animated hop. The repeated `scrollTo` that briefly stood here was
-    /// written against a landing measurement that turned out to be read from behind a
-    /// pushed profile pane, so it corrected something that was never shown to be wrong.
-    func testARevealIsOneHopWithNoFollowUpCorrections() {
-        let src = chatView
-        XCTAssertFalse(src.contains("settleOnRevealed"))
-        XCTAssertFalse(src.contains("revealSettleDelays"))
-        XCTAssertTrue(src.contains("withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }"))
-    }
+    // `testARevealIsOneHopWithNoFollowUpCorrections` stood here and asserted that
+    // `settleOnRevealed` was absent from `ChatView`. It was written to catch a reverted change
+    // being quietly undone, and it did exactly that: #2446 reintroduces the correction ladder,
+    // the merge into this branch is textually clean, and this test was the only thing that said
+    // so. It is retired rather than fixed because the project then decided, deliberately and
+    // with measurements behind it, that the ladder is correct — a reveal resolves `scrollTo`
+    // against estimated heights, and one hop lands 13 to 35 rows out on a long transcript.
+    // Asserting the absence of the chosen fix is no longer a thing anyone wants true.
 }
