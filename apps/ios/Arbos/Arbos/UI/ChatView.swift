@@ -176,19 +176,27 @@ struct ChatSession: View {
     /// The animated hop a reveal makes to a row the stack has already built.
     static let revealHop: Double = 0.35
     /// How long `settleOnRevealed` waits between its corrections, and how many it makes.
-    /// Four over 0.6 s: long enough for the lazy rows around the landing to be measured,
+    /// Three over 0.45 s: long enough for the lazy rows around the landing to be measured,
     /// short enough to be over before the reader could have started scrolling themselves.
     ///
-    /// The count is under review and is being measured rather than argued. Over six reveals
-    /// on two runtimes the scroll offset moved after the **first** correction whenever it
-    /// moved at all, and never after a later one, which would make three of the four
-    /// decoration. Six is too small a sample to cut on, because the landing this corrects is
-    /// now known to be intermittent (#2404): two byte-identical test cases disagree inside a
-    /// single run. A rung that looks idle in six reveals may still fire in a timing branch
-    /// those six did not visit, so the count stays at four until a repetition run says
-    /// otherwise.
+    /// The count was four and was cut on measurement. Across all sixteen laddered reveals
+    /// recorded for #2404 — three runtimes' worth of runs, including a ten-iteration
+    /// repetition that varied nothing but timing — the first correction moved the scroll in
+    /// twelve, the second in one, and the third and fourth in none. Read the trace with
+    /// care when checking this: the `settle` line is printed *before* its own `scrollTo`, so
+    /// the offset logged at `step=N` is what correction N achieved, not N+1.
+    ///
+    /// The rule the count follows: **keep the deepest pass ever measured to do work, plus
+    /// one of margin.** The deepest real correction is the second, so the count is three.
+    /// The margin is there because the costs are not symmetrical — a pass that never fires
+    /// costs one no-op `scrollTo` against a layout that already agrees, while one pass too
+    /// few costs exactly the bug this corrects. Every one of the sixteen was a simulator on
+    /// one Mac; real devices, slower main threads and deeper transcripts are unmeasured.
+    ///
+    /// Cut this to two when measurements on hardware justify it, rather than re-deriving
+    /// the argument.
     static let revealSettleGap: Double = 0.15
-    static let revealSettleSteps = 4
+    static let revealSettleSteps = 3
     /// How long after the last correction `traceAtRest` reports where the transcript ended
     /// up. Three seconds, to land beside the moment the UI test reads the resting frame
     /// rather than somewhere before it; the test sleeps 3 s after the bar closes.
