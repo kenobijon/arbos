@@ -2509,7 +2509,14 @@ struct ChatSession: View {
                     + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
                     + "windowTop=\(windowedRows.first?.id ?? "-") windowBottom=\(windowedRows.last?.id ?? "-") "
                     + "targetShown=\(windowedRows.contains { $0.id == target.id }) "
-                    + "offset=\(Self.offsetText(scrollProbe.last))")
+                    + "offset=\(Self.offsetText(scrollProbe.last)) "
+                    // Which lazy stack this reveal is scrolling. A result tap closes the bar
+                    // first, and closing changes `transcriptStackIdentity`, so the stack is
+                    // rebuilt in the frame before the reveal runs (#2450). "all" here means
+                    // the rebuild has already happened and the reveal has the new stack;
+                    // "filtered:…" would mean the reveal is scrolling a stack about to be
+                    // thrown away, which is the one ordering these two fixes must not have.
+                    + "stack=\(transcriptStackIdentity)")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
