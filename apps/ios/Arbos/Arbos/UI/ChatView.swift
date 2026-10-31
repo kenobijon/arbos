@@ -204,6 +204,12 @@ struct ChatSession: View {
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
     @State private var lastGrowAt = Date.distantPast
+    /// While a reveal's scroll animation is running (#2404). A grow prepends rows above the
+    /// content; the scroll view's bottom anchor absorbs that for a reader sitting still, but
+    /// an animation already in flight is driving towards an offset computed before the rows
+    /// arrived, so it finishes that many rows too far back. Nothing may move the content
+    /// under a reveal until it has landed.
+    @State private var revealingUntil = Date.distantPast
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -2139,6 +2145,14 @@ struct ChatSession: View {
                 // inside the top band (lazy rows), and a flick's deceleration there should bring
                 // a few slices in, not run away through the whole history.
                 guard Date().timeIntervalSince(lastGrowAt) > 0.25 else { return }
+                // A reveal is a jump to a row the reader named; the content must hold still
+                // until it lands (#2404). Checked before `lastGrowAt` is stamped, so a
+                // suppressed sample does not spend the reader's next grow.
+                if Date() < revealingUntil, !DebugHooks.revealAllowGrow {
+                    revealTrace("grow-held", "reveal in flight for "
+                                + "\(Int(revealingUntil.timeIntervalSinceNow * 1000))ms more")
+                    return
+                }
                 lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
@@ -2403,6 +2417,9 @@ struct ChatSession: View {
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
+        // …and hold the window still for the length of the scroll, which stick-to-bottom
+        // alone does not do: the 0.35 s animation plus a margin for the frame it lands on.
+        revealingUntil = Date().addingTimeInterval(0.6)
         if includeInWindow(messageId: messageId) {
             // The original was outside the window: let the grown VStack lay out first.
             DispatchQueue.main.async {

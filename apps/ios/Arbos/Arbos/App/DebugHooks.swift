@@ -35,6 +35,10 @@ enum DebugHooks {
     /// scroll offset that triggered it. A reveal that lands short does so because something
     /// moved the content under it, and this says what and when.
     static var traceReveal: Bool { value("ARBOS_TRACE_REVEAL") == "1" }
+    /// Rig (#2404): put the near-top grow back inside a reveal, so one build can measure the
+    /// symptom and the fix. This exists for the A/B that proves the mechanism and goes away
+    /// with it; nothing but the rig should ever set it.
+    static var revealAllowGrow: Bool { value("ARBOS_REVEAL_ALLOW_GROW") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
     static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }

@@ -7,11 +7,16 @@ import XCTest
 /// the frontmost check: the chat is in front, the bar has gone, nothing covers the message —
 /// the transcript has simply come to rest somewhere else.
 ///
-/// **The two cases are one experiment and differ in one character.** Both run the identical
+/// **The four cases are one experiment over two conditions.** Every case runs the identical
 /// procedure — same keyword, same nudges to bring the row into reach, same tap point in the
-/// bubble's bottom padding clear of every button — and then tap a different result: `long-408`
-/// rests about thirty rows short of itself, `long-412` lands. Four rows apart in the same
-/// list, so whatever separates them is not the distance from the tail.
+/// bubble's bottom padding clear of every button — and varies two things only: which result
+/// is tapped (`long-408`, which rests short, against `long-412`, which lands, four rows apart
+/// in the same list, so whatever separates them is not the distance from the tail) and
+/// whether the near-top window grow is allowed to run inside the reveal.
+///
+/// Reading them as a block: if the grow is the mechanism, `long-408` fails with it allowed
+/// and lands with it held, and `long-412` lands either way. Any other pattern says the grow
+/// is not it, which is as much as this rig is for.
 ///
 /// Order matters and `continueAfterFailure` is off so it holds: a coordinate read says nothing
 /// until it is established what is frontmost, because XCUITest reports a parent view's
@@ -26,7 +31,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func openSearch() -> XCUIApplication {
+    private func openSearch(allowGrow: Bool) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = [
             "ARBOS_FIXTURE": "1",
@@ -35,6 +40,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             // The app prints what moves the transcript; the run's stdout is the evidence.
             "ARBOS_TRACE_REVEAL": "1",
         ]
+        if allowGrow { app.launchEnvironment["ARBOS_REVEAL_ALLOW_GROW"] = "1" }
         app.launch()
         let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: appear), "the chat header's search disc is on screen")
@@ -157,31 +163,33 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return nil
     }
 
-    /// Tap `id` and say where the transcript came to rest. Identical for both cases.
-    private func landing(_ id: String) {
-        let app = openSearch()
+    /// Tap `id` and say where the transcript came to rest. Identical for every case but the
+    /// row id and whether the near-top grow is allowed to run inside the reveal.
+    private func landing(_ id: String, allowGrow: Bool) {
+        let app = openSearch(allowGrow: allowGrow)
         let screen = app.windows.firstMatch.frame
         guard let point = aim(app, screen: screen, at: id) else {
             return XCTFail("could not bring \(id) into reach after eight nudges "
                            + "(results: \(describe(bubbles(app))))")
         }
-        shot(app, "1-\(id)-aimed")
+        let arm = "\(id)/\(allowGrow ? "grow-allowed" : "grow-held")"
+        shot(app, "1-\(arm)-aimed")
         // The test runner's stdout lands in the xcodebuild log, which arrives whatever the
         // result bundle does. It is the only record of the pre-tap state on a green run, and
-        // the two cases are only comparable if that state matches.
-        print("[rig] \(id) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
+        // the four cases are only comparable if that state matches.
+        print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
 
         tap(app, at: point)
         let field = app.textFields["chat-search-field"]
         let deadline = Date().addingTimeInterval(settle)
         while field.exists, Date() < deadline { usleep(150_000) }
         sleep(3)
-        shot(app, "2-\(id)-after-the-tap")
+        shot(app, "2-\(arm)-after-the-tap")
 
         // Frontmost first: a frame means nothing until the chat is what the reader sees.
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
         let resting = bubbles(app)
-        let detail = "tapped \(id) at \(point); screen \(screen); resting [\(describe(resting))]"
+        let detail = "tapped \(arm) at \(point); screen \(screen); resting [\(describe(resting))]"
         print("[rig] \(detail)")
         XCTAssertTrue(header.isHittable, "the chat is frontmost — \(detail)")
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
@@ -195,15 +203,40 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                       "…and centred, not against an edge — \(detail)")
     }
 
-    /// The result that rests short. Measured twice before this test existed, once from behind
-    /// a profile pane and once with the chat frontmost, and both times the transcript came to
-    /// rest on `long-375`…`long-383` with `long-408` never realized.
-    func testTappingLong408RestsOnTheMessage() {
-        landing("long-408")
+    /// The row that rests short, with the near-top grow left as it is on `main`. Measured
+    /// twice before this test existed, once from behind a profile pane and once with the chat
+    /// frontmost, and both times the transcript came to rest on `long-375`…`long-383` with
+    /// `long-408` never realized.
+    ///
+    /// This case is the reproduction, so it is expected to fail, and the expectation is
+    /// recorded rather than asserted: the symptom is the thing under investigation and a
+    /// lane that has not yet proved it cannot also claim how reliably it fires. The log says
+    /// which way it went either way, and `strict: false` keeps the run's verdict about the
+    /// other three. It goes away with the rig flag once the mechanism is settled.
+    func testLong408WithTheGrowAllowedIsTheSymptom() {
+        continueAfterFailure = true
+        XCTExpectFailure("the near-top grow inside the reveal is the bug under test (#2404)",
+                         strict: false) {
+            landing("long-408", allowGrow: true)
+        }
     }
 
-    /// The control: four rows further down the same list, same procedure, lands every time.
-    func testTappingLong412RestsOnTheMessage() {
-        landing("long-412")
+    /// The same row with the window held still for the length of the reveal. The one changed
+    /// condition between this and the case above, so a difference in the landing is the
+    /// grow's doing and nothing else's.
+    func testLong408WithTheGrowHeldRestsOnTheMessage() {
+        landing("long-408", allowGrow: false)
+    }
+
+    /// The control row, four further down the same list, with the grow allowed: it lands.
+    /// Whatever separates the two rows, it is not the distance from the tail.
+    func testLong412WithTheGrowAllowedRestsOnTheMessage() {
+        landing("long-412", allowGrow: true)
+    }
+
+    /// The control row with the hold on, so the hold is shown not to break a landing that
+    /// already worked.
+    func testLong412WithTheGrowHeldRestsOnTheMessage() {
+        landing("long-412", allowGrow: false)
     }
 }
