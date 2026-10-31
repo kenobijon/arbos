@@ -202,6 +202,12 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // The test runner's stdout lands in the result bundle's Staging tree, which survives
         // the import that never finishes. It is the only record of the pre-tap state on a
         // green run, and the four cases are only comparable if that state matches.
+        //
+        // `target` is named on its own line because the landing is now known to vary between
+        // runs of identical cases, and a distribution of landings cannot be read without
+        // knowing whether the row being aimed at varied too. The drags are gestures and do
+        // not stop in the same place every time, so `aimable` can pick a different hit.
+        print("[rig] \(arm) target \(id) at \(point)")
         print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
 
         tap(app, at: point)
@@ -220,6 +226,19 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
 
         let revealed = row(app, id)
+        // Record the landing before asserting on it, so a run that fails still yields a
+        // measurement. `XCTAssert` stops the case at the first failure, so the "wholly on
+        // screen" check failing means the centred check never runs and the run says nothing
+        // about how far off centre it was. The landing is intermittent, so what is wanted
+        // from a set of runs is the distribution of these numbers, not the first stop.
+        if revealed.exists {
+            let f = revealed.frame
+            let offCentre = Int(f.midY - screen.midY)
+            print("[rig] \(arm) landed \(id) frame \(f) offCentre \(offCentre)pt "
+                  + "onScreen \(screen.contains(f))")
+        } else {
+            print("[rig] \(arm) landed \(id) NOT REALIZED")
+        }
         XCTAssertTrue(revealed.exists, "the tapped message is realized in the transcript — \(detail)")
         XCTAssertTrue(screen.contains(revealed.frame),
                       "the tapped message is wholly on screen at \(revealed.frame) — \(detail)")
