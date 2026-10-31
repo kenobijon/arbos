@@ -35,6 +35,12 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     private let settle: TimeInterval = 20
     private static let longRows = 420
     private static let keyword = "embargo"
+    /// Clear space the aim point must have above it, below the search chrome, before this
+    /// will tap there. Both mis-taps measured in this lane aimed within a few points of
+    /// y 175 while all nine good taps aimed at y 181.7 or lower down the screen, and the
+    /// band's top edge is the one feature near that boundary. The frames do not prove the
+    /// chrome caused it — see `landing` — so this is cheap insurance, not the diagnosis.
+    private static let aimBandMargin: CGFloat = 24
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -139,12 +145,6 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         usleep(900_000)
     }
 
-    private func tap(_ app: XCUIApplication, at point: CGPoint) {
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-            .withOffset(CGVector(dx: point.x, dy: point.y))
-            .tap()
-    }
-
     /// A still hit whose bottom padding is reachable, and the point to tap in it.
     ///
     /// Only the touch point has to be in the band. A tall bubble whose top is behind the
@@ -161,14 +161,23 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         for (id, frame) in all {
             let point = CGPoint(x: frame.midX, y: frame.maxY - 5)
             guard band.contains(point), frame.height > 24 else { continue }
+            // Keep clear of the chrome overhead as well as of the neighbouring rows. A point
+            // can sit inside the band and still be close enough to its top edge that what
+            // takes the touch is not what the tree says is there.
+            guard point.y - band.minY >= Self.aimBandMargin else {
+                print("[rig] skipped \(id): aim y\(Int(point.y)) is only "
+                      + "\(Int(point.y - band.minY))pt below the band top y\(Int(band.minY))")
+                continue
+            }
             // The point must belong to this row and to no other. Result rows are reported
-            // with frames that touch and sometimes overlap by a point or two, and 5 points
-            // inside the bottom edge is not enough clearance to be sure which row a touch
-            // reaches. A run of this suite on iOS 26.2 aimed at a row whose bottom edge was
-            // y180 while the next row's top edge was y175: the two overlap across the exact
-            // band this aims into, the touch went to the neighbour, and the neighbour was
-            // revealed and centred perfectly while the assertion was still about the first
-            // row — which reads as the fix landing tens of rows short.
+            // with frames that touch and sometimes overlap by a point or two, so a point
+            // that reads as inside one row can be inside two.
+            //
+            // This check is necessary and is not sufficient, and it is worth knowing which.
+            // The mis-tap that was measured in full passed it comfortably — eight points of
+            // clear gap to the next row — and the touch still went to the neighbour. The
+            // guard that catches that one is the revealed-row assertion in `landing`, not
+            // any arithmetic here.
             let contenders = all.filter { $0.id != id && $0.frame.insetBy(dx: -2, dy: -2).contains(point) }
             guard contenders.isEmpty else { continue }
             usleep(400_000)
@@ -207,13 +216,26 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// case but how far up the result list it has scrolled and how the reveal moves the
     /// row window onto the target.
     ///
-    /// Two guards here exist because of a run that blamed the app for the rig's aim. A
-    /// coordinate tap can reach a row the case is not about — the list moves between
-    /// choosing a point and using it, and neighbouring result rows report frames that touch
-    /// — and the app then reveals the row that was really tapped, correctly and centred,
-    /// while the assertion is still about the other one. That reads as the fix missing by
-    /// tens of rows. So the point is recomputed from a fresh frame immediately before the
-    /// touch, and the row the app actually revealed is checked against the row aimed at.
+    /// The guards here exist because of runs that blamed the app for the rig's aim. A
+    /// coordinate tap can reach a row the case is not about, and the app then reveals the
+    /// row that was really tapped, correctly and centred, while the assertion is still
+    /// about the other one. That reads as the fix missing by tens of rows.
+    ///
+    /// **The touch goes through the element, not through a screen coordinate.** The frames
+    /// of the one mis-tap measured here do not support the obvious explanations. The aimed
+    /// row was reported at y84…179 and the row that took the touch at y187…479 — an eight
+    /// point gap, with the aim at y174 sitting five points inside the target and thirteen
+    /// clear of the neighbour. The frame did not move between choosing and tapping, and a
+    /// passing iteration had almost the same geometry. So the reported frame was not where
+    /// the touch was routed, by at least thirteen points, and no arithmetic over frames
+    /// this test can read would have caught it. Addressing the element instead lets
+    /// XCUITest resolve the row at the moment of the touch, which is the one resolution
+    /// that cannot be stale. The normalized offset keeps the touch in the bubble's bottom
+    /// padding, which is what the avatar and name clearance below is about.
+    ///
+    /// The row the app actually revealed is still checked against the row aimed at. That
+    /// assertion is the backstop, and it is what turned this from an app bug into a rig
+    /// bug; it stays whatever the aiming does.
     private func landing(_ arm: String,
                          _ aimed: (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)) {
         let (app, screen, id, point) = aimed
@@ -229,21 +251,32 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         print("[rig] \(arm) target \(id) at \(point)")
         print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
 
-        // Re-aim from a frame read now, not from the one chosen before the screenshot and
-        // the sixty-element enumeration above. Those take seconds, and the result list can
-        // move in them; the tap then goes to whatever row has slid under the old
-        // coordinate. Re-reading costs one round trip and removes the whole class.
         let liveTarget = row(app, id)
         guard liveTarget.exists else {
             return XCTFail("the aimed row \(id) is gone from the result list before the tap")
         }
+        // Read a fresh frame for the record, and to say whether the list moved. The touch
+        // below does not use it: it is reported so that a mis-tap can be told apart from a
+        // list that slid, which is the distinction the frames of the last one could not make.
         let live = liveTarget.frame
         let aim = CGPoint(x: live.midX, y: live.maxY - 5)
         if abs(aim.y - point.y) > 1 {
             print("[rig] \(arm) re-aimed: the list moved \(Int(aim.y - point.y))pt between "
                   + "choosing \(point) and tapping \(aim)")
         }
-        tap(app, at: aim)
+        let band = reachable(app, screen: screen)
+        let below = bubbles(app)
+            .filter { $0.id != "bubble:\(id)" && $0.frame.minY > live.midY }
+            .min { $0.frame.minY < $1.frame.minY }
+        let gap = below.map { "\(Int($0.frame.minY - aim.y))pt to \($0.id)" } ?? "no row below"
+        print("[rig] \(arm) aim \(aim): \(Int(aim.y - band.minY))pt below the band top "
+              + "y\(Int(band.minY)), \(gap)")
+        // dy 1 is the row's bottom edge; the 5 points back up land in `Theme.bubbleVPad`,
+        // the same place the coordinate aim used to target. XCUITest resolves the frame
+        // itself, at the moment of the touch.
+        liveTarget.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1))
+            .withOffset(CGVector(dx: 0, dy: -5))
+            .tap()
         let field = app.textFields["chat-search-field"]
         let deadline = Date().addingTimeInterval(settle)
         while field.exists, Date() < deadline { usleep(150_000) }
