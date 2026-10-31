@@ -1914,6 +1914,11 @@ struct ChatSession: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Search in chat")
             .accessibilityIdentifier("chat-search-button")
+            // Rig (#2404): which reveal this build is running, where a UI test can read it.
+            // A launch variable that does not arrive makes the A/B arm silently become the
+            // control arm, and a run then reports the fix working against no baseline at
+            // all. The app says which arm it is in, and the test asserts it before it taps.
+            .accessibilityValue(DebugHooks.revealPreFix ? "reveal-pre-fix" : "reveal-fixed")
             .background { searchKeyboardShortcuts }
         }
         .controlBar()

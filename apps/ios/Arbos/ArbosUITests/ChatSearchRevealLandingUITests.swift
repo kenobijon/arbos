@@ -63,6 +63,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             usleep(500_000)
         }
         XCTAssertTrue(search.exists, "the chat header's search disc is on screen")
+        // The arm, read back out of the app rather than assumed from what was set. A launch
+        // variable that does not arrive turns the symptom arm into a second control arm, and
+        // the run then reports the fix landing against no baseline at all.
+        XCTAssertEqual(search.value as? String, preFix ? "reveal-pre-fix" : "reveal-fixed",
+                       "the app is running the \(preFix ? "pre-fix" : "fixed") reveal")
         let field = app.textFields["chat-search-field"]
         for _ in 0..<4 where !field.exists {
             sleep(1)
@@ -223,16 +228,34 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                       "…and centred, not against an edge — \(detail)")
     }
 
-    /// A whole case, with the landing allowed to fail or not. `expectShort` marks an arm the
-    /// symptom is being hunted in: the landing is recorded rather than asserted, because a
-    /// lane that has not yet reproduced a thing cannot also claim how reliably it fires.
-    /// Launching and aiming stay outside the expectation, so a broken rig goes red there.
+    /// A whole case, with the landing allowed to fail or not. `expectShort` marks the baseline
+    /// arm: its landing is recorded rather than asserted, because the fault is intermittent by
+    /// report and a suite should not go red for the run where it does not fire.
+    ///
+    /// That tolerance has to be paid for. An arm that is excused either way says nothing on
+    /// its own, so the baseline prints its own verdict on a line that can be read without
+    /// interpreting coordinates: a run whose baseline **landed** has measured the fix against
+    /// no baseline at all, which is what happened once already here and read as four passes.
+    /// Launching and aiming stay outside the expectation, so a broken rig still goes red.
     private func run(scrollUp: Int, preFix: Bool, expectShort: Bool = false) {
         let arm = "up\(scrollUp)/\(preFix ? "pre-fix" : "fixed")"
         guard let a = aimed(scrollUp: scrollUp, preFix: preFix) else { return }
         guard expectShort else { return landing(arm, a) }
         continueAfterFailure = true
         XCTExpectFailure("the reveal as it was before the fix (#2404)", strict: false) { landing(arm, a) }
+        let onTarget = restedOn(a)
+        print("[rig] BASELINE \(onTarget ? "LANDED — no baseline this run" : "MISSED — baseline holds"): "
+              + "\(arm) target \(a.id)")
+    }
+
+    /// Did the transcript come to rest with the tapped message realized and in the middle
+    /// half of the screen? The same question `landing` asserts, asked without asserting it.
+    private func restedOn(_ aimed: (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)) -> Bool {
+        let revealed = row(aimed.app, aimed.id)
+        guard revealed.exists else { return false }
+        let middleHalf = aimed.screen.insetBy(dx: 0, dy: aimed.screen.height / 4)
+        return aimed.screen.contains(revealed.frame)
+            && middleHalf.contains(CGPoint(x: revealed.frame.midX, y: revealed.frame.midY))
     }
 
     /// The control: the reader taps a result without scrolling the list. The hit is one of
