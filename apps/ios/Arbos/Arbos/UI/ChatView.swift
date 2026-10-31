@@ -277,6 +277,16 @@ struct ChatSession: View {
         return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
     }
 
+    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): one line per thing that moves the transcript.
+    /// Compiled out of Release; `detail` is an autoclosure, so a run without the flag pays
+    /// nothing for the list walks some of these lines do.
+    private func revealTrace(_ what: String, _ detail: @autoclosure () -> String = "") {
+        #if DEBUG
+        guard DebugHooks.traceReveal else { return }
+        print("[arbos reveal] t=\(LaunchClock.msSinceLaunch())ms \(what) \(detail())")
+        #endif
+    }
+
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
     /// anchored at the bottom, so the rows on screen stay put while the content grows above.
     /// Never inside the caller's animation: an animated change to the row list makes
@@ -287,6 +297,7 @@ struct ChatSession: View {
         guard windowCount < available else { return }
         let step = min(Self.windowStep, available - windowCount)
         let firstShown = windowedRows.first?.id
+        revealTrace("grow", "step=\(step) window=\(windowCount)->\(windowCount + step) skipEnd=\(windowSkipEnd) firstShown=\(firstShown ?? "-")")
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
@@ -322,6 +333,10 @@ struct ChatSession: View {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
         let needed = all.count - ix + Self.windowStep / 2
+        revealTrace("include-in-window",
+                    "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) needed=\(needed) "
+                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                    + "grows=\(needed > windowCount || windowSkipEnd > 0)")
         guard needed > windowCount || windowSkipEnd > 0 else { return false }
         var t = Transaction()
         t.disablesAnimations = true
@@ -423,6 +438,7 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
+        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) skipEnd=\(windowSkipEnd)")
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
@@ -2111,7 +2127,10 @@ struct ChatSession: View {
             })
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
-            .modifier(NearTopReporter(enabled: true) {
+            .modifier(NearTopReporter(enabled: true, onNear: { offset in
+                revealTrace("near-top", "offset=\(Int(offset)) window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                            + "sinceAppear=\(Int(Date().timeIntervalSince(appearedAt) * 1000))ms "
+                            + "sinceGrow=\(Int(Date().timeIntervalSince(lastGrowAt) * 1000))ms")
                 // The first layout reports offset 0 before the bottom anchor applies; a
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
@@ -2126,7 +2145,10 @@ struct ChatSession: View {
                 } else if isChannel {
                     model.loadOlderChannel(chatId)
                 }
-            })
+            }, onSample: { old, new in
+                revealTrace("offset", "\(old == .infinity ? "inf" : String(Int(old)))->\(Int(new)) "
+                            + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
+            }))
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
@@ -2371,6 +2393,13 @@ struct ChatSession: View {
 
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
+        // `scrollTo` can only move to a row the stack has actually built, so whether the
+        // target is in `windowedRows` decides whether the reveal can do anything at all.
+        revealTrace("reveal-begin",
+                    "id=\(messageId) row=\(target.id) rows=\(rows.count) visible=\(visibleRows.count) "
+                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
+                    + "windowTop=\(windowedRows.first?.id ?? "-") windowBottom=\(windowedRows.last?.id ?? "-") "
+                    + "targetShown=\(windowedRows.contains { $0.id == target.id })")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
@@ -3809,13 +3838,20 @@ extension ChatSession {
 /// coordinate space so the row window can grow (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
-    let onNear: () -> Void
+    /// The scroll offset that looked near the top, for the rig to report; nothing reads it
+    /// to decide anything.
+    let onNear: (CGFloat) -> Void
+    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): every offset sample, in the band or not, so a
+    /// run shows the whole trajectory of a reveal and where it came to rest — not only the
+    /// samples that happened to ask for a grow.
+    let onSample: (CGFloat, CGFloat) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
             content.onScrollGeometryChange(for: CGFloat.self) { g in
                 g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity
             } action: { old, new in
+                onSample(old, new)
                 // About a screen ahead of the top edge, so the next slice is in place before
                 // the reader reaches it. Fires on every sample inside the band while the offset
                 // is still falling: with lazy rows (#2149) the rows a grow step prepends have
@@ -3823,14 +3859,15 @@ private struct NearTopReporter: ViewModifier {
                 // across the step — a one-shot "near" flag never re-armed and the window
                 // stopped at its cap (rig: 90 flicks into history stuck after ~90 s). The
                 // caller rate-limits the steps.
-                if new < 900, new < old || old == .infinity { onNear() }
+                if new < 900, new < old || old == .infinity { onNear(new) }
             }
         } else if enabled {
             content
                 .coordinateSpace(name: "arbosChatScroll")
                 .onPreferenceChange(ChatScrollTopKey.self) { minY in
+                    onSample(.infinity, minY)
                     // Content top near the scroll view's top → grow the row window.
-                    if minY > -40 && minY < 900 { onNear() }
+                    if minY > -40 && minY < 900 { onNear(minY) }
                 }
         } else {
             content

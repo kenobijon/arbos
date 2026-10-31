@@ -30,6 +30,11 @@ enum DebugHooks {
     static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
     /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
     static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
+    /// Rig (#2404): print what moves the transcript around a reveal — the target's place in
+    /// the list, the row window before and after, and every near-top grow step with the
+    /// scroll offset that triggered it. A reveal that lands short does so because something
+    /// moved the content under it, and this says what and when.
+    static var traceReveal: Bool { value("ARBOS_TRACE_REVEAL") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
     static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }
