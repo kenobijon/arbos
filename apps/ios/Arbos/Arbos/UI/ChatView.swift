@@ -178,8 +178,26 @@ struct ChatSession: View {
     /// How long `settleOnRevealed` waits between its corrections, and how many it makes.
     /// Four over 0.6 s: long enough for the lazy rows around the landing to be measured,
     /// short enough to be over before the reader could have started scrolling themselves.
+    ///
+    /// The count is under review and is being measured rather than argued. Over six reveals
+    /// on two runtimes the scroll offset moved after the **first** correction whenever it
+    /// moved at all, and never after a later one, which would make three of the four
+    /// decoration. Six is too small a sample to cut on, because the landing this corrects is
+    /// now known to be intermittent (#2404): two byte-identical test cases disagree inside a
+    /// single run. A rung that looks idle in six reveals may still fire in a timing branch
+    /// those six did not visit, so the count stays at four until a repetition run says
+    /// otherwise.
     static let revealSettleGap: Double = 0.15
     static let revealSettleSteps = 4
+    /// How long after the last correction `traceAtRest` reports where the transcript ended
+    /// up. Three seconds, to land beside the moment the UI test reads the resting frame
+    /// rather than somewhere before it; the test sleeps 3 s after the bar closes.
+    static let revealAtRestAfter: Double = 3.0
+    /// How long after a result tap the reveal trace records scroll samples. It has to outlast
+    /// `revealAtRestAfter`, or the at-rest line reports a stillness that is only the trace
+    /// having stopped watching. Nothing scrolls between the correction and the read, so in
+    /// practice this costs no lines at all — which is the measurement.
+    static let revealTraceWindow: Double = 5.0
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -546,9 +564,10 @@ struct ChatSession: View {
         // reveal was asked for, and it is not recoverable afterwards.
         revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) "
                     + "skipEnd=\(windowSkipEnd) offset=\(Self.offsetText(scrollProbe.last))")
-        // The reveal lands inside a second; three covers the close, the relayout and the
-        // scroll with room for a slow simulator.
-        traceOffsetsUntil = Date().addingTimeInterval(3)
+        // The reveal lands inside a second. The window is far longer than that because the
+        // interesting part is the silence after it: whether anything moves the transcript
+        // between the correction and the moment the test reads the resting frame.
+        traceOffsetsUntil = Date().addingTimeInterval(Self.revealTraceWindow)
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
@@ -2265,6 +2284,7 @@ struct ChatSession: View {
                 }
             }, onSample: { old, new in
                 scrollProbe.last = new
+                scrollProbe.samples += 1
                 guard Date() < traceOffsetsUntil else { return }
                 revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new)) "
                             + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
@@ -2555,7 +2575,7 @@ struct ChatSession: View {
         }
     }
 
-    /// Scroll onto a revealed row, then scroll onto it again as the rows gain real heights.
+    /// Scroll onto a revealed row, then scroll onto it once more as the rows gain real heights.
     ///
     /// `scrollTo` on a `LazyVStack` is resolved against *estimated* heights for every row the
     /// stack has not laid out, and a reveal into older history has just moved the window, so
@@ -2590,7 +2610,42 @@ struct ChatSession: View {
                 revealTrace("settle", "id=\(messageId) step=\(step) "
                             + "offset=\(Self.offsetText(scrollProbe.last)) stack=\(stackIdentityForTrace)")
                 withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+                if step == Self.revealSettleSteps - 1 {
+                    traceAtRest(messageId: messageId, after: scrollProbe.samples)
+                }
             }
+        }
+    }
+
+    /// Where the transcript actually came to rest, logged late enough to be read beside the
+    /// frame the UI test asserts on.
+    ///
+    /// This closes the one window the rest of the trace left dark (#2404). The reveal's own
+    /// lines stop at the last correction, under a second after the tap; the test reads the
+    /// resting frame about three seconds after it. Two very different faults fit that
+    /// silence — the scroll estimate was still wrong when the ladder ran and stayed wrong,
+    /// or the layout moved again afterwards — and they want different fixes, so the gap is
+    /// worth a line rather than a guess.
+    ///
+    /// `moved` is what separates them. It counts scroll samples taken since the last rung
+    /// was issued, so a **zero** is the load-bearing reading: the transcript has not moved a
+    /// pixel since the ladder finished, and the residual was already baked in by then. A
+    /// non-zero is weaker, because it also catches that last rung's own effect; the `offset`
+    /// lines carry the timestamps that tell the two apart.
+    ///
+    /// It is a count and a scroll offset: no row content, no sender, nothing a reader typed.
+    private func traceAtRest(messageId: Id, after samplesAtLastRung: Int) {
+        guard DebugHooks.traceReveal else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) {
+            // The highlight clears on its own well before this fires, so nil is the normal
+            // case. A *different* id means a second reveal has taken over and this line
+            // would be reporting its scroll position under the first one's name.
+            guard highlightedMessage == nil || highlightedMessage == messageId else { return }
+            revealTrace("at-rest", "id=\(messageId) "
+                        + "offset=\(Self.offsetText(scrollProbe.last)) "
+                        + "moved=\(scrollProbe.samples - samplesAtLastRung) "
+                        + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                        + "shown=\(windowedRows.count) stack=\(stackIdentityForTrace)")
         }
     }
 
@@ -4013,6 +4068,9 @@ extension ChatSession {
 /// invalidate the transcript.
 private final class ScrollProbe {
     var last: CGFloat = .infinity
+    /// Scroll samples seen, so a reveal can say whether the transcript moved after its
+    /// correction rather than leaving that to be read out of an absence of trace lines.
+    var samples = 0
 }
 
 /// Fires when the scroll view comes near its top (channel older page / grow window).
