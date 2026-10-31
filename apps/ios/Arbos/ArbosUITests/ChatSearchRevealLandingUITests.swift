@@ -43,7 +43,17 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         if allowGrow { app.launchEnvironment["ARBOS_REVEAL_ALLOW_GROW"] = "1" }
         app.launch()
         let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
-        XCTAssertTrue(search.waitForExistence(timeout: appear), "the chat header's search disc is on screen")
+        // Poll rather than one long wait, and give up the moment the app is gone. A trap in
+        // the app under test looks identical to a slow Mac for the whole timeout, and four
+        // cases each sat out 150 s of a contended heavy slot before saying so once.
+        let deadline = Date().addingTimeInterval(appear)
+        while !search.exists, Date() < deadline {
+            XCTAssertEqual(app.state, .runningForeground,
+                           "the app is still running (state \(app.state.rawValue)) — it died "
+                           + "before the chat opened, so nothing below this is about the chat")
+            usleep(500_000)
+        }
+        XCTAssertTrue(search.exists, "the chat header's search disc is on screen")
         let field = app.textFields["chat-search-field"]
         for _ in 0..<4 where !field.exists {
             sleep(1)
@@ -163,20 +173,31 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return nil
     }
 
-    /// Tap `id` and say where the transcript came to rest. Identical for every case but the
-    /// row id and whether the near-top grow is allowed to run inside the reveal.
-    private func landing(_ id: String, allowGrow: Bool) {
+    /// Get as far as a touch aimed at `id`, or fail. Everything here is harness, not finding:
+    /// the app launches, the bar opens, the row comes into reach. Kept apart from the landing
+    /// so the symptom arm's expected-failure wrapper cannot swallow a broken rig — it did
+    /// exactly that once, reporting a run whose app died at launch as the symptom reproduced.
+    private func aimed(_ id: String, allowGrow: Bool) -> (app: XCUIApplication, screen: CGRect, point: CGPoint)? {
         let app = openSearch(allowGrow: allowGrow)
         let screen = app.windows.firstMatch.frame
         guard let point = aim(app, screen: screen, at: id) else {
-            return XCTFail("could not bring \(id) into reach after eight nudges "
-                           + "(results: \(describe(bubbles(app))))")
+            XCTFail("could not bring \(id) into reach after eight nudges "
+                    + "(results: \(describe(bubbles(app))))")
+            return nil
         }
+        return (app, screen, point)
+    }
+
+    /// Tap the aimed point and say where the transcript came to rest. Identical for every
+    /// case but the row id and whether the near-top grow may run inside the reveal.
+    private func landing(_ id: String, allowGrow: Bool,
+                         _ aimed: (app: XCUIApplication, screen: CGRect, point: CGPoint)) {
+        let (app, screen, point) = aimed
         let arm = "\(id)/\(allowGrow ? "grow-allowed" : "grow-held")"
         shot(app, "1-\(arm)-aimed")
-        // The test runner's stdout lands in the xcodebuild log, which arrives whatever the
-        // result bundle does. It is the only record of the pre-tap state on a green run, and
-        // the four cases are only comparable if that state matches.
+        // The test runner's stdout lands in the result bundle's Staging tree, which survives
+        // the import that never finishes. It is the only record of the pre-tap state on a
+        // green run, and the four cases are only comparable if that state matches.
         print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
 
         tap(app, at: point)
@@ -203,6 +224,12 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                       "…and centred, not against an edge — \(detail)")
     }
 
+    /// The whole case for an arm that is expected to land.
+    private func run(_ id: String, allowGrow: Bool) {
+        guard let a = aimed(id, allowGrow: allowGrow) else { return }
+        landing(id, allowGrow: allowGrow, a)
+    }
+
     /// The row that rests short, with the near-top grow left as it is on `main`. Measured
     /// twice before this test existed, once from behind a profile pane and once with the chat
     /// frontmost, and both times the transcript came to rest on `long-375`…`long-383` with
@@ -213,11 +240,15 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// lane that has not yet proved it cannot also claim how reliably it fires. The log says
     /// which way it went either way, and `strict: false` keeps the run's verdict about the
     /// other three. It goes away with the rig flag once the mechanism is settled.
+    ///
+    /// Only the landing is inside the expectation. Getting the app up and the touch aimed is
+    /// outside it, so a rig that breaks goes red here instead of passing as a reproduction.
     func testLong408WithTheGrowAllowedIsTheSymptom() {
+        guard let a = aimed("long-408", allowGrow: true) else { return }
         continueAfterFailure = true
         XCTExpectFailure("the near-top grow inside the reveal is the bug under test (#2404)",
                          strict: false) {
-            landing("long-408", allowGrow: true)
+            landing("long-408", allowGrow: true, a)
         }
     }
 
@@ -225,18 +256,18 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// condition between this and the case above, so a difference in the landing is the
     /// grow's doing and nothing else's.
     func testLong408WithTheGrowHeldRestsOnTheMessage() {
-        landing("long-408", allowGrow: false)
+        run("long-408", allowGrow: false)
     }
 
     /// The control row, four further down the same list, with the grow allowed: it lands.
     /// Whatever separates the two rows, it is not the distance from the tail.
     func testLong412WithTheGrowAllowedRestsOnTheMessage() {
-        landing("long-412", allowGrow: true)
+        run("long-412", allowGrow: true)
     }
 
     /// The control row with the hold on, so the hold is shown not to break a landing that
     /// already worked.
     func testLong412WithTheGrowHeldRestsOnTheMessage() {
-        landing("long-412", allowGrow: false)
+        run("long-412", allowGrow: false)
     }
 }

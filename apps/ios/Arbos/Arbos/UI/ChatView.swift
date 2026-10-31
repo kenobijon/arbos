@@ -204,6 +204,10 @@ struct ChatSession: View {
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
     @State private var lastGrowAt = Date.distantPast
+    /// Rig (#2404): while this is in the future the trace reports every scroll offset sample.
+    /// Outside it they are left alone — a chat scroll samples per frame, and a `print` on each
+    /// one changes the thing being measured.
+    @State private var traceOffsetsUntil = Date.distantPast
     /// While a reveal's scroll animation is running (#2404). A grow prepends rows above the
     /// content; the scroll view's bottom anchor absorbs that for a reader sitting still, but
     /// an animation already in flight is driving towards an offset computed before the rows
@@ -291,6 +295,14 @@ struct ChatSession: View {
         guard DebugHooks.traceReveal else { return }
         print("[arbos reveal] t=\(LaunchClock.msSinceLaunch())ms \(what) \(detail())")
         #endif
+    }
+
+    /// A scroll offset for the trace. `NearTopReporter` reports `.infinity` for a content that
+    /// is not taller than its container, which is what the first layout of a chat looks like,
+    /// and `Int(_: CGFloat)` traps on a value that is infinite or NaN. Formatting the number
+    /// was enough to kill the app on every chat open and cost a heavy slot's run.
+    private static func offsetText(_ v: CGFloat) -> String {
+        v.isFinite ? String(Int(v)) : "inf"
     }
 
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
@@ -445,6 +457,9 @@ struct ChatSession: View {
     private func openSearchResult(_ messageId: Id) {
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
         revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) skipEnd=\(windowSkipEnd)")
+        // The reveal lands inside a second; three covers the close, the relayout and the
+        // scroll with room for a slow simulator.
+        traceOffsetsUntil = Date().addingTimeInterval(3)
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
@@ -2134,7 +2149,7 @@ struct ChatSession: View {
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true, onNear: { offset in
-                revealTrace("near-top", "offset=\(Int(offset)) window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                revealTrace("near-top", "offset=\(Self.offsetText(offset)) window=\(windowCount) skipEnd=\(windowSkipEnd) "
                             + "sinceAppear=\(Int(Date().timeIntervalSince(appearedAt) * 1000))ms "
                             + "sinceGrow=\(Int(Date().timeIntervalSince(lastGrowAt) * 1000))ms")
                 // The first layout reports offset 0 before the bottom anchor applies; a
@@ -2160,7 +2175,8 @@ struct ChatSession: View {
                     model.loadOlderChannel(chatId)
                 }
             }, onSample: { old, new in
-                revealTrace("offset", "\(old == .infinity ? "inf" : String(Int(old)))->\(Int(new)) "
+                guard Date() < traceOffsetsUntil else { return }
+                revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new)) "
                             + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
             }))
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`

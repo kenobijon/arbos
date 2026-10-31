@@ -258,4 +258,21 @@ enum DebugHooks {
         return nil
         #endif
     }
+
+    /// One line at boot naming the `ARBOS_` variables this process actually received.
+    ///
+    /// A rig run whose launch environment does not arrive looks exactly like a rig run whose
+    /// app is broken: no fixture, no landing screen, no trace, and a UI test that waits out
+    /// its timeout on an element that was never going to exist. Four cases and a heavy slot
+    /// went on telling those two apart. The line costs one `print` per launch in Debug and
+    /// settles it in the first second of the log.
+    static func logEnvironment() {
+        #if DEBUG
+        let seen = ProcessInfo.processInfo.environment.keys
+            .filter { $0.hasPrefix("ARBOS_") }
+            .sorted()
+        // Values can carry a relay token; the names are what a rig needs and are safe.
+        print("[arbos rig] launch environment: \(seen.isEmpty ? "no ARBOS_ variables" : seen.joined(separator: " "))")
+        #endif
+    }
 }
