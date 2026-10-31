@@ -173,6 +173,13 @@ struct ChatSession: View {
     /// Newest rows dropped below the viewport while reading history; 0 when the
     /// window is the tail of the transcript.
     @State private var windowSkipEnd = 0
+    /// The animated hop a reveal makes to a row the stack has already built.
+    static let revealHop: Double = 0.35
+    /// How long `settleOnRevealed` waits between its corrections, and how many it makes.
+    /// Four over 0.6 s: long enough for the lazy rows around the landing to be measured,
+    /// short enough to be over before the reader could have started scrolling themselves.
+    static let revealSettleGap: Double = 0.15
+    static let revealSettleSteps = 4
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -349,17 +356,17 @@ struct ChatSession: View {
     /// The window SLIDES onto the target; it does not stretch back to it from the tail
     /// (#2404). Stretching is what a reveal into older history used to do, and it put every
     /// row between the tail and the target into the stack at once — 107 of them in the
-    /// measured case — all of them above the viewport and none of them measured. The scroll
-    /// that followed was computed against estimated heights, and as those rows were realized
-    /// their true heights (64 to 284 points here, against one estimate) grew the content
-    /// above the viewport and slid the reader forward off the message, by 18 to 35 rows over
-    /// five measured runs. Sliding leaves nothing unmeasured above the target: the window is
-    /// a normal-sized slice that ends a little after it, the bottom anchor puts the reader
-    /// there, and the scroll left to do is a short one over rows that have heights.
+    /// measured case — so the scroll that followed had 172 rows of estimated height between
+    /// it and where it was going, and came to rest 18 to 35 rows away. A slice that ends
+    /// just after the target is one page instead, whatever the distance, and the scroll that
+    /// follows it starts from the bottom anchor a dozen rows away.
+    ///
+    /// Sliding bounds the error; it does not remove it, and the measured landing after this
+    /// change alone was still 13 rows out. `settleOnRevealed` is the other half.
     private func includeInWindow(messageId: Id) -> Bool {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
-        if DebugHooks.revealStretchWindow { return stretchWindowToTail(all: all, ix: ix, messageId: messageId) }
+        if DebugHooks.revealPreFix { return stretchWindowToTail(all: all, ix: ix, messageId: messageId) }
         // Nothing to do when the stack has already built the row: `scrollTo` can reach it and
         // the window is the reader's, not this function's, to change.
         guard !windowedRows.contains(where: { $0.messageId == messageId }) else {
@@ -387,9 +394,9 @@ struct ChatSession: View {
         return true
     }
 
-    /// Rig (`ARBOS_REVEAL_STRETCH_WINDOW=1`, #2404): the reveal windowing as it was before
-    /// the fix — every row between the tail and the target joins the stack at once. Kept so
-    /// one build can measure the symptom beside the fix; it goes away with the rig.
+    /// Rig (`ARBOS_REVEAL_PRE_FIX=1`, #2404): the reveal windowing as it was before the fix —
+    /// every row between the tail and the target joins the stack at once. Kept so one build
+    /// can measure the symptom beside the fix; it goes away with the rig.
     private func stretchWindowToTail(all: [Row], ix: Int, messageId: Id) -> Bool {
         let needed = all.count - ix + Self.windowStep / 2
         revealTrace("include-in-window",
@@ -2472,21 +2479,56 @@ struct ChatSession: View {
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
+        // Before the scroll, so the corrections can tell this reveal from the next one.
+        highlightedMessage = messageId
         if includeInWindow(messageId: messageId) {
             // The window has just moved onto the target, so the rows on screen are not the
             // rows that were there a moment ago. A jump across a hundred rows of history has
             // no animation worth keeping, and an animated scroll over a window that changed
-            // in the same frame is a diff of the whole stack per frame (#2404).
-            DispatchQueue.main.async {
-                withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(target.id, anchor: .center) }
-            }
+            // in the same frame makes SwiftUI diff the whole stack per frame. Let the moved
+            // window lay out first.
+            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId, animated: false) }
         } else {
-            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+            settleOnRevealed(target.id, messageId: messageId, animated: true)
         }
-        highlightedMessage = messageId
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
+        }
+    }
+
+    /// Scroll onto a revealed row, then scroll onto it again as the rows gain real heights.
+    ///
+    /// `scrollTo` on a `LazyVStack` is resolved against *estimated* heights for every row the
+    /// stack has not laid out, and a reveal into older history has just moved the window, so
+    /// at the moment of the first call almost nothing around the destination is measured. One
+    /// scroll therefore lands wherever the estimate error puts it, and on a 420-row fixture
+    /// group that is tens of rows away with the message not even realized (#2404): 18 to 35
+    /// rows *newer* than it when the window stretched back to the tail, and 13 rows *older*
+    /// than it when the window slid onto it. Same fault, opposite signs — which is why the
+    /// shape of the window alone cannot be the whole fix.
+    ///
+    /// Each repeat is resolved against a layout that knows more than the last one did, so the
+    /// error shrinks with every pass. The ladder is deliberately short and stands down the
+    /// moment another reveal claims the highlight: a correction that outlived the jump would
+    /// be fighting the reader's own scroll, and `settleToBottom` corrects the tail the same
+    /// way and for the same reason.
+    private func settleOnRevealed(_ rowId: String, messageId: Id, animated: Bool) {
+        if animated {
+            withAnimation(.easeInOut(duration: Self.revealHop)) { scroller?.scrollTo(rowId, anchor: .center) }
+        } else {
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+        }
+        guard !DebugHooks.revealPreFix else { return }
+        // An animated hop owns the scroll view until its curve ends; correcting into it would
+        // cancel the animation the reader is watching.
+        let first = (animated ? Self.revealHop : 0) + Self.revealSettleGap
+        for step in 0..<Self.revealSettleSteps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + first + Double(step) * Self.revealSettleGap) {
+                guard highlightedMessage == messageId else { return }
+                revealTrace("settle", "id=\(messageId) step=\(step) offset=\(Self.offsetText(scrollProbe.last))")
+                withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+            }
         }
     }
 

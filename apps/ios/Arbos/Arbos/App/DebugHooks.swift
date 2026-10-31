@@ -35,10 +35,11 @@ enum DebugHooks {
     /// scroll offset that triggered it. A reveal that lands short does so because something
     /// moved the content under it, and this says what and when.
     static var traceReveal: Bool { value("ARBOS_TRACE_REVEAL") == "1" }
-    /// Rig (#2404): reveal into older history by stretching the row window back to the tail,
-    /// as the code did before the fix, so one build can measure the symptom beside the fix.
-    /// Goes away with the rig; nothing but a measurement should ever set it.
-    static var revealStretchWindow: Bool { value("ARBOS_REVEAL_STRETCH_WINDOW") == "1" }
+    /// Rig (#2404): reveal a message the way the code did before the fix — stretch the row
+    /// window back to the tail, then one `scrollTo` and no correction — so one build can
+    /// measure the symptom beside the fix. Goes away with the rig; nothing but a measurement
+    /// should ever set it.
+    static var revealPreFix: Bool { value("ARBOS_REVEAL_PRE_FIX") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
     static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }

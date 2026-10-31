@@ -7,17 +7,20 @@ import XCTest
 /// the frontmost check: the chat is in front, the bar has gone, nothing covers the message —
 /// the transcript has simply come to rest somewhere else.
 ///
-/// **What the cases vary is how the reveal brings the target into the row window.** A hit
-/// among the newest is in the window already and needs nothing. A hit the reader scrolled
-/// back to is not, and the symptom arm reaches it the old way — stretch the window back from
-/// the tail — against the fix's way — slide the window onto it. Everything else is identical:
-/// same keyword, same tap point in the bubble's bottom padding clear of every button, same
-/// settle.
+/// **What the cases vary is whether the tapped result is inside the row window, and whether
+/// the reveal is the one from before the fix.** A hit among the newest is in the window
+/// already and needs nothing. A hit the reader scrolled back to is not, and reaching it means
+/// moving the window and then scrolling into rows the `LazyVStack` has never laid out.
+/// Everything else is identical: same keyword, same tap point in the bubble's bottom padding
+/// clear of every button, same settle.
 ///
-/// Two earlier explanations were measured and ruled out, which is why neither is a case here.
+/// Three earlier explanations were measured and ruled out, which is why none is a case here.
 /// A near-top window grow firing inside the reveal: across four launches the trace recorded
-/// no grow at all. The animation on the scroll that follows the window change: unanimated, it
-/// landed in the same wrong place twice out of two.
+/// no grow at all. The animation on the scroll: unanimated, it landed in the same wrong place
+/// twice out of two. The shape of the window on its own: sliding it onto the target instead
+/// of stretching it back to the tail moved the landing from 18–35 rows *newer* than the
+/// message to 13 rows *older* than it, twice out of two — the same fault with its sign
+/// flipped, which is what showed the estimate itself to be the mechanism.
 ///
 /// The first run of this file also varied the wrong thing. It tapped two named rows four
 /// apart in the list and both landed, with byte-identical offset trajectories from the same
@@ -37,7 +40,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func openSearch(stretch: Bool) -> XCUIApplication {
+    private func openSearch(preFix: Bool) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = [
             "ARBOS_FIXTURE": "1",
@@ -46,7 +49,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             // The app prints what moves the transcript; the run's stdout is the evidence.
             "ARBOS_TRACE_REVEAL": "1",
         ]
-        if stretch { app.launchEnvironment["ARBOS_REVEAL_STRETCH_WINDOW"] = "1" }
+        if preFix { app.launchEnvironment["ARBOS_REVEAL_PRE_FIX"] = "1" }
         app.launch()
         let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
         // Poll rather than one long wait, and give up the moment the app is gone. A trap in
@@ -170,9 +173,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// from the landing so the symptom arm's expected-failure wrapper cannot swallow a broken
     /// rig — it did exactly that once, reporting a run whose app died at launch as a
     /// reproduction.
-    private func aimed(scrollUp: Int, stretch: Bool)
+    private func aimed(scrollUp: Int, preFix: Bool)
         -> (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)? {
-        let app = openSearch(stretch: stretch)
+        let app = openSearch(preFix: preFix)
         let screen = app.windows.firstMatch.frame
         for _ in 0..<scrollUp { nudge(app, band: reachable(app, screen: screen)) }
         for _ in 0..<4 {
@@ -224,43 +227,41 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// symptom is being hunted in: the landing is recorded rather than asserted, because a
     /// lane that has not yet reproduced a thing cannot also claim how reliably it fires.
     /// Launching and aiming stay outside the expectation, so a broken rig goes red there.
-    private func run(scrollUp: Int, stretch: Bool, expectShort: Bool = false) {
-        let arm = "up\(scrollUp)/\(stretch ? "stretch" : "slide")"
-        guard let a = aimed(scrollUp: scrollUp, stretch: stretch) else { return }
+    private func run(scrollUp: Int, preFix: Bool, expectShort: Bool = false) {
+        let arm = "up\(scrollUp)/\(preFix ? "pre-fix" : "fixed")"
+        guard let a = aimed(scrollUp: scrollUp, preFix: preFix) else { return }
         guard expectShort else { return landing(arm, a) }
         continueAfterFailure = true
-        XCTExpectFailure("the window stretched back to the tail (#2404)", strict: false) { landing(arm, a) }
+        XCTExpectFailure("the reveal as it was before the fix (#2404)", strict: false) { landing(arm, a) }
     }
 
     /// The control: the reader taps a result without scrolling the list. The hit is one of
-    /// the newest, so it is already inside the row window, the reveal has no window to move,
-    /// and it lands. Measured correct three times.
+    /// the newest, so it is already inside the row window and the reveal has no window to
+    /// move. Measured correct four times.
     func testAResultAlreadyInTheWindowLands() {
-        run(scrollUp: 0, stretch: false)
+        run(scrollUp: 0, preFix: false)
     }
 
     /// The reader scrolls back through the results before tapping one — the ordinary way of
     /// hunting something that is not the most recent mention of it, and what #2404 describes.
-    /// The hit is then outside the row window, and this arm reaches it the way the code used
-    /// to: stretch the window back from the tail, which puts every row in between into the
-    /// stack at once — 107 of them here — and scroll into rows nothing has laid out.
+    /// The hit is then outside the row window, and this arm reveals it the way the code used
+    /// to: stretch the window back from the tail, then one `scrollTo` and no correction.
     ///
-    /// Measured short five times out of five, resting 18 to 35 rows away with the target
-    /// never realized. Two of those five scrolled without an animation and landed exactly as
-    /// short, which is what ruled the animation out.
-    func testAResultOutsideTheWindowIsTheSymptomWhenTheWindowStretchesToTheTail() {
-        run(scrollUp: 14, stretch: true, expectShort: true)
+    /// Measured short six times out of six, resting 18 to 35 rows newer than the message
+    /// with the message never realized.
+    func testAResultOutsideTheWindowIsTheSymptomBeforeTheFix() {
+        run(scrollUp: 14, preFix: true, expectShort: true)
     }
 
-    /// The same reveal with the fix: the window slides onto the target instead of stretching
-    /// back to it, so no unmeasured row is left above the message to grow under the reader.
-    func testAResultOutsideTheWindowLandsWhenTheWindowSlidesOntoIt() {
-        run(scrollUp: 14, stretch: false)
+    /// The same reveal with the fix: the window slides onto the target rather than stretching
+    /// back to it, and the scroll is corrected as the rows gain real heights.
+    func testAResultOutsideTheWindowLandsAfterTheFix() {
+        run(scrollUp: 14, preFix: false)
     }
 
     /// The fix again. One correct landing says nothing about a fault that only shows
     /// sometimes, and the symptom arm above is the thing that establishes the rate.
-    func testAResultOutsideTheWindowLandsWhenTheWindowSlidesOntoItAgain() {
-        run(scrollUp: 14, stretch: false)
+    func testAResultOutsideTheWindowLandsAfterTheFixAgain() {
+        run(scrollUp: 14, preFix: false)
     }
 }
