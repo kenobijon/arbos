@@ -157,9 +157,20 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// `main`, where nothing suppresses those buttons, so the clearance is asserted.
     private func aimable(_ app: XCUIApplication, screen: CGRect) -> (id: String, point: CGPoint)? {
         let band = reachable(app, screen: screen)
-        for (id, frame) in bubbles(app) {
+        let all = bubbles(app)
+        for (id, frame) in all {
             let point = CGPoint(x: frame.midX, y: frame.maxY - 5)
             guard band.contains(point), frame.height > 24 else { continue }
+            // The point must belong to this row and to no other. Result rows are reported
+            // with frames that touch and sometimes overlap by a point or two, and 5 points
+            // inside the bottom edge is not enough clearance to be sure which row a touch
+            // reaches. A run of this suite on iOS 26.2 aimed at a row whose bottom edge was
+            // y180 while the next row's top edge was y175: the two overlap across the exact
+            // band this aims into, the touch went to the neighbour, and the neighbour was
+            // revealed and centred perfectly while the assertion was still about the first
+            // row — which reads as the fix landing tens of rows short.
+            let contenders = all.filter { $0.id != id && $0.frame.insetBy(dx: -2, dy: -2).contains(point) }
+            guard contenders.isEmpty else { continue }
             usleep(400_000)
             let e = app.descendants(matching: .any)[id].firstMatch
             guard e.exists, e.frame == frame else { continue }
@@ -195,6 +206,14 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// Tap the aimed point and say where the transcript came to rest. Identical for every
     /// case but how far up the result list it has scrolled and how the reveal moves the
     /// row window onto the target.
+    ///
+    /// Two guards here exist because of a run that blamed the app for the rig's aim. A
+    /// coordinate tap can reach a row the case is not about — the list moves between
+    /// choosing a point and using it, and neighbouring result rows report frames that touch
+    /// — and the app then reveals the row that was really tapped, correctly and centred,
+    /// while the assertion is still about the other one. That reads as the fix missing by
+    /// tens of rows. So the point is recomputed from a fresh frame immediately before the
+    /// touch, and the row the app actually revealed is checked against the row aimed at.
     private func landing(_ arm: String,
                          _ aimed: (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)) {
         let (app, screen, id, point) = aimed
@@ -210,7 +229,21 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         print("[rig] \(arm) target \(id) at \(point)")
         print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
 
-        tap(app, at: point)
+        // Re-aim from a frame read now, not from the one chosen before the screenshot and
+        // the sixty-element enumeration above. Those take seconds, and the result list can
+        // move in them; the tap then goes to whatever row has slid under the old
+        // coordinate. Re-reading costs one round trip and removes the whole class.
+        let liveTarget = row(app, id)
+        guard liveTarget.exists else {
+            return XCTFail("the aimed row \(id) is gone from the result list before the tap")
+        }
+        let live = liveTarget.frame
+        let aim = CGPoint(x: live.midX, y: live.maxY - 5)
+        if abs(aim.y - point.y) > 1 {
+            print("[rig] \(arm) re-aimed: the list moved \(Int(aim.y - point.y))pt between "
+                  + "choosing \(point) and tapping \(aim)")
+        }
+        tap(app, at: aim)
         let field = app.textFields["chat-search-field"]
         let deadline = Date().addingTimeInterval(settle)
         while field.exists, Date() < deadline { usleep(150_000) }
@@ -220,10 +253,22 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // Frontmost first: a frame means nothing until the chat is what the reader sees.
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
         let resting = bubbles(app)
-        let detail = "tapped \(arm) at \(point); screen \(screen); resting [\(describe(resting))]"
+        let detail = "tapped \(arm) at \(aim); screen \(screen); resting [\(describe(resting))]"
         print("[rig] \(detail)")
         XCTAssertTrue(header.isHittable, "the chat is frontmost — \(detail)")
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
+
+        // Did the touch reach the row this case is about? The app names the message it was
+        // asked to reveal, so a tap that landed on a neighbour fails here, as a mis-aimed
+        // rig, instead of further down as the fix missing by tens of rows. Both iOS 26
+        // failures in this lane were this, and without this line they read as app faults.
+        let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
+        if probe.exists, let revealedId = probe.value as? String, revealedId != "none" {
+            print("[rig] \(arm) app revealed \(revealedId); rig aimed at \(id)")
+            XCTAssertEqual(revealedId, id,
+                           "the tap reached the row this case is about — it reached \(revealedId) "
+                           + "instead, so this run measures the rig, not the fix — \(detail)")
+        }
 
         let revealed = row(app, id)
         // Record the landing before asserting on it, so a run that fails still yields a

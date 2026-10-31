@@ -688,6 +688,9 @@ struct ChatSession: View {
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// Rig (#2404): the last message a reveal was asked for, kept after the highlight fades
+    /// so a UI test can tell a mis-aimed tap from a bad landing. See `revealedMessageProbe`.
+    @State private var lastRevealedMessage: Id?
     /// After a quote tap: the reply we came from. The ↓ disc returns here once
     /// (not to the latest message); cleared on use, send, or a real jump-to-latest.
     @State private var jumpBackTo: Id?
@@ -1976,8 +1979,29 @@ struct ChatSession: View {
             // all. The app says which arm it is in, and the test asserts it before it taps.
             .accessibilityValue(DebugHooks.revealPreFix ? "reveal-pre-fix" : "reveal-fixed")
             .background { searchKeyboardShortcuts }
+            .background { revealedMessageProbe }
         }
         .controlBar()
+    }
+
+    /// Rig (#2404): which message the app was last asked to reveal, where a UI test can read
+    /// it after the highlight has faded.
+    ///
+    /// A result tap is a touch at a coordinate, and a coordinate can land on a row the test
+    /// did not mean. When that happens the app reveals the row that was actually tapped —
+    /// correctly — and a test that asserts about the row it *aimed* at reports a perfectly
+    /// good landing as a failure tens of rows short. That is not hypothetical: it is what
+    /// both iOS 26 failures in this lane turned out to be.
+    ///
+    /// So the app names the row it revealed and the test checks that against the row it
+    /// meant to tap. A mis-tap then fails as a mis-tap instead of being blamed on the fix.
+    @ViewBuilder private var revealedMessageProbe: some View {
+        if DebugHooks.traceReveal {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("reveal-probe")
+                .accessibilityValue(lastRevealedMessage.map(String.init(describing:)) ?? "none")
+        }
     }
 
     private var composerSideInset: CGFloat {
@@ -2559,6 +2583,7 @@ struct ChatSession: View {
         pinnedToBottom = false
         // Before the scroll, so the corrections can tell this reveal from the next one.
         highlightedMessage = messageId
+        lastRevealedMessage = messageId
         if includeInWindow(messageId: messageId) {
             // The window has just moved onto the target, so the rows on screen are not the
             // rows that were there a moment ago. A jump across a hundred rows of history has
